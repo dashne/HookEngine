@@ -12,6 +12,7 @@
 #include <time.h>
 #include <mutex>
 #include <string>
+#include <errno.h>
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -28,16 +29,16 @@ extern "C" bool InstallInlineHook(void*, void*, void**);
 extern "C" void** GetGotAddress(const char*, const char*);
 extern "C" bool HookGotEntry(void**, void*, void**);
 
-// =========================================================================
-// Shared UID storage
-// =========================================================================
+// =====================================================================
+// Shared virtual UID / GID
+// =====================================================================
 int32_t g_virtualUid = 10000;
 int32_t g_virtualGid = 10000;
 void SetVirtualUid(int32_t uid) { g_virtualUid = uid; g_virtualGid = uid; }
 
-// =========================================================================
+// =====================================================================
 // Originals
-// =========================================================================
+// =====================================================================
 int (*_Original_open)(const char*, int, ...) = nullptr;
 int (*_Original_open64)(const char*, int, ...) = nullptr;
 int (*_Original__open_2)(const char*, int) = nullptr;
@@ -48,7 +49,12 @@ int (*_Original_stat)(const char*, struct stat*) = nullptr;
 int (*_Original_lstat)(const char*, struct stat*) = nullptr;
 int (*_Original_stat64)(const char*, struct stat64*) = nullptr;
 int (*_Original_lstat64)(const char*, struct stat64*) = nullptr;
-
+int (*_Original___stat)(const char*, struct stat*) = nullptr;
+int (*_Original___lstat)(const char*, struct stat*) = nullptr;
+int (*_Original___stat64)(const char*, struct stat64*) = nullptr;
+int (*_Original___fstatat64)(int, const char*, struct stat*, int) = nullptr;
+int (*_Original_statx)(int, const char*, int, unsigned int, struct statx*) = nullptr;
+int (*_Original_fstatat)(int, const char*, struct stat*, int) = nullptr;
 int (*_Original_access)(const char*, int) = nullptr;
 int (*_Original_faccessat)(int, const char*, int, int) = nullptr;
 ssize_t (*_Original_readlink)(const char*, char*, size_t) = nullptr;
@@ -59,35 +65,65 @@ int (*_Original_renameat)(int, const char*, int, const char*) = nullptr;
 int (*_Original_mkdir)(const char*, mode_t) = nullptr;
 int (*_Original_mkdirat)(int, const char*, mode_t) = nullptr;
 int (*_Original_rmdir)(const char*) = nullptr;
-int (*_Original_fstatat)(int, const char*, struct stat*, int) = nullptr;
 FILE* (*_Original_fopen)(const char*, const char*) = nullptr;
 FILE* (*_Original_fopen64)(const char*, const char*) = nullptr;
-int (*_Original_statx)(int, const char*, int, unsigned int, struct statx*) = nullptr;
+DIR*  (*_Original_opendir)(const char*) = nullptr;
+struct dirent*   (*_Original_readdir)(DIR*) = nullptr;
 struct dirent64* (*_Original_readdir64)(DIR*) = nullptr;
-struct dirent*    (*_Original_readdir)(DIR*) = nullptr;
 int (*_Original_getdents64)(unsigned int, struct dirent64*, unsigned int) = nullptr;
-DIR* (*_Original_opendir)(const char*) = nullptr;
-int (*_Original___stat)(const char*, struct stat*) = nullptr;
-int (*_Original___lstat)(const char*, struct stat*) = nullptr;
-int (*_Original___fstatat64)(int, const char*, struct stat*, int) = nullptr;
-int (*_Original___stat64)(const char*, struct stat64*) = nullptr;
-
 void* (*_Original_dlopen)(const char*, int) = nullptr;
 void* (*_Original_android_dlopen_ext)(const char*, int, const void*) = nullptr;
 int   (*_Original___system_property_get)(const char*, char*) = nullptr;
 const void* (*_Original___system_property_find)(const char*) = nullptr;
-void  (*_Original___system_property_read_callback)(const void*, void(*)(void*, const char*, const char*, uint32_t), void*) = nullptr;
+void  (*_Original___system_property_read_callback)(
+        const void*, void(*)(void*, const char*, const char*, uint32_t), void*) = nullptr;
 int   (*_Original___system_property_read)(const void*, char*, char*) = nullptr;
 uid_t (*_Original_getuid)() = nullptr;
 uid_t (*_Original_geteuid)() = nullptr;
 gid_t (*_Original_getgid)() = nullptr;
 gid_t (*_Original_getegid)() = nullptr;
 
-// =========================================================================
-// Property spoof table
-// =========================================================================
-struct PropSpoof { const char* name; const char* value; };
+// =====================================================================
+// Path hide list (root-detection)
+// =====================================================================
+static bool ShouldHidePath(const char* path) {
+    if (!path) return false;
+    if (strncmp(path, "/data/adb/",    10) == 0) return true;
+    if (strncmp(path, "/sbin/.magisk", 13) == 0) return true;
+    static const char* kHidden[] = {
+            "/system/bin/su",
+            "/system/xbin/su",
+            "/sbin/su",
+            "/system/sd/xbin/su",
+            "/system/bin/failsafe/su",
+            "/system/xbin/daemonsu",
+            "/system/app/Superuser.apk",
+            "/system/app/SuperSU/SuperSU.apk",
+            "/system/etc/.has_su_daemon",
+            "/system/bin/.ext/.su",
+            "/system/usr/we-need-root/su-backup",
+            nullptr
+    };
+    for (int i = 0; kHidden[i]; i++)
+        if (strcmp(path, kHidden[i]) == 0) return true;
+    return false;
+}
 
+// Filter our own engine files out of directory listings.
+static bool ShouldHideDirent(const char* name) {
+    if (!name) return false;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return false;
+    if (strstr(name, "dualhost"))      return true;
+    if (strstr(name, "libdualcore"))   return true;
+    if (strstr(name, "libhookengine")) return true;
+    if (strstr(name, "ims134"))        return true;
+    return false;
+}
+
+// =====================================================================
+// Property spoof table
+// =====================================================================
+struct PropSpoof { const char* name; const char* value; };
 static const PropSpoof kPropSpoofs[] = {
         {"ro.debuggable",          "0"},
         {"ro.secure",              "1"},
@@ -108,10 +144,6 @@ static const char* LookupSpoof(const char* name) {
     return nullptr;
 }
 
-// Fake prop_info storage — layout matches bionic:
-//   offset 0:  serial (4 bytes)
-//   offset 4:  value  (92 bytes)
-//   offset 96: name   (NUL-terminated)
 #define PROP_VALUE_MAX 92
 struct FakeProp {
     uint32_t serial;
@@ -187,17 +219,17 @@ static int Fake___system_property_read(const void* pi, char* name, char* value) 
     return _Original___system_property_read(pi, name, value);
 }
 
-// =========================================================================
-// UID fakes
-// =========================================================================
+// =====================================================================
+// UID / GID fakes
+// =====================================================================
 static uid_t Fake_getuid()  { return (uid_t)g_virtualUid; }
 static uid_t Fake_geteuid() { return (uid_t)g_virtualUid; }
 static gid_t Fake_getgid()  { return (gid_t)g_virtualGid; }
 static gid_t Fake_getegid() { return (gid_t)g_virtualGid; }
 
-// =========================================================================
+// =====================================================================
 // /proc/self/maps filter
-// =========================================================================
+// =====================================================================
 static std::mutex g_mapsMutex;
 static std::string g_filteredMaps;
 static int64_t g_lastMapsGen = 0;
@@ -222,10 +254,10 @@ static std::string BuildFilteredMaps() {
         size_t eol = raw.find('\n', pos); if (eol == std::string::npos) eol = raw.size();
         std::string line(raw.c_str() + pos, eol - pos);
         bool hide =
-                line.find("com.ims134.dualhost") != std::string::npos ||
+                line.find("com.ims134.dualhost")   != std::string::npos ||
                 line.find("com.ims134.hookengine") != std::string::npos ||
-                line.find("libdualcore.so")      != std::string::npos ||
-                line.find("libhookengine.so")    != std::string::npos;
+                line.find("libdualcore.so")        != std::string::npos ||
+                line.find("libhookengine.so")      != std::string::npos;
         if (!hide) { out.append(raw, pos, eol - pos); out.push_back('\n'); }
         pos = eol + 1;
     }
@@ -263,10 +295,11 @@ static bool IsMapsPath(const char* path) {
     return strcmp(path, pidPath) == 0;
 }
 
-// =========================================================================
+// =====================================================================
 // File I/O fakes
-// =========================================================================
+// =====================================================================
 int Fake_open(const char* path, int flags, ...) {
+    if (ShouldHidePath(path)) { errno = ENOENT; return -1; }
     mode_t mode = 0; bool hasMode = (flags & (O_CREAT | O_TMPFILE)) != 0;
     if (hasMode) { va_list a; va_start(a, flags); mode = va_arg(a, mode_t); va_end(a); }
     if (IsMapsPath(path) && (flags & O_ACCMODE) == O_RDONLY) { int fd = OpenFilteredMapsFd(); if (fd >= 0) return fd; }
@@ -276,6 +309,7 @@ int Fake_open(const char* path, int flags, ...) {
 }
 
 int Fake_open64(const char* path, int flags, ...) {
+    if (ShouldHidePath(path)) { errno = ENOENT; return -1; }
     mode_t mode = 0; bool hasMode = (flags & (O_CREAT | O_TMPFILE)) != 0;
     if (hasMode) { va_list a; va_start(a, flags); mode = va_arg(a, mode_t); va_end(a); }
     if (IsMapsPath(path) && (flags & O_ACCMODE) == O_RDONLY) { int fd = OpenFilteredMapsFd(); if (fd >= 0) return fd; }
@@ -283,103 +317,16 @@ int Fake_open64(const char* path, int flags, ...) {
     const char* p = np.empty() ? path : np.c_str();
     return hasMode ? _Original_open64(p, flags, mode) : _Original_open64(p, flags);
 }
-// statx — stat's newer sibling. File.length() / exists() use this on API 30+.
-int Fake_statx(int dirfd, const char* path, int flags, unsigned int mask, struct statx* buf) {
-    std::string np = RedirectTable::GetInstance().ResolvePath(path);
-    return _Original_statx(dirfd, np.empty() ? path : np.c_str(), flags, mask, buf);
-}
-
-// Filter our own entries out of directory listings. We never hide "." or "..".
-static bool ShouldHideDirent(const char* name) {
-    if (!name) return false;
-    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return false;
-    if (strstr(name, "dualhost"))       return true;
-    if (strstr(name, "libdualcore"))    return true;
-    if (strstr(name, "libhookengine"))  return true;
-    if (strstr(name, "ims134"))         return true;
-    return false;
-}
-
-// readdir64 / readdir — return the next non-hidden entry. Loops internally so the
-// caller never sees a NULL just because we filtered.
-struct dirent64* Fake_readdir64(DIR* dir) {
-    while (true) {
-        struct dirent64* e = _Original_readdir64(dir);
-        if (!e) return nullptr;
-        if (!ShouldHideDirent(e->d_name)) return e;
-    }
-}
-
-struct dirent* Fake_readdir(DIR* dir) {
-    while (true) {
-        struct dirent* e = _Original_readdir(dir);
-        if (!e) return nullptr;
-        if (!ShouldHideDirent(e->d_name)) return e;
-    }
-}
-
-// getdents64 — bulk variant. Filters in-place, returns new byte count.
-// Covers native code that reads directories via raw syscall wrapper.
-int Fake_getdents64(unsigned int fd, struct dirent64* dirp, unsigned int count) {
-    int n = _Original_getdents64(fd, dirp, count);
-    if (n <= 0) return n;
-
-    char* dst = (char*)dirp;
-    char* end = (char*)dirp + n;
-    struct dirent64* d = dirp;
-    int newCount = 0;
-
-    while ((char*)d < end) {
-        size_t reclen = d->d_reclen;
-        if (reclen == 0 || (char*)d + reclen > end) break;   // corrupt / truncated
-        if (!ShouldHideDirent(d->d_name)) {
-            if (dst != (char*)d) memmove(dst, d, reclen);
-            dst += reclen;
-            newCount += reclen;
-        }
-        d = (struct dirent64*)((char*)d + reclen);
-    }
-    return newCount;
-}
-// opendir — redirect the path. Subsequent readdir/readdir64 on the returned
-// DIR* will yield fake dir entries. This is the critical one for File.listFiles().
-DIR* Fake_opendir(const char* path) {
-    std::string np = RedirectTable::GetInstance().ResolvePath(path);
-    return _Original_opendir(np.empty() ? path : np.c_str());
-}
-
-// Fortified variants — bionic's -D_FORTIFY_SOURCE=2 rewrites stat/lstat/fstatat
-// into these. File.length() → Linux_getLength → __stat(...).
-int Fake___stat(const char* p, struct stat* b) {
-    std::string n = RedirectTable::GetInstance().ResolvePath(p);
-    return _Original___stat(n.empty() ? p : n.c_str(), b);
-}
-int Fake___stat64(const char* p, struct stat64* b) {
-    std::string n = RedirectTable::GetInstance().ResolvePath(p);
-    return _Original___stat64(n.empty() ? p : n.c_str(), b);
-}
-int Fake___lstat(const char* p, struct stat* b) {
-    std::string n = RedirectTable::GetInstance().ResolvePath(p);
-    return _Original___lstat(n.empty() ? p : n.c_str(), b);
-}
-int Fake___fstatat64(int d, const char* p, struct stat* b, int f) {
-    if (p && p[0]) {
-        std::string n = RedirectTable::GetInstance().ResolvePath(p);
-        if (!n.empty()) return _Original___fstatat64(d, n.c_str(), b, f);
-    }
-    return _Original___fstatat64(d, p, b, f);
-}
-
-
-
 
 int Fake__open_2(const char* path, int flags) {
+    if (ShouldHidePath(path)) { errno = ENOENT; return -1; }
     if (IsMapsPath(path) && (flags & O_ACCMODE) == O_RDONLY) { int fd = OpenFilteredMapsFd(); if (fd >= 0) return fd; }
     std::string np = RedirectTable::GetInstance().ResolvePath(path);
     return _Original__open_2(np.empty() ? path : np.c_str(), flags);
 }
 
 int Fake_openat(int dfd, const char* path, int flags, ...) {
+    if (ShouldHidePath(path)) { errno = ENOENT; return -1; }
     mode_t mode = 0; bool hasMode = (flags & (O_CREAT | O_TMPFILE)) != 0;
     if (hasMode) { va_list a; va_start(a, flags); mode = va_arg(a, mode_t); va_end(a); }
     if (IsMapsPath(path) && (flags & O_ACCMODE) == O_RDONLY) { int fd = OpenFilteredMapsFd(); if (fd >= 0) return fd; }
@@ -389,6 +336,7 @@ int Fake_openat(int dfd, const char* path, int flags, ...) {
 }
 
 int Fake_openat64(int dfd, const char* path, int flags, ...) {
+    if (ShouldHidePath(path)) { errno = ENOENT; return -1; }
     mode_t mode = 0; bool hasMode = (flags & (O_CREAT | O_TMPFILE)) != 0;
     if (hasMode) { va_list a; va_start(a, flags); mode = va_arg(a, mode_t); va_end(a); }
     if (IsMapsPath(path) && (flags & O_ACCMODE) == O_RDONLY) { int fd = OpenFilteredMapsFd(); if (fd >= 0) return fd; }
@@ -398,12 +346,14 @@ int Fake_openat64(int dfd, const char* path, int flags, ...) {
 }
 
 int Fake__openat_2(int dfd, const char* path, int flags) {
+    if (ShouldHidePath(path)) { errno = ENOENT; return -1; }
     if (IsMapsPath(path) && (flags & O_ACCMODE) == O_RDONLY) { int fd = OpenFilteredMapsFd(); if (fd >= 0) return fd; }
     std::string np = RedirectTable::GetInstance().ResolvePath(path);
     return _Original__openat_2(dfd, np.empty() ? path : np.c_str(), flags);
 }
 
 FILE* Fake_fopen(const char* path, const char* mode) {
+    if (ShouldHidePath(path)) { errno = ENOENT; return nullptr; }
     if (path && mode && IsMapsPath(path) && mode[0] == 'r' && !strchr(mode, '+')) {
         int fd = OpenFilteredMapsFd();
         if (fd >= 0) { FILE* f = fdopen(fd, mode); if (f) return f; close(fd); }
@@ -413,6 +363,7 @@ FILE* Fake_fopen(const char* path, const char* mode) {
 }
 
 FILE* Fake_fopen64(const char* path, const char* mode) {
+    if (ShouldHidePath(path)) { errno = ENOENT; return nullptr; }
     if (path && mode && IsMapsPath(path) && mode[0] == 'r' && !strchr(mode, '+')) {
         int fd = OpenFilteredMapsFd();
         if (fd >= 0) { FILE* f = fdopen(fd, mode); if (f) return f; close(fd); }
@@ -421,22 +372,85 @@ FILE* Fake_fopen64(const char* path, const char* mode) {
     return _Original_fopen64(np.empty() ? path : np.c_str(), mode);
 }
 
-int Fake_stat(const char* p, struct stat* b) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_stat(n.empty() ? p : n.c_str(), b); }
-int Fake_lstat(const char* p, struct stat* b) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_lstat(n.empty() ? p : n.c_str(), b); }
+int Fake_stat(const char* p, struct stat* b) {
+    if (ShouldHidePath(p)) { errno = ENOENT; return -1; }
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original_stat(n.empty() ? p : n.c_str(), b);
+}
+int Fake_lstat(const char* p, struct stat* b) {
+    if (ShouldHidePath(p)) { errno = ENOENT; return -1; }
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original_lstat(n.empty() ? p : n.c_str(), b);
+}
 int Fake_stat64(const char* p, struct stat64* b) {
+    if (ShouldHidePath(p)) { errno = ENOENT; return -1; }
     std::string n = RedirectTable::GetInstance().ResolvePath(p);
     return _Original_stat64(n.empty() ? p : n.c_str(), b);
 }
 int Fake_lstat64(const char* p, struct stat64* b) {
+    if (ShouldHidePath(p)) { errno = ENOENT; return -1; }
     std::string n = RedirectTable::GetInstance().ResolvePath(p);
     return _Original_lstat64(n.empty() ? p : n.c_str(), b);
 }
-
-int Fake_access(const char* p, int m) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_access(n.empty() ? p : n.c_str(), m); }
-int Fake_faccessat(int d, const char* p, int m, int f) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_faccessat(d, n.empty() ? p : n.c_str(), m, f); }
-ssize_t Fake_readlink(const char* p, char* b, size_t s) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_readlink(n.empty() ? p : n.c_str(), b, s); }
-int Fake_unlink(const char* p) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_unlink(n.empty() ? p : n.c_str()); }
-int Fake_unlinkat(int d, const char* p, int f) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_unlinkat(d, n.empty() ? p : n.c_str(), f); }
+int Fake___stat(const char* p, struct stat* b) {
+    if (ShouldHidePath(p)) { errno = ENOENT; return -1; }
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original___stat(n.empty() ? p : n.c_str(), b);
+}
+int Fake___lstat(const char* p, struct stat* b) {
+    if (ShouldHidePath(p)) { errno = ENOENT; return -1; }
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original___lstat(n.empty() ? p : n.c_str(), b);
+}
+int Fake___stat64(const char* p, struct stat64* b) {
+    if (ShouldHidePath(p)) { errno = ENOENT; return -1; }
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original___stat64(n.empty() ? p : n.c_str(), b);
+}
+int Fake___fstatat64(int d, const char* p, struct stat* b, int f) {
+    if (ShouldHidePath(p)) { errno = ENOENT; return -1; }
+    if (p && p[0]) {
+        std::string n = RedirectTable::GetInstance().ResolvePath(p);
+        if (!n.empty()) return _Original___fstatat64(d, n.c_str(), b, f);
+    }
+    return _Original___fstatat64(d, p, b, f);
+}
+int Fake_statx(int d, const char* p, int flags, unsigned int mask, struct statx* b) {
+    if (ShouldHidePath(p)) { errno = ENOENT; return -1; }
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original_statx(d, n.empty() ? p : n.c_str(), flags, mask, b);
+}
+int Fake_fstatat(int d, const char* p, struct stat* b, int f) {
+    if (ShouldHidePath(p)) { errno = ENOENT; return -1; }
+    if (p && p[0]) {
+        std::string n = RedirectTable::GetInstance().ResolvePath(p);
+        if (!n.empty()) return _Original_fstatat(d, n.c_str(), b, f);
+    }
+    return _Original_fstatat(d, p, b, f);
+}
+int Fake_access(const char* p, int m) {
+    if (ShouldHidePath(p)) { errno = ENOENT; return -1; }
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original_access(n.empty() ? p : n.c_str(), m);
+}
+int Fake_faccessat(int d, const char* p, int m, int f) {
+    if (ShouldHidePath(p)) { errno = ENOENT; return -1; }
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original_faccessat(d, n.empty() ? p : n.c_str(), m, f);
+}
+ssize_t Fake_readlink(const char* p, char* b, size_t s) {
+    if (ShouldHidePath(p)) { errno = ENOENT; return -1; }
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original_readlink(n.empty() ? p : n.c_str(), b, s);
+}
+int Fake_unlink(const char* p) {
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original_unlink(n.empty() ? p : n.c_str());
+}
+int Fake_unlinkat(int d, const char* p, int f) {
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original_unlinkat(d, n.empty() ? p : n.c_str(), f);
+}
 int Fake_rename(const char* o, const char* n) {
     std::string a = RedirectTable::GetInstance().ResolvePath(o);
     std::string b = RedirectTable::GetInstance().ResolvePath(n);
@@ -447,20 +461,61 @@ int Fake_renameat(int od, const char* o, int nd, const char* n) {
     std::string b = RedirectTable::GetInstance().ResolvePath(n);
     return _Original_renameat(od, a.empty() ? o : a.c_str(), nd, b.empty() ? n : b.c_str());
 }
-int Fake_mkdir(const char* p, mode_t m) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_mkdir(n.empty() ? p : n.c_str(), m); }
-int Fake_mkdirat(int d, const char* p, mode_t m) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_mkdirat(d, n.empty() ? p : n.c_str(), m); }
-int Fake_rmdir(const char* p) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_rmdir(n.empty() ? p : n.c_str()); }
-int Fake_fstatat(int d, const char* p, struct stat* b, int f) {
-    if (p && p[0]) {
-        std::string n = RedirectTable::GetInstance().ResolvePath(p);
-        if (!n.empty()) return _Original_fstatat(d, n.c_str(), b, f);
-    }
-    return _Original_fstatat(d, p, b, f);
+int Fake_mkdir(const char* p, mode_t m) {
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original_mkdir(n.empty() ? p : n.c_str(), m);
+}
+int Fake_mkdirat(int d, const char* p, mode_t m) {
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original_mkdirat(d, n.empty() ? p : n.c_str(), m);
+}
+int Fake_rmdir(const char* p) {
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original_rmdir(n.empty() ? p : n.c_str());
 }
 
-// =========================================================================
-// dlopen interposers
-// =========================================================================
+// Directory ops — path redirect at opendir, name filter at readdir/getdents64
+DIR* Fake_opendir(const char* path) {
+    std::string np = RedirectTable::GetInstance().ResolvePath(path);
+    return _Original_opendir(np.empty() ? path : np.c_str());
+}
+struct dirent64* Fake_readdir64(DIR* d) {
+    while (true) {
+        struct dirent64* e = _Original_readdir64(d);
+        if (!e) return nullptr;
+        if (!ShouldHideDirent(e->d_name)) return e;
+    }
+}
+struct dirent* Fake_readdir(DIR* d) {
+    while (true) {
+        struct dirent* e = _Original_readdir(d);
+        if (!e) return nullptr;
+        if (!ShouldHideDirent(e->d_name)) return e;
+    }
+}
+int Fake_getdents64(unsigned int fd, struct dirent64* dirp, unsigned int count) {
+    int n = _Original_getdents64(fd, dirp, count);
+    if (n <= 0) return n;
+    char* dst = (char*)dirp;
+    char* end = (char*)dirp + n;
+    struct dirent64* d = dirp;
+    int newCount = 0;
+    while ((char*)d < end) {
+        size_t reclen = d->d_reclen;
+        if (reclen == 0 || (char*)d + reclen > end) break;
+        if (!ShouldHideDirent(d->d_name)) {
+            if (dst != (char*)d) memmove(dst, d, reclen);
+            dst += reclen;
+            newCount += reclen;
+        }
+        d = (struct dirent64*)((char*)d + reclen);
+    }
+    return newCount;
+}
+
+// =====================================================================
+// dlopen / android_dlopen_ext interposers
+// =====================================================================
 static int HookLibraryCallback(struct dl_phdr_info* info, size_t, void*);
 
 void* Fake_dlopen(const char* name, int flags) {
@@ -470,7 +525,6 @@ void* Fake_dlopen(const char* name, int flags) {
     if (h && name) { LOGD("dlopen: %s -> rescan", name); dl_iterate_phdr(HookLibraryCallback, nullptr); }
     return h;
 }
-
 void* Fake_android_dlopen_ext(const char* name, int flags, const void* extinfo) {
     if (!_Original_android_dlopen_ext)
         _Original_android_dlopen_ext = (decltype(_Original_android_dlopen_ext))dlsym(RTLD_DEFAULT, "android_dlopen_ext");
@@ -480,9 +534,9 @@ void* Fake_android_dlopen_ext(const char* name, int flags, const void* extinfo) 
     return h;
 }
 
-// =========================================================================
+// =====================================================================
 // Whitelist
-// =========================================================================
+// =====================================================================
 static bool ShouldHook(const char* name) {
     if (!name || !name[0]) return false;
     if (strstr(name, "libhookengine.so") || strstr(name, "libdualcore.so")) return false;
@@ -509,72 +563,62 @@ static bool ShouldHook(const char* name) {
 
 static int HookLibraryCallback(struct dl_phdr_info* info, size_t, void*) {
     if (!info->dlpi_name || !info->dlpi_name[0]) return 0;
-    if (strstr(info->dlpi_name, "libhookengine.so") || strstr(info->dlpi_name, "libdualcore.so")) return 0;
+    if (strstr(info->dlpi_name, "libhookengine.so") ||
+        strstr(info->dlpi_name, "libdualcore.so")) return 0;
     if (strstr(info->dlpi_name, "/libc.so")) return 0;
 
-    // ---- Safe everywhere: loader + property API ----
+    // ---------- SAFE EVERYWHERE: loader + property ----------
     PATCH_ALIAS("dlopen", Fake_dlopen, _Original_dlopen);
     PATCH_ALIAS("android_dlopen_ext", Fake_android_dlopen_ext, _Original_android_dlopen_ext);
 
-    { void** ga = GetGotAddress(info->dlpi_name, "__system_property_get");
-        if (ga && HookGotEntry(ga, (void*)Fake___system_property_get, (void**)&_Original___system_property_get))
-            LOGD("  hooked __system_property_get in %s", info->dlpi_name); }
-    { void** ga = GetGotAddress(info->dlpi_name, "__system_property_find");
-        if (ga && HookGotEntry(ga, (void*)Fake___system_property_find, (void**)&_Original___system_property_find))
-            LOGD("  hooked __system_property_find in %s", info->dlpi_name); }
-    { void** ga = GetGotAddress(info->dlpi_name, "__system_property_read_callback");
-        if (ga && HookGotEntry(ga, (void*)Fake___system_property_read_callback, (void**)&_Original___system_property_read_callback))
-            LOGD("  hooked __system_property_read_callback in %s", info->dlpi_name); }
-    { void** ga = GetGotAddress(info->dlpi_name, "__system_property_read");
-        if (ga && HookGotEntry(ga, (void*)Fake___system_property_read, (void**)&_Original___system_property_read))
-            LOGD("  hooked __system_property_read in %s", info->dlpi_name); }
+    PATCH_ALIAS("__system_property_get",  Fake___system_property_get,  _Original___system_property_get);
+    PATCH_ALIAS("__system_property_find", Fake___system_property_find, _Original___system_property_find);
+    PATCH_ALIAS("__system_property_read_callback",
+                Fake___system_property_read_callback, _Original___system_property_read_callback);
+    PATCH_ALIAS("__system_property_read", Fake___system_property_read, _Original___system_property_read);
 
-    // ---- Whitelisted only: file I/O + UID ----
+    // ---------- WHITELIST ONLY: file I/O + UID ----------
     if (!ShouldHook(info->dlpi_name)) return 0;
 
-    PATCH(open,        Fake_open);
-    PATCH(open64,      Fake_open64);
-    PATCH(openat,      Fake_openat);
-    PATCH(openat64,    Fake_openat64);
-    PATCH(stat,        Fake_stat);
-    PATCH(lstat,       Fake_lstat);
-    PATCH(stat64,      Fake_stat64);
-    PATCH(lstat64,     Fake_lstat64);
-    PATCH(access,      Fake_access);
-    PATCH(faccessat,   Fake_faccessat);
-    PATCH(readlink,    Fake_readlink);
-    PATCH(unlink,      Fake_unlink);
-    PATCH(unlinkat,    Fake_unlinkat);
-    PATCH(rename,      Fake_rename);
-    PATCH(renameat,    Fake_renameat);
-    PATCH(mkdir,       Fake_mkdir);
-    PATCH(mkdirat,     Fake_mkdirat);
-    PATCH(rmdir,       Fake_rmdir);
-    PATCH(fstatat,     Fake_fstatat);
-    PATCH(fopen,       Fake_fopen);
-    PATCH(fopen64,     Fake_fopen64);
-    PATCH(statx,     Fake_statx);
-    PATCH(readdir64, Fake_readdir64);
-    PATCH(readdir,   Fake_readdir);
+    PATCH(open,       Fake_open);
+    PATCH(open64,     Fake_open64);
+    PATCH(openat,     Fake_openat);
+    PATCH(openat64,   Fake_openat64);
+    PATCH(stat,       Fake_stat);
+    PATCH(lstat,      Fake_lstat);
+    PATCH(stat64,     Fake_stat64);
+    PATCH(lstat64,    Fake_lstat64);
+    PATCH(fstatat,    Fake_fstatat);
+    PATCH(statx,      Fake_statx);
+    PATCH(access,     Fake_access);
+    PATCH(faccessat,  Fake_faccessat);
+    PATCH(readlink,   Fake_readlink);
+    PATCH(unlink,     Fake_unlink);
+    PATCH(unlinkat,   Fake_unlinkat);
+    PATCH(rename,     Fake_rename);
+    PATCH(renameat,   Fake_renameat);
+    PATCH(mkdir,      Fake_mkdir);
+    PATCH(mkdirat,    Fake_mkdirat);
+    PATCH(rmdir,      Fake_rmdir);
+    PATCH(fopen,      Fake_fopen);
+    PATCH(fopen64,    Fake_fopen64);
+    PATCH(opendir,    Fake_opendir);
+    PATCH(readdir,    Fake_readdir);
+    PATCH(readdir64,  Fake_readdir64);
     PATCH(getdents64, Fake_getdents64);
-    PATCH(opendir,       Fake_opendir);
-    PATCH(readdir,       Fake_readdir);
-    PATCH(__stat,        Fake___stat);
-    PATCH(__stat64,      Fake___stat64);
-    PATCH(__lstat,       Fake___lstat);
-    PATCH(__fstatat64,   Fake___fstatat64);
+    PATCH(getuid,     Fake_getuid);
+    PATCH(geteuid,    Fake_geteuid);
+    PATCH(getgid,     Fake_getgid);
+    PATCH(getegid,    Fake_getegid);
 
-    PATCH(getuid,      Fake_getuid);
-    PATCH(geteuid,     Fake_geteuid);
-    PATCH(getgid,      Fake_getgid);
-    PATCH(getegid,     Fake_getegid);
+    // __-prefixed — cannot use PATCH macro; do by hand
+    PATCH_ALIAS("__open_2",    Fake__open_2,    _Original__open_2);
+    PATCH_ALIAS("__openat_2",  Fake__openat_2,  _Original__openat_2);
+    PATCH_ALIAS("__stat",      Fake___stat,     _Original___stat);
+    PATCH_ALIAS("__lstat",     Fake___lstat,    _Original___lstat);
+    PATCH_ALIAS("__stat64",    Fake___stat64,   _Original___stat64);
+    PATCH_ALIAS("__fstatat64", Fake___fstatat64,_Original___fstatat64);
 
-    { void** ga = GetGotAddress(info->dlpi_name, "__open_2");
-        if (ga && HookGotEntry(ga, (void*)Fake__open_2, (void**)&_Original__open_2))
-            LOGD("  hooked __open_2 in %s", info->dlpi_name); }
-    { void** ga = GetGotAddress(info->dlpi_name, "__openat_2");
-        if (ga && HookGotEntry(ga, (void*)Fake__openat_2, (void**)&_Original__openat_2))
-            LOGD("  hooked __openat_2 in %s", info->dlpi_name); }
     return 0;
 }
 

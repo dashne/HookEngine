@@ -3,9 +3,11 @@
 #include <android/log.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <string.h>
+#include <pthread.h>
 #include "Hooks.h"
 #include "RedirectTable.h"
 
@@ -13,11 +15,46 @@
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+// =============================================================
+// Binder.getCallingUid — caller-context-aware spoof
+//
+// The saved "original" pointer from ArtMethod+24 is NOT reliable
+// on this ROM — calling it faults. So we never call it. Instead:
+//
+//   1) If tls_inSystemCall is set → we're inside our own proxy
+//      calling into the framework. Return real UID (syscall).
+//   2) If the current thread's name starts with "Binder:" → we're
+//      a binder callback thread (framework calling into us).
+//      Return real UID.
+//   3) Otherwise → guest code. Return the virtual UID.
+//
+// Thread-name detection is the standard pattern used by
+// VirtualApp / Island / Shelter for exactly this reason.
+// =============================================================
+
+static __thread int tls_inSystemCall = 0;
+static bool _binderCallbackLogged = false;
+
 extern "C" int32_t JNICALL FakeBinderGetCallingUid(JNIEnv*, jclass) {
+    // (1) Explicit system-call scope
+    if (tls_inSystemCall) {
+        return (int32_t)syscall(SYS_getuid);
+    }
+
+    // (2) Binder callback thread — name is "Binder:NNNN_X"
+    char tname[32] = {0};
+    if (pthread_getname_np(pthread_self(), tname, sizeof(tname)) == 0 &&
+        strncmp(tname, "Binder:", 7) == 0) {
+        if (!_binderCallbackLogged) {
+            _binderCallbackLogged = true;
+            LOGD("Binder.getCallingUid: callback thread (tname=%s) -> real UID", tname);
+        }
+        return (int32_t)syscall(SYS_getuid);
+    }
+
+    // (3) Guest app path
     return g_virtualUid;
 }
-typedef int32_t (*GetCallingUidFunc)(JNIEnv*, jclass);
-GetCallingUidFunc _OriginalGetCallingUid = nullptr;
 
 bool HookJavaMethod(JNIEnv* env, jobject methodObj, void* newFunc, void** originalFunc) {
     jmethodID methodId = env->FromReflectedMethod(methodObj);
@@ -39,7 +76,7 @@ bool HookJavaMethod(JNIEnv* env, jobject methodObj, void* newFunc, void** origin
     }
     if (!entryPoint) { LOGE("no native entry in ArtMethod"); return false; }
 
-    *originalFunc = *entryPoint;
+    *originalFunc = *entryPoint;   // saved for logging only — NOT called
     long ps = sysconf(_SC_PAGESIZE);
     uintptr_t pg = (uintptr_t)entryPoint & ~(ps - 1);
     if (mprotect((void*)pg, ps, PROT_READ | PROT_WRITE) != 0) return false;
@@ -53,10 +90,16 @@ bool HookJavaMethod(JNIEnv* env, jobject methodObj, void* newFunc, void** origin
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_ims134_hookengine_RemoteService_hookBinderMethod(JNIEnv* env, jobject, jobject methodObj) {
-    if (HookJavaMethod(env, methodObj, (void*)FakeBinderGetCallingUid, (void**)&_OriginalGetCallingUid))
+    void* saved = nullptr;
+    if (HookJavaMethod(env, methodObj, (void*)FakeBinderGetCallingUid, &saved))
         LOGD("JNI Hook installed.");
     else
         LOGE("JNI Hook failed.");
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_RemoteService_setInSystemCall(JNIEnv*, jobject, jboolean on) {
+    tls_inSystemCall = on ? 1 : 0;
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -81,7 +124,9 @@ Java_com_ims134_hookengine_RemoteService_addRedirectRule(
     env->ReleaseStringUTFChars(to, t);
 }
 
-// ---- Inline hook test ----
+// =============================================================
+// Inline hook (Item 4)
+// =============================================================
 extern "C" bool InstallInlineHook(void*, void*, void**);
 static pid_t (*_Original_getpid)() = nullptr;
 static pid_t Fake_getpid() { return 12345; }
@@ -100,7 +145,9 @@ Java_com_ims134_hookengine_RemoteService_inlineHookGetpid(JNIEnv*, jobject) {
     return ok ? JNI_TRUE : JNI_FALSE;
 }
 
-// ---- HiddenApi ----
+// =============================================================
+// HiddenApi probes (0 on API 37 — greylist @hide works anyway)
+// =============================================================
 extern "C" int HiddenApi_Install();
 extern "C" int HiddenApi_Probe();
 
@@ -108,93 +155,7 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_RemoteService_hiddenApiProbe(JNIEnv*, jobject) {
     return HiddenApi_Probe();
 }
-
 extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_RemoteService_hiddenApiInstall(JNIEnv*, jobject) {
     return HiddenApi_Install();
 }
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_ims134_hookengine_RemoteService_setHiddenApiExemptionsNative(
-        JNIEnv* env, jobject) {
-    jclass vmRuntimeClass = env->FindClass("dalvik/system/VMRuntime");
-    if (!vmRuntimeClass) {
-        LOGE("VMRuntime class missing"); env->ExceptionClear(); return JNI_FALSE;
-    }
-    jmethodID getRuntime = env->GetStaticMethodID(
-            vmRuntimeClass, "getRuntime", "()Ldalvik/system/VMRuntime;");
-    if (!getRuntime) {
-        LOGE("getRuntime not found"); env->ExceptionClear(); return JNI_FALSE;
-    }
-    jmethodID setExemptions = env->GetMethodID(
-            vmRuntimeClass, "setHiddenApiExemptions", "([Ljava/lang/String;)V");
-    if (!setExemptions) {
-        LOGE("setHiddenApiExemptions not found"); env->ExceptionClear(); return JNI_FALSE;
-    }
-    jobject runtime = env->CallStaticObjectMethod(vmRuntimeClass, getRuntime);
-    if (env->ExceptionCheck() || !runtime) {
-        LOGE("getRuntime failed"); env->ExceptionDescribe(); env->ExceptionClear(); return JNI_FALSE;
-    }
-    jclass stringClass = env->FindClass("java/lang/String");
-    jstring prefix = env->NewStringUTF("L");
-    jobjectArray arr = env->NewObjectArray(1, stringClass, prefix);
-    env->CallVoidMethod(runtime, setExemptions, arr);
-    if (env->ExceptionCheck()) {
-        LOGE("setHiddenApiExemptions threw"); env->ExceptionDescribe(); env->ExceptionClear(); return JNI_FALSE;
-    }
-    LOGD("setHiddenApiExemptions([\"L\"]) succeeded");
-    return JNI_TRUE;
-}
-
-// ============================================================
-// Item 1: unhideMethod — clear hidden API classification on a Method
-// ============================================================
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_ims134_hookengine_RemoteService_unhideMethod(JNIEnv* env, jobject, jobject methodObj) {
-    jmethodID mid = env->FromReflectedMethod(methodObj);
-    if (!mid) { LOGE("unhideMethod: jmethodID null"); return JNI_FALSE; }
-    uint8_t* artMethod = (uint8_t*)mid;
-
-    // ArtMethod::access_flags_ is at offset 4 on 64-bit ART (API 26 through 37).
-    uint32_t* flags = (uint32_t*)(artMethod + 4);
-    uint32_t oldFlags = *flags;
-
-    long ps = sysconf(_SC_PAGESIZE);
-    uintptr_t pg = (uintptr_t)flags & ~(ps - 1);
-    bool mp = mprotect((void*)pg, ps, PROT_READ | PROT_WRITE) == 0;
-
-    // Standard access flags are in bits 0..15 (kAccPublic..kAccConstructor).
-    // Hidden-API ApiList + runtime flags are in bits 16..31.
-    // Clearing upper 16 = "not classified, not blocked". kAccNative lives at
-    // bit 8 (0x0100), so native methods stay native.
-    uint32_t newFlags = oldFlags & 0x0000FFFF;
-    *flags = newFlags;
-
-    if (mp) mprotect((void*)pg, ps, PROT_READ);
-
-    LOGD("unhideMethod: 0x%08x -> 0x%08x (native=%d)",
-         oldFlags, newFlags, (newFlags & 0x0100) != 0);
-    return JNI_TRUE;
-}
-
-// Same trick for a Field: ArtField has access_flags_ at offset 4 on 64-bit.
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_ims134_hookengine_RemoteService_unhideField(JNIEnv* env, jobject, jobject fieldObj) {
-    jfieldID fid = env->FromReflectedField(fieldObj);
-    if (!fid) { LOGE("unhideField: jfieldID null"); return JNI_FALSE; }
-    uint8_t* artField = (uint8_t*)fid;
-    uint32_t* flags = (uint32_t*)(artField + 4);
-    uint32_t oldFlags = *flags;
-
-    long ps = sysconf(_SC_PAGESIZE);
-    uintptr_t pg = (uintptr_t)flags & ~(ps - 1);
-    bool mp = mprotect((void*)pg, ps, PROT_READ | PROT_WRITE) == 0;
-
-    uint32_t newFlags = oldFlags & 0x0000FFFF;
-    *flags = newFlags;
-
-    if (mp) mprotect((void*)pg, ps, PROT_READ);
-    LOGD("unhideField: 0x%08x -> 0x%08x", oldFlags, newFlags);
-    return JNI_TRUE;
-}
-
