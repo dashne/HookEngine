@@ -14,6 +14,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         test_item1.cpp
         test_item2.cpp
         test_item3.cpp
+        test_item4.cpp
+        test_item5.cpp
 )
 
 find_library(log-lib log)

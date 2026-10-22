@@ -1,17 +1,18 @@
 #include <jni.h>
 #include <string>
 #include <android/log.h>
+#include <android/api-level.h>
 #include <dlfcn.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
 #include <pthread.h>
 #include <time.h>
 #include <atomic>
 #include <fcntl.h>
-#include <android/api-level.h>
 #include "Hooks.h"
 #include "RedirectTable.h"
 #include "HookRegistry.h"
@@ -42,12 +43,15 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     if (e) g_elemCls = (jclass)env->NewGlobalRef(e);
     if (env->ExceptionCheck()) env->ExceptionClear();
     if (g_threadCls) {
-        g_currentThreadMethod = env->GetStaticMethodID(g_threadCls, "currentThread", "()Ljava/lang/Thread;");
-        g_getStackTraceMethod = env->GetMethodID(g_threadCls, "getStackTrace", "()[Ljava/lang/StackTraceElement;");
+        g_currentThreadMethod = env->GetStaticMethodID(g_threadCls,
+                                                       "currentThread", "()Ljava/lang/Thread;");
+        g_getStackTraceMethod = env->GetMethodID(g_threadCls,
+                                                 "getStackTrace", "()[Ljava/lang/StackTraceElement;");
         if (env->ExceptionCheck()) env->ExceptionClear();
     }
     if (g_elemCls) {
-        g_getClassNameMethod = env->GetMethodID(g_elemCls, "getClassName", "()Ljava/lang/String;");
+        g_getClassNameMethod = env->GetMethodID(g_elemCls,
+                                                "getClassName", "()Ljava/lang/String;");
         if (env->ExceptionCheck()) env->ExceptionClear();
     }
     LOGD("JNI_OnLoad: cached Thread=%p Elem=%p", g_threadCls, g_elemCls);
@@ -88,21 +92,46 @@ static void*  g_hooked_page        = nullptr;
 static int    g_hooked_orig_prot   = 0;
 static long   g_hooked_page_size   = 0;
 
-static constexpr int kMinApi = 34;
+// ─────────────────────────────────────────────────────────────────────────
+// Supported Android API levels — VERIFIED ONLY
+// ─────────────────────────────────────────────────────────────────────────
+// VERIFIED: API 37 (Android 17) on Xiaomi 17T / HyperOS / ARM64 only.
+//
+// The ArtMethod layout, entry-point offset (24), offset scan range
+// (24..48) and mprotect-with-origProt|WRITE behavior have NOT been tested
+// on API 34, 35, 36, or 38+. Installing HookJavaMethod on an unverified
+// API level may silently corrupt ART.
+//
+// The gate refuses to install on anything outside [kMinApi, kMaxApi].
+// To widen the range:
+//   1. Run the full test suite (items 1–6) on a physical device at the
+//      new API level.
+//   2. Confirm all tests pass, particularly `hook_works_when_gate_allows`
+//      and `hook_refused_when_gate_blocks`.
+//   3. Extend kMinApi / kMaxApi and record the verification date.
+// ─────────────────────────────────────────────────────────────────────────
+static constexpr int kMinApi = 37;
 static constexpr int kMaxApi = 37;
 
+extern "C" int g_force_api_override = -1;
+
 extern "C" jint CheckHookCapability() {
-    int api = android_get_device_api_level();
+    int api = (g_force_api_override >= 0) ? g_force_api_override
+                                          : android_get_device_api_level();
     if (api < kMinApi || api > kMaxApi) return HOOK_UNSUPPORTED_API;
     if (sizeof(void*) != 8) return HOOK_UNSUPPORTED_ABI;
     return HOOK_OK;
 }
 
-static HookResult HookJavaMethod(JNIEnv* env, jobject methodObj, void* newFunc, void** originalFunc) {
+static HookResult HookJavaMethod(JNIEnv* env, jobject methodObj,
+                                 void* newFunc, void** originalFunc) {
     jint cap = CheckHookCapability();
     if (cap != HOOK_OK) {
-        LOGE("HookJavaMethod: capability check failed (%d) api=%d",
-             (int)cap, android_get_device_api_level());
+        int eff = (g_force_api_override >= 0) ? g_force_api_override
+                                              : android_get_device_api_level();
+        LOGE("HookJavaMethod: capability check failed (%d) effective_api=%d "
+             "(real=%d, range=[%d,%d])",
+             (int)cap, eff, android_get_device_api_level(), kMinApi, kMaxApi);
         return (HookResult)cap;
     }
 
@@ -193,11 +222,12 @@ Java_com_ims134_hookengine_RemoteService_restoreBinderMethod(JNIEnv*, jobject) {
          (void*)_OriginalGetCallingUid);
 }
 
-// Returns HookResult as int (0 = OK). Callers must check.
 extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_RemoteService_hookBinderMethod(JNIEnv* env, jobject, jobject methodObj) {
+Java_com_ims134_hookengine_RemoteService_hookBinderMethod(
+        JNIEnv* env, jobject, jobject methodObj) {
     void* saved = nullptr;
-    HookResult r = HookJavaMethod(env, methodObj, (void*)FakeBinderGetCallingUid, &saved);
+    HookResult r = HookJavaMethod(env, methodObj,
+                                  (void*)FakeBinderGetCallingUid, &saved);
     if (r == HOOK_OK) {
         _OriginalGetCallingUid = (GetCallingUidFunc)saved;
         LOGD("JNI Hook installed, original=%p", saved);
@@ -207,16 +237,24 @@ Java_com_ims134_hookengine_RemoteService_hookBinderMethod(JNIEnv* env, jobject, 
     return (jint)r;
 }
 
+// ─── Item-5 public diagnostics ────────────────────────────────────────────
 extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_RemoteService_capabilityCheck(JNIEnv*, jobject) {
     return CheckHookCapability();
 }
 
 extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_RemoteService_hookCount(JNIEnv*, jobject) {
-    return (jint)RegistryCount();
+Java_com_ims134_hookengine_RemoteService_realDeviceApi(JNIEnv*, jobject) {
+    return android_get_device_api_level();
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_RemoteService_setApiOverride(JNIEnv*, jobject, jint api) {
+    g_force_api_override = api;
+    return CheckHookCapability();
+}
+
+// ─── Ordinary JNI surface ─────────────────────────────────────────────────
 extern "C" JNIEXPORT void JNICALL
 Java_com_ims134_hookengine_RemoteService_setInSystemCall(JNIEnv*, jobject, jboolean on) {
     if (on) g_systemCallDepth.fetch_add(1, std::memory_order_acq_rel);
@@ -232,6 +270,11 @@ Java_com_ims134_hookengine_RemoteService_setVirtualUid(JNIEnv*, jobject, jint ui
 extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_RemoteService_installNativeHooks(JNIEnv*, jobject) {
     return (jint)InstallHooks();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_RemoteService_hookCount(JNIEnv*, jobject) {
+    return (jint)RegistryCount();
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -266,9 +309,13 @@ Java_com_ims134_hookengine_RemoteService_inlineHookGetpid(JNIEnv*, jobject) {
 extern "C" int HiddenApi_Install();
 extern "C" int HiddenApi_Probe();
 extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_RemoteService_hiddenApiProbe(JNIEnv*, jobject) { return HiddenApi_Probe(); }
+Java_com_ims134_hookengine_RemoteService_hiddenApiProbe(JNIEnv*, jobject) {
+    return HiddenApi_Probe();
+}
 extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_RemoteService_hiddenApiInstall(JNIEnv*, jobject) { return HiddenApi_Install(); }
+Java_com_ims134_hookengine_RemoteService_hiddenApiInstall(JNIEnv*, jobject) {
+    return HiddenApi_Install();
+}
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_ims134_hookengine_RemoteService_diagRawZip(JNIEnv* env, jobject, jstring path) {

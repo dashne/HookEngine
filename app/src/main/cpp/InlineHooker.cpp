@@ -16,6 +16,15 @@
 #define ARM64_BR_X17    0xD61F0220
 
 static std::mutex g_hook_mutex;
+// Deferred-free grace period. Before munmap'ing the relay and trampoline
+// pages during uninstall, sleep this many milliseconds so any caller that
+// branched into the relay just before the target was patched back has time
+// to finish executing (relay executes in ~2ns; 20ms is 10,000,000× margin).
+// Tests override this to a smaller value to keep the stress test fast.
+static long g_uninstall_grace_ms = 100;
+
+extern "C" void SetUninstallGraceMs(long ms) { g_uninstall_grace_ms = ms; }
+extern "C" long GetUninstallGraceMs()        { return g_uninstall_grace_ms; }
 
 static bool ReadPageProt(uintptr_t page, int *outProt) {
     FILE *f = fopen("/proc/self/maps", "r");
@@ -240,24 +249,44 @@ extern "C" bool InstallInlineHook(void* targetFunc, void* fakeFunc, void** origi
 }
 
 extern "C" HookResult UninstallInlineHook(void* targetFunc) {
-    std::lock_guard<std::mutex> lock(g_hook_mutex);
-    HookHandle* h = FindHandle(targetFunc);
-    if (!h || h->type != HT_INLINE) return HOOK_NOT_HOOKED;
-    h->state = HS_REMOVING;
+    void* relay = nullptr;
+    size_t relay_size = 0;
+    void* tramp = nullptr;
+    size_t tramp_size = 0;
 
-    uintptr_t pageStart = (uintptr_t)targetFunc & ~(h->page_size - 1);
-    if (mprotect((void*)pageStart, h->page_size, h->orig_prot | PROT_WRITE) != 0) {
-        h->state = HS_INSTALLED;
-        return HOOK_MPROTECT_FAILED;
+    {
+        std::lock_guard<std::mutex> lock(g_hook_mutex);
+        HookHandle* h = FindHandle(targetFunc);
+        if (!h || h->type != HT_INLINE) return HOOK_NOT_HOOKED;
+        h->state = HS_REMOVING;
+
+        uintptr_t pageStart = (uintptr_t)targetFunc & ~(h->page_size - 1);
+        if (mprotect((void*)pageStart, h->page_size, h->orig_prot | PROT_WRITE) != 0) {
+            h->state = HS_INSTALLED;
+            return HOOK_MPROTECT_FAILED;
+        }
+        *(volatile uint32_t*)targetFunc = (uint32_t)(uintptr_t)h->saved;
+        __builtin___clear_cache((char*)targetFunc, (char*)targetFunc + 4);
+        if (mprotect((void*)pageStart, h->page_size, h->orig_prot) != 0) {
+            h->state = HS_INSTALLED;
+            return HOOK_MPROTECT_FAILED;
+        }
+
+        // Steal the pages so we can free them after the grace period.
+        relay = h->relay; relay_size = h->relay_size;
+        tramp = h->trampoline; tramp_size = h->tramp_size;
+        RegistryFree(h);
     }
-    *(volatile uint32_t*)targetFunc = (uint32_t)(uintptr_t)h->saved;
-    __builtin___clear_cache((char*)targetFunc, (char*)targetFunc + 4);
-    if (mprotect((void*)pageStart, h->page_size, h->orig_prot) != 0) {
-        h->state = HS_INSTALLED;
-        return HOOK_MPROTECT_FAILED;
+    // Mutex released. Concurrent uninstalls no longer serialize on the sleep.
+
+    // ─── Deferred free: caller may still be in relay / trampoline ───
+    if (g_uninstall_grace_ms > 0) {
+        struct timespec ts;
+        ts.tv_sec  = g_uninstall_grace_ms / 1000;
+        ts.tv_nsec = (g_uninstall_grace_ms % 1000) * 1000000L;
+        nanosleep(&ts, nullptr);
     }
-    munmap(h->trampoline, h->tramp_size);
-    if (h->relay) munmap(h->relay, h->relay_size);
-    RegistryFree(h);
+    if (relay) munmap(relay, relay_size);
+    if (tramp) munmap(tramp, tramp_size);
     return HOOK_OK;
 }

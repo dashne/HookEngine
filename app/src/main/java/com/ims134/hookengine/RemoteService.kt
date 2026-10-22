@@ -26,6 +26,8 @@ class RemoteService : Service() {
     external fun runItem1Tests(): String
     external fun runItem2Tests(): String
     external fun runItem3Tests(): String
+    external fun runItem4Tests(realDir: String, fakeDir: String): String
+    external fun runItem5Tests(getCallingUidMethod: java.lang.reflect.Method): String
 
     external fun capabilityCheck(): Int
     external fun hookCount(): Int
@@ -37,7 +39,7 @@ class RemoteService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d("DualCore", "Service started. (v27 — both fields)")
-        Log.d("DualCore","==============================================-------------------------=============================================");
+        Log.d("DualCore","==============================================------------Start---------=============================================");
         try {
             Log.d("DualCore", runItem1Tests())
         } catch (t: Throwable) {
@@ -53,7 +55,22 @@ class RemoteService : Service() {
         } catch (t: Throwable) {
             Log.e("DualCore", "runItem3Tests threw: $t")
         }
+        try {
+            val r4Real = File(filesDir, "real").apply { mkdirs() }
+            val r4Fake = File(filesDir, "fake").apply { mkdirs() }
+            Log.d("DualCore", runItem4Tests(r4Real.absolutePath, r4Fake.absolutePath))
+        } catch (t: Throwable) {
+            Log.e("DualCore", "runItem4Tests threw: $t")
+        }
 
+        try {
+            val m = Binder::class.java.getDeclaredMethod("getCallingUid")
+            Log.d("DualCore", runItem5Tests(m))
+        } catch (t: Throwable) {
+            Log.e("DualCore", "runItem5Tests threw: $t")
+        }
+
+        Log.d("DualCore","==============================================------------End----------=============================================");
         Thread {
             // ============================================================
             // STEP 0 — Diagnostic BEFORE any hooks

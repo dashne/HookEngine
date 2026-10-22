@@ -5,8 +5,8 @@
 #include <unistd.h>
 #include <sys/mman.h>
 #include <android/log.h>
-#include <mutex>
 #include <errno.h>
+#include <mutex>
 #include "HookRegistry.h"
 
 #define LOG_TAG "DualCore"
@@ -21,14 +21,40 @@ struct FindSymbolData {
     void **GotAddress;
 };
 
+// Try to read the ELF header for this object from memory.
+// Returns nullptr if the header can't be located (missing PT_LOAD offset 0).
+static const ElfW(Ehdr)* FindEhdr(struct dl_phdr_info* info) {
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        if (info->dlpi_phdr[i].p_type == PT_LOAD &&
+            info->dlpi_phdr[i].p_offset == 0) {
+            return (const ElfW(Ehdr)*)(info->dlpi_addr +
+                                       info->dlpi_phdr[i].p_vaddr);
+        }
+    }
+    return nullptr;
+}
+
+// Accept only R_AARCH64_JUMP_SLOT (1026, PLT) and R_AARCH64_GLOB_DAT (1025, GOT).
+static bool IsGotRelocation(unsigned long r_info) {
+    uint32_t type = ELF64_R_TYPE(r_info);
+    return type == 1025u || type == 1026u;
+}
+
 static int FindSymbolCallback(struct dl_phdr_info *info, size_t, void *data) {
     auto *fd = (FindSymbolData *) data;
     if (!info->dlpi_name || !strstr(info->dlpi_name, fd->TargetLibName)) return 0;
 
+    // ─── Class and machine validation ───
+    const ElfW(Ehdr)* ehdr = FindEhdr(info);
+    if (!ehdr) return 0;
+    if (ehdr->e_ident[EI_CLASS] != ELFCLASS64) return 0;
+    if (ehdr->e_machine != EM_AARCH64) return 0;
+    // ────────────────────────────────────
+
     ElfW(Dyn) *dyn = nullptr;
     for (int i = 0; i < info->dlpi_phnum; i++) {
         if (info->dlpi_phdr[i].p_type == PT_DYNAMIC) {
-            dyn = (ElfW(Dyn) *) (info->dlpi_addr + info->dlpi_phdr[i].p_vaddr);
+            dyn = (ElfW(Dyn) *)(info->dlpi_addr + info->dlpi_phdr[i].p_vaddr);
             break;
         }
     }
@@ -60,13 +86,22 @@ static int FindSymbolCallback(struct dl_phdr_info *info, size_t, void *data) {
         size_t count = sz / sizeof(ElfW(Rela));
         for (size_t i = 0; i < count; i++) {
             ElfW(Rela) *rel = &arr[i];
+
+            // Reject non-GOT relocation types (e.g. R_AARCH64_RELATIVE)
+            if (!IsGotRelocation(rel->r_info)) continue;
+
             size_t symIdx = ELF64_R_SYM(rel->r_info);
             if (symIdx == 0) continue;
             ElfW(Sym) *sym = &symtab[symIdx];
             if (sym->st_name == 0 || sym->st_name >= strsz) continue;
+
+            // Reject data symbols — we want function entries
+            int st_type = ELF64_ST_TYPE(sym->st_info);
+            if (st_type == STT_OBJECT || st_type == STT_TLS) continue;
+
             const char *name = strtab + sym->st_name;
             if (name && strcmp(name, fd->TargetSymbolName) == 0) {
-                fd->GotAddress = (void **) (info->dlpi_addr + rel->r_offset);
+                fd->GotAddress = (void **)(info->dlpi_addr + rel->r_offset);
                 return true;
             }
         }
@@ -75,7 +110,7 @@ static int FindSymbolCallback(struct dl_phdr_info *info, size_t, void *data) {
 
     if (scan(jmprel, pltrelsz)) return 1;
     if (scan(relaDyn, relaDynSz)) return 1;
-    return 0;  // keep iterating
+    return 0;
 }
 
 extern "C" void **GetGotAddress(const char *libName, const char *symbolName) {
@@ -113,7 +148,6 @@ static bool ReadPageProt(uintptr_t page, int *outProt) {
     return ok;
 }
 
-// Structured result + registry tracking + exact prot restore.
 extern "C" HookResult HookGotEntryEx(void **gotAddress, void *newFunction,
                                      void **originalFunction,
                                      const char *libName, const char *symName,
@@ -189,7 +223,7 @@ extern "C" HookResult HookGotEntryEx(void **gotAddress, void *newFunction,
     if (outHandle) *outHandle = h;
     return HOOK_OK;
 }
-// Back-compat bool wrapper — keeps HiddenApi.cpp and inlineHookGetpid compiling.
+
 extern "C" bool HookGotEntry(void **gotAddress, void *newFunction, void **originalFunction) {
     HookResult r = HookGotEntryEx(gotAddress, newFunction, originalFunction,
                                   nullptr, nullptr, nullptr);
