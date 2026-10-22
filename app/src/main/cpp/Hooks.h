@@ -21,6 +21,9 @@ extern int (*_Original_openat64)(int, const char*, int, ...);
 extern int (*_Original__openat_2)(int, const char*, int);
 extern int (*_Original_stat)(const char*, struct stat*);
 extern int (*_Original_lstat)(const char*, struct stat*);
+extern int (*_Original_stat64)(const char*, struct stat64*);
+extern int (*_Original_lstat64)(const char*, struct stat64*);
+
 extern int (*_Original_access)(const char*, int);
 extern int (*_Original_faccessat)(int, const char*, int, int);
 extern ssize_t (*_Original_readlink)(const char*, char*, size_t);

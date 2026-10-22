@@ -46,6 +46,9 @@ int (*_Original_openat64)(int, const char*, int, ...) = nullptr;
 int (*_Original__openat_2)(int, const char*, int) = nullptr;
 int (*_Original_stat)(const char*, struct stat*) = nullptr;
 int (*_Original_lstat)(const char*, struct stat*) = nullptr;
+int (*_Original_stat64)(const char*, struct stat64*) = nullptr;
+int (*_Original_lstat64)(const char*, struct stat64*) = nullptr;
+
 int (*_Original_access)(const char*, int) = nullptr;
 int (*_Original_faccessat)(int, const char*, int, int) = nullptr;
 ssize_t (*_Original_readlink)(const char*, char*, size_t) = nullptr;
@@ -420,6 +423,15 @@ FILE* Fake_fopen64(const char* path, const char* mode) {
 
 int Fake_stat(const char* p, struct stat* b) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_stat(n.empty() ? p : n.c_str(), b); }
 int Fake_lstat(const char* p, struct stat* b) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_lstat(n.empty() ? p : n.c_str(), b); }
+int Fake_stat64(const char* p, struct stat64* b) {
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original_stat64(n.empty() ? p : n.c_str(), b);
+}
+int Fake_lstat64(const char* p, struct stat64* b) {
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original_lstat64(n.empty() ? p : n.c_str(), b);
+}
+
 int Fake_access(const char* p, int m) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_access(n.empty() ? p : n.c_str(), m); }
 int Fake_faccessat(int d, const char* p, int m, int f) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_faccessat(d, n.empty() ? p : n.c_str(), m, f); }
 ssize_t Fake_readlink(const char* p, char* b, size_t s) { std::string n = RedirectTable::GetInstance().ResolvePath(p); return _Original_readlink(n.empty() ? p : n.c_str(), b, s); }
@@ -526,6 +538,8 @@ static int HookLibraryCallback(struct dl_phdr_info* info, size_t, void*) {
     PATCH(openat64,    Fake_openat64);
     PATCH(stat,        Fake_stat);
     PATCH(lstat,       Fake_lstat);
+    PATCH(stat64,      Fake_stat64);
+    PATCH(lstat64,     Fake_lstat64);
     PATCH(access,      Fake_access);
     PATCH(faccessat,   Fake_faccessat);
     PATCH(readlink,    Fake_readlink);
