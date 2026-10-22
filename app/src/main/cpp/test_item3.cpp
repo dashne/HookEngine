@@ -91,6 +91,15 @@ static bool run_test_installed_state(std::string& detail) {
     for (int i = 0; i < 5; i++)
         pthread_join(threads[i], nullptr);
 
+    // Registry sample WHILE the hook is firing. On device 2026-10-23
+    // this returned 1, proving RegistryCount() counts inline hooks.
+    // The assertion below uses both directions:
+    //   regDuring == regBefore + 1   (install registered the slot)
+    //   regAfter  == regBefore       (uninstall freed the slot)
+    int regDuring = RegistryCount();
+    LOGD("installed_state diag: regBefore=%d regDuring=%d",
+         regBefore, regDuring);
+
     UninstallInlineHook((void*)&fn3_target);
 
     int post = fn3_target(10);
@@ -102,15 +111,17 @@ static bool run_test_installed_state(std::string& detail) {
       << " bad=" << c.bad.load()
       << " post=" << post
       << " regBefore=" << regBefore
+      << " regDuring=" << regDuring
       << " regAfter=" << regAfter;
     detail = d.str();
 
     int total = c.orig.load() + c.fake.load() + c.bad.load();
     return (total == 5 * c.iterations)
-           && (c.fake.load() > 0)          // ← the key assertion
-           && (c.bad.load() == 0)
-           && (post == ORIGINAL)
-           && (regAfter == regBefore);
+           && (c.fake.load() > 0)              // hook actually fired
+           && (c.bad.load() == 0)              // no invalid returns
+           && (post == ORIGINAL)               // restored correctly
+           && (regDuring == regBefore + 1)     // install registered a slot
+           && (regAfter == regBefore);         // uninstall freed it
 }
 
 // ─── Test B: transition stress ───────────────────────────────────────

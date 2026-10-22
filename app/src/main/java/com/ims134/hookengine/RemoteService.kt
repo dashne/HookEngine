@@ -38,7 +38,7 @@ class RemoteService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        Log.d("DualCore", "Service started. (v27 — both fields)")
+        Log.d("DualCore", "Service started. (v29)")
         Log.d("DualCore","==============================================------------Start---------=============================================");
         try {
             Log.d("DualCore", runItem1Tests())
