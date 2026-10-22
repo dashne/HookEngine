@@ -6,11 +6,13 @@
 #include <stdint.h>
 #include <linux/stat.h>
 #include <dirent.h>
+#include <atomic>
 
 // Shared virtual UID/GID storage (defined in Hooks.cpp)
 extern int32_t g_virtualUid;
 extern int32_t g_virtualGid;
 void SetVirtualUid(int32_t uid);
+extern std::atomic<int> g_systemCallDepth;
 
 // ---- File I/O originals ----
 extern int (*_Original_open)(const char*, int, ...);

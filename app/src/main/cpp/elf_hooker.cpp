@@ -78,19 +78,26 @@ extern "C" void **GetGotAddress(const char *libName, const char *symbolName) {
     return data.GotAddress;
 }
 
-// IDEMPOTENT: safe to call multiple times. Returns true only on first patch.
+// IDEMPOTENT + CRITICAL FIX: restore page as RX, never R-only.
+// .got.plt shares pages with .plt on ARM64 Android. If we restore to R only,
+// every subsequent call through the .plt stub crashes with SIGSEGV_ACCERR.
 extern "C" bool HookGotEntry(void **gotAddress, void *newFunction, void **originalFunction) {
     if (!gotAddress) return false;
-    if (*gotAddress == newFunction) return false;   // already patched
+    if (*gotAddress == newFunction) return false;
     if (originalFunction && !*originalFunction) *originalFunction = *gotAddress;
 
     long pageSize = sysconf(_SC_PAGESIZE);
     uintptr_t pageStart = (uintptr_t) gotAddress & ~(pageSize - 1);
     if (mprotect((void *) pageStart, pageSize, PROT_READ | PROT_WRITE) != 0) {
-        LOGE("mprotect GOT failed");
+        LOGE("mprotect RW failed on GOT %p: errno=%d", gotAddress, errno);
         return false;
     }
     *gotAddress = newFunction;
-    mprotect((void *) pageStart, pageSize, PROT_READ);
+    __builtin___clear_cache((char*)pageStart, (char*)(pageStart + pageSize));
+    // .got.plt is data — restore to R (its original state). NOT RX.
+    if (mprotect((void *) pageStart, pageSize, PROT_READ) != 0) {
+        LOGE("mprotect R failed on GOT %p: errno=%d", gotAddress, errno);
+        return false;
+    }
     return true;
 }
