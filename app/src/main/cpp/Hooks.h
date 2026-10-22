@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <linux/stat.h>
+#include <dirent.h>
 
 // ---- UID storage (shared with native-lib.cpp) ----
 extern int32_t g_virtualUid;
@@ -32,6 +34,16 @@ extern int (*_Original_rmdir)(const char*);
 extern int (*_Original_fstatat)(int, const char*, struct stat*, int);
 extern FILE* (*_Original_fopen)(const char*, const char*);
 extern FILE* (*_Original_fopen64)(const char*, const char*);
+extern int (*_Original_statx)(int, const char*, int, unsigned int, struct statx*);
+extern struct dirent64* (*_Original_readdir64)(DIR*);
+extern struct dirent*    (*_Original_readdir)(DIR*);
+extern int (*_Original_getdents64)(unsigned int, struct dirent64*, unsigned int);
+extern DIR* (*_Original_opendir)(const char*);
+extern int (*_Original___stat)(const char*, struct stat*);
+extern int (*_Original___lstat)(const char*, struct stat*);
+extern int (*_Original___fstatat64)(int, const char*, struct stat*, int);
+extern int (*_Original___stat64)(const char*, struct stat64*);
+
 
 // ---- Loader ----
 extern void* (*_Original_dlopen)(const char*, int);

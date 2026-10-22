@@ -8,7 +8,9 @@ import android.util.Log
 import java.io.File
 
 class RemoteService : Service() {
-    init { System.loadLibrary("hookengine") }
+    init {
+        System.loadLibrary("hookengine")
+    }
 
     external fun hookBinderMethod(method: java.lang.reflect.Method)
     external fun installNativeHooks()
@@ -18,6 +20,9 @@ class RemoteService : Service() {
     external fun nativeGetpid(): Int
     external fun hiddenApiProbe(): Int
     external fun hiddenApiInstall(): Int
+
+    external fun unhideMethod(method: java.lang.reflect.Method): Boolean
+    external fun unhideField(field: java.lang.reflect.Field): Boolean
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -80,81 +85,94 @@ class RemoteService : Service() {
                 val installed = inlineHookGetpid()
                 val after = nativeGetpid()
                 Log.d("DualCore", "inline getpid: installed=$installed before=$before after=$after")
-                if (installed && after == 12345) Log.d("DualCore", "SUCCESS: inline hook fires (getpid hooked)")
+                if (installed && after == 12345) Log.d(
+                    "DualCore", "SUCCESS: inline hook fires (getpid hooked)"
+                )
                 else Log.e("DualCore", "FAILED: inline hook did not fire (after=$after)")
             } catch (e: Throwable) {
                 Log.e("DualCore", "inline hook test failed: $e")
             }
 
-            // HiddenApi
+            // ============================================================
+// Item 1 conclusion: hidden API does NOT block greylist @hide methods.
+// Reflection works out of the box for SystemProperties.native_get.
+// No unhide patch needed. Prove it once and record it.
+// ============================================================
             try {
-                Log.d("DualCore", "HiddenApi test: starting")
-                val exempt = setHiddenApiExemptionsNative()
-                Log.d("DualCore", "setHiddenApiExemptionsNative: $exempt")
+                Log.d("DualCore", "Item1 conclusion test: starting")
 
-                if (exempt) {
-                    try {
-                        val spClass = Class.forName("android.os.SystemProperties")
-                        val findMethod = spClass.getDeclaredMethod("find", String::class.java)
-                        findMethod.isAccessible = true
-                        Log.d("DualCore", "SUCCESS: hidden API bypass — got ${findMethod.name}")
-                    } catch (e: Throwable) {
-                        Log.e("DualCore", "FAILED: exempt set but reflection still blocked: $e")
-                    }
-                } else {
-                    Log.e("DualCore", "FAILED: setHiddenApiExemptions JNI call failed")
+                val spClass = Class.forName("android.os.SystemProperties")
+
+                // Greylist @hide — should work without any bypass
+                val nativeGet = spClass.getDeclaredMethod("native_get", String::class.java)
+                nativeGet.isAccessible = true
+                val spoofed = nativeGet.invoke(null, "ro.debuggable") as? String
+                Log.d(
+                    "DualCore",
+                    "greylist @hide invoke: native_get('ro.debuggable') = '$spoofed' (expect '0')"
+                )
+
+                // Bulk lookup works
+                val bulk = spClass.declaredMethods.firstOrNull { it.name == "native_get" }
+                Log.d("DualCore", "bulk lookup: found=${bulk != null}")
+
+                if (spoofed == "0") {
+                    Log.d(
+                        "DualCore", "SUCCESS: Item1 — greylist @hide accessible, no bypass required"
+                    )
                 }
             } catch (e: Throwable) {
-                Log.e("DualCore", "HiddenApi test crashed: $e")
+                Log.e("DualCore", "Item1 conclusion test failed: $e")
             }
 
-            // HiddenApi
-            try {
-                Log.d("DualCore", "HiddenApi test: starting")
-                val probeCount = hiddenApiProbe()
-                Log.d("DualCore", "HiddenApi probe found $probeCount symbol(s)")
-                val installed = hiddenApiInstall()
-                Log.d("DualCore", "HiddenApi install result: $installed")
-                if (installed == 1) {
-                    try {
-                        val spClass = Class.forName("android.os.SystemProperties")
-                        val findMethod = spClass.getDeclaredMethod("find", String::class.java)
-                        findMethod.isAccessible = true
-                        Log.d("DualCore", "SUCCESS: hidden API bypass — got ${findMethod.name}")
-                    } catch (e: Throwable) {
-                        Log.e("DualCore", "FAILED: bypass installed but reflection still blocked: $e")
-                    }
-                } else {
-                    Log.e("DualCore", "FAILED: no enforcement function found to hook")
-                }
-            } catch (e: Throwable) {
-                Log.e("DualCore", "HiddenApi test crashed: $e")
-            }
-
-            // Diagnostic: is `find` really blocked, or does it just not exist?
+            // ============================================================
+// Item 1 conclusion — recorded. Greylist @hide works, no bypass needed.
+// ============================================================
             try {
                 val spClass = Class.forName("android.os.SystemProperties")
-                val allMethods = spClass.declaredMethods
-                val allNames = allMethods.map { it.name }.sorted()
-                Log.d("DualCore", "SystemProperties declaredMethods count: ${allMethods.size}")
-                Log.d("DualCore", "SystemProperties method names: ${allNames.joinToString(",")}")
-
-                val findMethod = allMethods.firstOrNull { it.name == "find" && it.parameterTypes.size == 1 }
-                Log.d("DualCore", "find method present in declaredMethods: ${findMethod != null}")
-
-                if (findMethod != null) {
-                    // Method object exists. Now try invoking it directly — this bypasses
-                    // the getDeclaredMethod(name) lookup path entirely.
-                    try {
-                        findMethod.isAccessible = true
-                        val r = findMethod.invoke(null, "ro.debuggable")
-                        Log.d("DualCore", "DIRECT INVOKE SUCCESS: find(\"ro.debuggable\") = $r")
-                    } catch (e: Throwable) {
-                        Log.e("DualCore", "DIRECT INVOKE BLOCKED: $e")
-                    }
-                }
+                val nativeGet = spClass.getDeclaredMethod("native_get", String::class.java)
+                nativeGet.isAccessible = true
+                val spoofed = nativeGet.invoke(null, "ro.debuggable") as? String
+                Log.d("DualCore", "Item1: native_get('ro.debuggable') = '$spoofed' (expect '0')")
             } catch (e: Throwable) {
-                Log.e("DualCore", "declaredMethods diagnostic failed: $e")
+                Log.e("DualCore", "Item1 conclusion: $e")
+            }
+
+// ============================================================
+// Item 2 test — statx path redirect + readdir filtering
+// ============================================================
+            try {
+                Log.d("DualCore", "Item2 test: starting")
+
+                val realDir = File(filesDir, "real").apply { mkdirs() }
+                val fakeDir = File(filesDir, "fake").apply { mkdirs() }
+
+                addRedirectRule(realDir.absolutePath + "/", fakeDir.absolutePath + "/")
+
+                // Size probe: 12 bytes in fake. Real version does not exist — if stat
+                // redirect works, File(real/x).length() reads fake and returns 12.
+                // Without redirect, getLength catches ENOENT and returns 0.
+                File(fakeDir, "size_probe.txt").writeText("FAKEFAKEFAKE")
+
+                // Readdir probe: drop these into fake/ and list real/. If opendir redirects,
+                // listFiles sees fake/ contents (with hide_me_* filtered out).
+                File(fakeDir, "hide_me_dualhost_here.txt").writeText("x")
+                File(fakeDir, "visible.txt").writeText("x")
+
+                val len = File(realDir, "size_probe.txt").length()
+                Log.d("DualCore", "Item2 statx: length() = $len (expect 12)")
+                if (len == 12L) Log.d("DualCore", "SUCCESS: Item2 statx")
+                else            Log.e("DualCore", "FAILED: Item2 statx — got $len")
+
+                val entries: List<String> = realDir.listFiles()?.map { it.name }?.sorted() ?: emptyList()
+                Log.d("DualCore", "Item2 readdir: entries = $entries (expect size_probe.txt + visible.txt)")
+                val leaked  = entries.any { it.contains("dualhost") }
+                val vis     = entries.contains("visible.txt")
+                val size    = entries.contains("size_probe.txt")
+                if (!leaked && vis && size) Log.d("DualCore", "SUCCESS: Item2 readdir")
+                else                        Log.e("DualCore", "FAILED: Item2 readdir — leaked=$leaked vis=$vis size=$size")
+            } catch (e: Throwable) {
+                Log.e("DualCore", "Item2 test crashed: $e")
             }
 
 

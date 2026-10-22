@@ -59,6 +59,16 @@ int (*_Original_rmdir)(const char*) = nullptr;
 int (*_Original_fstatat)(int, const char*, struct stat*, int) = nullptr;
 FILE* (*_Original_fopen)(const char*, const char*) = nullptr;
 FILE* (*_Original_fopen64)(const char*, const char*) = nullptr;
+int (*_Original_statx)(int, const char*, int, unsigned int, struct statx*) = nullptr;
+struct dirent64* (*_Original_readdir64)(DIR*) = nullptr;
+struct dirent*    (*_Original_readdir)(DIR*) = nullptr;
+int (*_Original_getdents64)(unsigned int, struct dirent64*, unsigned int) = nullptr;
+DIR* (*_Original_opendir)(const char*) = nullptr;
+int (*_Original___stat)(const char*, struct stat*) = nullptr;
+int (*_Original___lstat)(const char*, struct stat*) = nullptr;
+int (*_Original___fstatat64)(int, const char*, struct stat*, int) = nullptr;
+int (*_Original___stat64)(const char*, struct stat64*) = nullptr;
+
 void* (*_Original_dlopen)(const char*, int) = nullptr;
 void* (*_Original_android_dlopen_ext)(const char*, int, const void*) = nullptr;
 int   (*_Original___system_property_get)(const char*, char*) = nullptr;
@@ -270,6 +280,95 @@ int Fake_open64(const char* path, int flags, ...) {
     const char* p = np.empty() ? path : np.c_str();
     return hasMode ? _Original_open64(p, flags, mode) : _Original_open64(p, flags);
 }
+// statx — stat's newer sibling. File.length() / exists() use this on API 30+.
+int Fake_statx(int dirfd, const char* path, int flags, unsigned int mask, struct statx* buf) {
+    std::string np = RedirectTable::GetInstance().ResolvePath(path);
+    return _Original_statx(dirfd, np.empty() ? path : np.c_str(), flags, mask, buf);
+}
+
+// Filter our own entries out of directory listings. We never hide "." or "..".
+static bool ShouldHideDirent(const char* name) {
+    if (!name) return false;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return false;
+    if (strstr(name, "dualhost"))       return true;
+    if (strstr(name, "libdualcore"))    return true;
+    if (strstr(name, "libhookengine"))  return true;
+    if (strstr(name, "ims134"))         return true;
+    return false;
+}
+
+// readdir64 / readdir — return the next non-hidden entry. Loops internally so the
+// caller never sees a NULL just because we filtered.
+struct dirent64* Fake_readdir64(DIR* dir) {
+    while (true) {
+        struct dirent64* e = _Original_readdir64(dir);
+        if (!e) return nullptr;
+        if (!ShouldHideDirent(e->d_name)) return e;
+    }
+}
+
+struct dirent* Fake_readdir(DIR* dir) {
+    while (true) {
+        struct dirent* e = _Original_readdir(dir);
+        if (!e) return nullptr;
+        if (!ShouldHideDirent(e->d_name)) return e;
+    }
+}
+
+// getdents64 — bulk variant. Filters in-place, returns new byte count.
+// Covers native code that reads directories via raw syscall wrapper.
+int Fake_getdents64(unsigned int fd, struct dirent64* dirp, unsigned int count) {
+    int n = _Original_getdents64(fd, dirp, count);
+    if (n <= 0) return n;
+
+    char* dst = (char*)dirp;
+    char* end = (char*)dirp + n;
+    struct dirent64* d = dirp;
+    int newCount = 0;
+
+    while ((char*)d < end) {
+        size_t reclen = d->d_reclen;
+        if (reclen == 0 || (char*)d + reclen > end) break;   // corrupt / truncated
+        if (!ShouldHideDirent(d->d_name)) {
+            if (dst != (char*)d) memmove(dst, d, reclen);
+            dst += reclen;
+            newCount += reclen;
+        }
+        d = (struct dirent64*)((char*)d + reclen);
+    }
+    return newCount;
+}
+// opendir — redirect the path. Subsequent readdir/readdir64 on the returned
+// DIR* will yield fake dir entries. This is the critical one for File.listFiles().
+DIR* Fake_opendir(const char* path) {
+    std::string np = RedirectTable::GetInstance().ResolvePath(path);
+    return _Original_opendir(np.empty() ? path : np.c_str());
+}
+
+// Fortified variants — bionic's -D_FORTIFY_SOURCE=2 rewrites stat/lstat/fstatat
+// into these. File.length() → Linux_getLength → __stat(...).
+int Fake___stat(const char* p, struct stat* b) {
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original___stat(n.empty() ? p : n.c_str(), b);
+}
+int Fake___stat64(const char* p, struct stat64* b) {
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original___stat64(n.empty() ? p : n.c_str(), b);
+}
+int Fake___lstat(const char* p, struct stat* b) {
+    std::string n = RedirectTable::GetInstance().ResolvePath(p);
+    return _Original___lstat(n.empty() ? p : n.c_str(), b);
+}
+int Fake___fstatat64(int d, const char* p, struct stat* b, int f) {
+    if (p && p[0]) {
+        std::string n = RedirectTable::GetInstance().ResolvePath(p);
+        if (!n.empty()) return _Original___fstatat64(d, n.c_str(), b, f);
+    }
+    return _Original___fstatat64(d, p, b, f);
+}
+
+
+
 
 int Fake__open_2(const char* path, int flags) {
     if (IsMapsPath(path) && (flags & O_ACCMODE) == O_RDONLY) { int fd = OpenFilteredMapsFd(); if (fd >= 0) return fd; }
@@ -440,6 +539,16 @@ static int HookLibraryCallback(struct dl_phdr_info* info, size_t, void*) {
     PATCH(fstatat,     Fake_fstatat);
     PATCH(fopen,       Fake_fopen);
     PATCH(fopen64,     Fake_fopen64);
+    PATCH(statx,     Fake_statx);
+    PATCH(readdir64, Fake_readdir64);
+    PATCH(readdir,   Fake_readdir);
+    PATCH(getdents64, Fake_getdents64);
+    PATCH(opendir,       Fake_opendir);
+    PATCH(readdir,       Fake_readdir);
+    PATCH(__stat,        Fake___stat);
+    PATCH(__stat64,      Fake___stat64);
+    PATCH(__lstat,       Fake___lstat);
+    PATCH(__fstatat64,   Fake___fstatat64);
 
     PATCH(getuid,      Fake_getuid);
     PATCH(geteuid,     Fake_geteuid);

@@ -145,3 +145,56 @@ Java_com_ims134_hookengine_RemoteService_setHiddenApiExemptionsNative(
     LOGD("setHiddenApiExemptions([\"L\"]) succeeded");
     return JNI_TRUE;
 }
+
+// ============================================================
+// Item 1: unhideMethod — clear hidden API classification on a Method
+// ============================================================
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ims134_hookengine_RemoteService_unhideMethod(JNIEnv* env, jobject, jobject methodObj) {
+    jmethodID mid = env->FromReflectedMethod(methodObj);
+    if (!mid) { LOGE("unhideMethod: jmethodID null"); return JNI_FALSE; }
+    uint8_t* artMethod = (uint8_t*)mid;
+
+    // ArtMethod::access_flags_ is at offset 4 on 64-bit ART (API 26 through 37).
+    uint32_t* flags = (uint32_t*)(artMethod + 4);
+    uint32_t oldFlags = *flags;
+
+    long ps = sysconf(_SC_PAGESIZE);
+    uintptr_t pg = (uintptr_t)flags & ~(ps - 1);
+    bool mp = mprotect((void*)pg, ps, PROT_READ | PROT_WRITE) == 0;
+
+    // Standard access flags are in bits 0..15 (kAccPublic..kAccConstructor).
+    // Hidden-API ApiList + runtime flags are in bits 16..31.
+    // Clearing upper 16 = "not classified, not blocked". kAccNative lives at
+    // bit 8 (0x0100), so native methods stay native.
+    uint32_t newFlags = oldFlags & 0x0000FFFF;
+    *flags = newFlags;
+
+    if (mp) mprotect((void*)pg, ps, PROT_READ);
+
+    LOGD("unhideMethod: 0x%08x -> 0x%08x (native=%d)",
+         oldFlags, newFlags, (newFlags & 0x0100) != 0);
+    return JNI_TRUE;
+}
+
+// Same trick for a Field: ArtField has access_flags_ at offset 4 on 64-bit.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ims134_hookengine_RemoteService_unhideField(JNIEnv* env, jobject, jobject fieldObj) {
+    jfieldID fid = env->FromReflectedField(fieldObj);
+    if (!fid) { LOGE("unhideField: jfieldID null"); return JNI_FALSE; }
+    uint8_t* artField = (uint8_t*)fid;
+    uint32_t* flags = (uint32_t*)(artField + 4);
+    uint32_t oldFlags = *flags;
+
+    long ps = sysconf(_SC_PAGESIZE);
+    uintptr_t pg = (uintptr_t)flags & ~(ps - 1);
+    bool mp = mprotect((void*)pg, ps, PROT_READ | PROT_WRITE) == 0;
+
+    uint32_t newFlags = oldFlags & 0x0000FFFF;
+    *flags = newFlags;
+
+    if (mp) mprotect((void*)pg, ps, PROT_READ);
+    LOGD("unhideField: 0x%08x -> 0x%08x", oldFlags, newFlags);
+    return JNI_TRUE;
+}
+
