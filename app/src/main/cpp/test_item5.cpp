@@ -23,6 +23,7 @@
 #include <sstream>
 #include <vector>
 #include "HookRegistry.h"
+#include "TestReport.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -145,30 +146,55 @@ static TestResult test_hook_works_when_gate_allows(
     return r;
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_ims134_hookengine_RemoteService_runItem5Tests(
-        JNIEnv* env, jobject service, jobject getCallingUidMethod) {
+// service is unused by every callee (they all use the receiver-less internal
+// signatures); passing nullptr from the harness is safe.
+static int RunItem5Internal(JNIEnv* env, jobject service, jobject method,
+                            std::string& out) {
     LOGD("=== Item 5 tests START ===");
 
     std::vector<TestResult> results;
     results.push_back(test_real_api());
     results.push_back(test_gate_refuses_unverified());
     results.push_back(test_gate_allows_verified());
-    results.push_back(test_hook_refused_when_gate_blocks(env, service, getCallingUidMethod));
-    results.push_back(test_hook_works_when_gate_allows(env, service, getCallingUidMethod));
+    results.push_back(test_hook_refused_when_gate_blocks(env, service, method));
+    results.push_back(test_hook_works_when_gate_allows(env, service, method));
 
     int pass = 0, fail = 0;
-    std::ostringstream out;
+    std::ostringstream o;
     for (auto& r : results) {
         std::string line = std::string(r.pass ? "[PASS] " : "[FAIL] ")
                            + r.name + ": " + r.detail;
-        LOGD("%s", line.c_str());
-        out << line << "\n";
+        testreport::Report(r.name.c_str(), r.pass, r.detail);
+        o << line << "\n";
         if (r.pass) pass++; else fail++;
     }
     std::ostringstream tail;
     tail << "=== " << pass << " passed, " << fail << " failed ===";
     LOGD("%s", tail.str().c_str());
-    out << tail.str();
-    return env->NewStringUTF(out.str().c_str());
+    o << tail.str();
+    out = o.str();
+    return pass;
+}
+
+extern "C" int RunItem5ForHarness(JNIEnv* env) {
+    if (!env) return -1;
+    jclass binderCls = env->FindClass("android/os/Binder");
+    if (!binderCls) return -1;
+    jmethodID m = env->GetStaticMethodID(binderCls, "getCallingUid", "()I");
+    if (!m) { env->DeleteLocalRef(binderCls); return -1; }
+    jobject method = env->ToReflectedMethod(binderCls, m, JNI_TRUE);
+    if (!method) { env->DeleteLocalRef(binderCls); return -1; }
+    std::string ignored;
+    int pass = RunItem5Internal(env, nullptr, method, ignored);
+    env->DeleteLocalRef(method);
+    env->DeleteLocalRef(binderCls);
+    return pass;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_ims134_hookengine_RemoteService_runItem5Tests(
+        JNIEnv* env, jobject service, jobject getCallingUidMethod) {
+    std::string out;
+    RunItem5Internal(env, service, getCallingUidMethod, out);
+    return env->NewStringUTF(out.c_str());
 }

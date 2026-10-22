@@ -16,6 +16,8 @@
 #include "Hooks.h"
 #include "RedirectTable.h"
 #include "HookRegistry.h"
+#include "TestReport.h"
+#include "test_suite.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -30,6 +32,8 @@ static jclass     g_elemCls             = nullptr;
 static jmethodID  g_currentThreadMethod = nullptr;
 static jmethodID  g_getStackTraceMethod = nullptr;
 static jmethodID  g_getClassNameMethod  = nullptr;
+
+extern "C" int UninstallAllHooks();
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     g_vm = vm;
@@ -334,4 +338,56 @@ Java_com_ims134_hookengine_RemoteService_diagRawZip(JNIEnv* env, jobject, jstrin
     snprintf(buf, sizeof(buf), "read %zd bytes: %02x %02x %02x %02x",
              n, magic[0], magic[1], magic[2], magic[3]);
     return env->NewStringUTF(buf);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Test harness JNI bridge (§7.3)
+//
+// Kotlin NativeTestBridge.runSuite(name) returns an array of strings, one
+// per test case, format "PASS|name|detail" or "FAIL|name|detail".
+// Return value of RunTestSuite (pass count) is intentionally discarded —
+// the array is the source of truth for assertions.
+// ─────────────────────────────────────────────────────────────────────────
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_runSuite(JNIEnv* env, jclass, jstring jsuite) {
+    if (!env || !jsuite) return nullptr;
+    const char* suite = env->GetStringUTFChars(jsuite, nullptr);
+    if (!suite) return nullptr;
+
+    RunTestSuite(env, suite);
+    auto lines = testreport::Snapshot();
+
+    env->ReleaseStringUTFChars(jsuite, suite);
+
+    jclass strCls = env->FindClass("java/lang/String");
+    if (!strCls) return nullptr;
+    jobjectArray arr = env->NewObjectArray((jsize)lines.size(), strCls, nullptr);
+    if (!arr) return nullptr;
+
+    for (size_t i = 0; i < lines.size(); ++i) {
+        char buf[512];
+        snprintf(buf, sizeof buf, "%s|%s|%s",
+                 lines[i].pass ? "PASS" : "FAIL",
+                 lines[i].name.c_str(), lines[i].detail.c_str());
+        env->SetObjectArrayElement(arr, (jsize)i, env->NewStringUTF(buf));
+    }
+    return arr;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_uninstallAll(JNIEnv*, jclass) {
+    UninstallAllHooks();
+}
+
+extern "C" void SetItem4Paths(const char* realDir, const char* fakeDir);
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_setItem4Paths(
+        JNIEnv* env, jclass, jstring jReal, jstring jFake) {
+    if (!env || !jReal || !jFake) return;
+    const char* real = env->GetStringUTFChars(jReal, nullptr);
+    const char* fake = env->GetStringUTFChars(jFake, nullptr);
+    SetItem4Paths(real, fake);
+    if (real) env->ReleaseStringUTFChars(jReal, real);
+    if (fake) env->ReleaseStringUTFChars(jFake, fake);
 }

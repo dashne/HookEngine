@@ -5,6 +5,7 @@
 #include <sstream>
 #include <vector>
 #include "HookRegistry.h"
+#include "TestReport.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -164,8 +165,10 @@ static TestResult test_unsupported(const char* name, void* fn, void* fake) {
     return r;
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_ims134_hookengine_RemoteService_runItem1Tests(JNIEnv* env, jobject) {
+// Runs the item 1 tests. Emits each via testreport::Report (same logcat
+// output as before) and appends the same lines to `out`. Returns pass count.
+// Called by both the JNI wrapper below and RunTestSuite (test_suite.cpp).
+static int RunItem1Internal(std::string& out) {
     LOGD("=== Item 1 tests START ===");
 
     std::vector<TestResult> results;
@@ -177,16 +180,29 @@ Java_com_ims134_hookengine_RemoteService_runItem1Tests(JNIEnv* env, jobject) {
     results.push_back(test_unsupported("LDR_LITERAL", (void*)&fn_ldr_lit,(void*)&fake_void_int));
 
     int pass = 0, fail = 0;
-    std::ostringstream out;
-    out << "=== Item 1 tests ===\n";
+    std::ostringstream o;
+    o << "=== Item 1 tests ===\n";
     for (auto& r : results) {
         std::string line = std::string(r.pass ? "[PASS] " : "[FAIL] ")
                            + r.name + ": " + r.detail;
-        LOGD("%s", line.c_str());
-        out << line << "\n";
+        testreport::Report(r.name.c_str(), r.pass, r.detail);
+        o << line << "\n";
         if (r.pass) pass++; else fail++;
     }
-    out << "=== " << pass << " passed, " << fail << " failed ===";
-    LOGD("%s", out.str().c_str());
-    return env->NewStringUTF(out.str().c_str());
+    o << "=== " << pass << " passed, " << fail << " failed ===";
+    out = o.str();
+    return pass;
+}
+
+extern "C" int RunItem1ForHarness() {
+    std::string ignored;
+    return RunItem1Internal(ignored);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_ims134_hookengine_RemoteService_runItem1Tests(JNIEnv* env, jobject) {
+    std::string out;
+    RunItem1Internal(out);
+    LOGD("%s", out.c_str());
+    return env->NewStringUTF(out.c_str());
 }

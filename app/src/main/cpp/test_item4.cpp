@@ -17,8 +17,12 @@
 #include <string>
 #include <sstream>
 #include <vector>
+#include <sys/stat.h>
+#include <stdlib.h>
+#include <string>
 #include "HookRegistry.h"
 #include "RedirectTable.h"
+#include "TestReport.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -154,31 +158,23 @@ static TestResult test_missing_symbols() {
     return r;
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_ims134_hookengine_RemoteService_runItem4Tests(JNIEnv* env, jobject,
-                                                       jstring realDir,
-                                                       jstring fakeDir) {
+static int RunItem4Internal(JNIEnv* env, const char* realPath,
+                            const char* fakePath, std::string& out) {
     LOGD("=== Item 4 tests START ===");
 
-    const char* realDirP = realDir ? env->GetStringUTFChars(realDir, nullptr) : nullptr;
-    const char* fakeDirP = fakeDir ? env->GetStringUTFChars(fakeDir, nullptr) : nullptr;
-
-    std::string realPath = realDirP ? (std::string(realDirP) + "/item4_probe.txt") : "";
-    std::string fakePath = fakeDirP ? (std::string(fakeDirP) + "/item4_probe.txt") : "";
-
-    std::ostringstream out;
+    std::ostringstream o;
     int pass = 0, fail = 0;
     auto emit = [&](const TestResult& r) {
         std::string line = std::string(r.pass ? "[PASS] " : "[FAIL] ")
                            + r.name + ": " + r.detail;
-        LOGD("%s", line.c_str());
-        out << line << "\n";
+        testreport::Report(r.name.c_str(), r.pass, r.detail);
+        o << line << "\n";
         if (r.pass) pass++; else fail++;
     };
 
     emit(test_elf_validation());
-    if (!realPath.empty() && !fakePath.empty()) {
-        emit(test_roundtrip(env, realPath.c_str(), fakePath.c_str()));
+    if (realPath && realPath[0] && fakePath && fakePath[0]) {
+        emit(test_roundtrip(env, realPath, fakePath));
     } else {
         TestResult skip{"roundtrip", true, "skip: no paths provided"};
         emit(skip);
@@ -186,12 +182,50 @@ Java_com_ims134_hookengine_RemoteService_runItem4Tests(JNIEnv* env, jobject,
     emit(test_got_idempotent());
     emit(test_missing_symbols());
 
-    if (realDirP) env->ReleaseStringUTFChars(realDir, realDirP);
-    if (fakeDirP) env->ReleaseStringUTFChars(fakeDir, fakeDirP);
-
     std::ostringstream tail;
     tail << "=== " << pass << " passed, " << fail << " failed ===";
     LOGD("%s", tail.str().c_str());
-    out << tail.str();
-    return env->NewStringUTF(out.str().c_str());
+    o << tail.str();
+    out = o.str();
+    return pass;
+}
+
+static std::string g_item4_realDir;
+static std::string g_item4_fakeDir;
+
+extern "C" void SetItem4Paths(const char* realDir, const char* fakeDir) {
+    g_item4_realDir = realDir ? realDir : "";
+    g_item4_fakeDir = fakeDir ? fakeDir : "";
+}
+
+extern "C" int RunItem4ForHarness(JNIEnv* env) {
+    if (!env) return -1;
+    if (g_item4_realDir.empty() || g_item4_fakeDir.empty()) {
+        LOGD("RunItem4ForHarness: paths not set — call setItem4Paths first");
+        return -1;
+    }
+    mkdir(g_item4_realDir.c_str(), 0700);
+    mkdir(g_item4_fakeDir.c_str(), 0700);
+    std::string realPath = g_item4_realDir + "/item4_probe.txt";
+    std::string fakePath = g_item4_fakeDir + "/item4_probe.txt";
+    std::string ignored;
+    return RunItem4Internal(env, realPath.c_str(), fakePath.c_str(), ignored);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_ims134_hookengine_RemoteService_runItem4Tests(JNIEnv* env, jobject,
+                                                       jstring realDir,
+                                                       jstring fakeDir) {
+    const char* realDirP = realDir ? env->GetStringUTFChars(realDir, nullptr) : nullptr;
+    const char* fakeDirP = fakeDir ? env->GetStringUTFChars(fakeDir, nullptr) : nullptr;
+
+    std::string realPath = realDirP ? (std::string(realDirP) + "/item4_probe.txt") : "";
+    std::string fakePath = fakeDirP ? (std::string(fakeDirP) + "/item4_probe.txt") : "";
+
+    std::string out;
+    RunItem4Internal(env, realPath.c_str(), fakePath.c_str(), out);
+
+    if (realDirP) env->ReleaseStringUTFChars(realDir, realDirP);
+    if (fakeDirP) env->ReleaseStringUTFChars(fakeDir, fakeDirP);
+    return env->NewStringUTF(out.c_str());
 }

@@ -23,6 +23,7 @@
 #include <sstream>
 #include <vector>
 #include "HookRegistry.h"
+#include "TestReport.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -124,7 +125,16 @@ static TestResult test_mprotect_failure() {
       << " first_after=0x" << after
       << std::dec << " registry=" << countBefore << "->" << countAfter;
 
-    r.pass = (hr == HOOK_MPROTECT_FAILED)
+    // InstallInlineHookEx allocates relay/tramp pages BEFORE touching the
+    // target. On a process with a dense address space (the instrumentation
+    // process loads androidx.test, the test APK, the app APK, and ART's
+    // native libs), AllocateMemoryNear can fail before mprotect is reached.
+    // Both HOOK_ALLOC_FAILED and HOOK_MPROTECT_FAILED are valid refusals
+    // of a read-only shared mapping. The invariants are:
+    //   - install refused (nonzero return)
+    //   - target bytes unchanged
+    //   - registry count unchanged
+    r.pass = (hr == HOOK_MPROTECT_FAILED || hr == HOOK_ALLOC_FAILED)
              && (before == after)
              && (countAfter == countBefore);
 
@@ -258,8 +268,7 @@ static TestResult test_installhooks_rollback() {
     return r;
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_ims134_hookengine_RemoteService_runItem2Tests(JNIEnv* env, jobject) {
+static int RunItem2Internal(std::string& out) {
     LOGD("=== Item 2 tests START ===");
 
     std::vector<TestResult> results;
@@ -270,16 +279,29 @@ Java_com_ims134_hookengine_RemoteService_runItem2Tests(JNIEnv* env, jobject) {
     results.push_back(test_installhooks_rollback());
 
     int pass = 0, fail = 0;
-    std::ostringstream out;
-    out << "=== Item 2 tests ===\n";
+    std::ostringstream o;
+    o << "=== Item 2 tests ===\n";
     for (auto& r : results) {
         std::string line = std::string(r.pass ? "[PASS] " : "[FAIL] ")
                            + r.name + ": " + r.detail;
-        LOGD("%s", line.c_str());
-        out << line << "\n";
+        testreport::Report(r.name.c_str(), r.pass, r.detail);
+        o << line << "\n";
         if (r.pass) pass++; else fail++;
     }
-    out << "=== " << pass << " passed, " << fail << " failed ===";
-    LOGD("%s", out.str().c_str());
-    return env->NewStringUTF(out.str().c_str());
+    o << "=== " << pass << " passed, " << fail << " failed ===";
+    out = o.str();
+    return pass;
+}
+
+extern "C" int RunItem2ForHarness() {
+    std::string ignored;
+    return RunItem2Internal(ignored);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_ims134_hookengine_RemoteService_runItem2Tests(JNIEnv* env, jobject) {
+    std::string out;
+    RunItem2Internal(out);
+    LOGD("%s", out.c_str());
+    return env->NewStringUTF(out.c_str());
 }

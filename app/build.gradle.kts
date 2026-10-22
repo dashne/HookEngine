@@ -7,6 +7,7 @@ android {
     namespace = "com.ims134.hookengine"
     compileSdk = 37 // Fixed syntax for compileSdk
     ndkVersion = "30.0.16248370"
+    testBuildType ="debug"
 
     defaultConfig {
         applicationId = "com.ims134.hookengine"
@@ -16,6 +17,9 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            abiFilters.add("arm64-v8a")
+        }
     }
 
     buildTypes {

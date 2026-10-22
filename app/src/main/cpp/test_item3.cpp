@@ -29,6 +29,7 @@
 #include <sstream>
 #include <string>
 #include "HookRegistry.h"
+#include "TestReport.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -228,17 +229,16 @@ static bool run_test_reentrance(std::string& detail) {
 }
 
 // ─── Driver ─────────────────────────────────────────────────────────
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_ims134_hookengine_RemoteService_runItem3Tests(JNIEnv* env, jobject) {
+static int RunItem3Internal(std::string& out) {
     LOGD("=== Item 3 tests START ===");
 
-    std::ostringstream out;
+    std::ostringstream o;
     int pass = 0, fail = 0;
     auto emit = [&](bool ok, const char* name, const std::string& detail) {
         std::string line = std::string(ok ? "[PASS] " : "[FAIL] ")
                            + name + ": " + detail;
-        LOGD("%s", line.c_str());
-        out << line << "\n";
+        testreport::Report(name, ok, detail);
+        o << line << "\n";
         if (ok) pass++; else fail++;
     };
 
@@ -246,12 +246,24 @@ Java_com_ims134_hookengine_RemoteService_runItem3Tests(JNIEnv* env, jobject) {
     { std::string d; bool ok = run_test_transition(d);       emit(ok, "transition_stress", d); }
     { std::string d; bool ok = run_test_reentrance(d);       emit(ok, "installhooks_reentrance", d); }
 
-    // Restore clean state for onStartCommand's STEP flow.
     UninstallAllHooks();
 
     std::ostringstream tail;
     tail << "=== " << pass << " passed, " << fail << " failed ===";
-    LOGD("%s", tail.str().c_str());
-    out << tail.str();
-    return env->NewStringUTF(out.str().c_str());
+    LOGD("%s", tail.str().c_str());   // item3-specific footer line, preserved
+    o << tail.str();
+    out = o.str();
+    return pass;
+}
+
+extern "C" int RunItem3ForHarness() {
+    std::string ignored;
+    return RunItem3Internal(ignored);
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_ims134_hookengine_RemoteService_runItem3Tests(JNIEnv* env, jobject) {
+    std::string out;
+    RunItem3Internal(out);
+    return env->NewStringUTF(out.c_str());
 }
