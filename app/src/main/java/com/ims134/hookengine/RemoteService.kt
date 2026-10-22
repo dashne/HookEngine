@@ -13,8 +13,8 @@ import java.lang.reflect.Proxy
 class RemoteService : Service() {
     init { System.loadLibrary("hookengine") }
 
-    external fun hookBinderMethod(method: java.lang.reflect.Method)
-    external fun installNativeHooks()
+    external fun hookBinderMethod(method: java.lang.reflect.Method):Int
+    external fun installNativeHooks(): Int
     external fun addRedirectRule(from: String, to: String)
     external fun setVirtualUid(uid: Int)
     external fun setInSystemCall(on: Boolean)
@@ -23,6 +23,13 @@ class RemoteService : Service() {
     external fun hiddenApiProbe(): Int
     external fun hiddenApiInstall(): Int
 
+    external fun runItem1Tests(): String
+    external fun runItem2Tests(): String
+    external fun runItem3Tests(): String
+
+    external fun capabilityCheck(): Int
+    external fun hookCount(): Int
+
     external fun restoreBinderMethod()
     external fun diagRawZip(path: String): String
 
@@ -30,6 +37,22 @@ class RemoteService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d("DualCore", "Service started. (v27 — both fields)")
+        Log.d("DualCore","==============================================-------------------------=============================================");
+        try {
+            Log.d("DualCore", runItem1Tests())
+        } catch (t: Throwable) {
+            Log.e("DualCore", "runItem1Tests threw: $t")
+        }
+        try {
+            Log.d("DualCore", runItem2Tests())
+        } catch (t: Throwable) {
+            Log.e("DualCore", "runItem2Tests threw: $t")
+        }
+        try {
+            Log.d("DualCore", runItem3Tests())
+        } catch (t: Throwable) {
+            Log.e("DualCore", "runItem3Tests threw: $t")
+        }
 
         Thread {
             // ============================================================
@@ -75,18 +98,25 @@ class RemoteService : Service() {
             // ============================================================
             Log.d("DualCore", "Binder.getCallingUid() BEFORE: ${Binder.getCallingUid()}")
             try {
-                val m = Binder::class.java.getDeclaredMethod("getCallingUid")
-                setVirtualUid(10000)
-                hookBinderMethod(m)
-                val guestView = Binder.getCallingUid()
-                Log.d("DualCore", "Binder.getCallingUid() [hooked] = $guestView (expect 10000)")
-                if (guestView == 10000) Log.d("DualCore", "SUCCESS: Binder hook works")
-
-                // ---- UNHOOK to test whether the hook is the crash cause ----
-                restoreBinderMethod()
-                val restored = Binder.getCallingUid()
-                Log.d("DualCore", "Binder.getCallingUid() [after restore] = $restored (expect 10421)")
-                if (restored != 10000) Log.d("DualCore", "SUCCESS: Binder hook cleanly restored")
+                val cap = capabilityCheck()
+                if (cap != 0) {
+                    Log.e("DualCore", "HOSTSIG: capability check failed, code=$cap")
+                } else {
+                    val m = Binder::class.java.getDeclaredMethod("getCallingUid")
+                    setVirtualUid(10000)
+                    val r = hookBinderMethod(m)
+                    if (r != 0) {
+                        Log.e("DualCore", "HOSTSIG: hookBinderMethod failed, code=$r")
+                    } else {
+                        val guestView = Binder.getCallingUid()
+                        Log.d("DualCore", "Binder.getCallingUid() [hooked] = $guestView (expect 10000)")
+                        if (guestView == 10000) Log.d("DualCore", "SUCCESS: Binder hook works")
+                    }
+                    restoreBinderMethod()
+                    val restored = Binder.getCallingUid()
+                    Log.d("DualCore", "Binder.getCallingUid() [after restore] = $restored (expect 10421)")
+                    if (restored != 10000) Log.d("DualCore", "SUCCESS: Binder hook cleanly restored")
+                }
             } catch (e: Throwable) {
                 Log.e("DualCore", "Binder hook test failed: $e")
             }
@@ -100,9 +130,14 @@ class RemoteService : Service() {
                 File(real, "probe.txt").writeText("REAL")
                 File(fake, "probe.txt").writeText("FAKE")
                 addRedirectRule(real.absolutePath + "/", fake.absolutePath + "/")
-                installNativeHooks()
-                val got = File(real, "probe.txt").readText()
-                Log.d("DualCore", "Redirect test: '$got' (expect FAKE)")
+                val rc = installNativeHooks()
+                if (rc != 0) {
+                    Log.e("DualCore", "InstallHooks failed, code=$rc (rolled back)")
+                } else {
+                    Log.d("DualCore", "HookRegistry: ${hookCount()} hooks installed")
+                    val got = File(real, "probe.txt").readText()
+                    Log.d("DualCore", "Redirect test: '$got' (expect FAKE)")
+                }
             } catch (e: Throwable) {
                 Log.e("DualCore", "Redirect test failed: $e")
             }

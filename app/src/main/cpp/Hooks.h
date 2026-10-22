@@ -8,13 +8,11 @@
 #include <dirent.h>
 #include <atomic>
 
-// Shared virtual UID/GID storage (defined in Hooks.cpp)
 extern int32_t g_virtualUid;
 extern int32_t g_virtualGid;
 void SetVirtualUid(int32_t uid);
 extern std::atomic<int> g_systemCallDepth;
 
-// ---- File I/O originals ----
 extern int (*_Original_open)(const char*, int, ...);
 extern int (*_Original_open64)(const char*, int, ...);
 extern int (*_Original__open_2)(const char*, int);
@@ -48,21 +46,19 @@ extern struct dirent*   (*_Original_readdir)(DIR*);
 extern struct dirent64* (*_Original_readdir64)(DIR*);
 extern int (*_Original_getdents64)(unsigned int, struct dirent64*, unsigned int);
 
-// ---- Loader ----
 extern void* (*_Original_dlopen)(const char*, int);
 extern void* (*_Original_android_dlopen_ext)(const char*, int, const void*);
 
-// ---- Property API ----
 extern int   (*_Original___system_property_get)(const char*, char*);
 extern const void* (*_Original___system_property_find)(const char*);
 extern void  (*_Original___system_property_read_callback)(
         const void*, void(*)(void*, const char*, const char*, uint32_t), void*);
 extern int   (*_Original___system_property_read)(const void*, char*, char*);
 
-// ---- UID / GID ----
 extern uid_t (*_Original_getuid)();
 extern uid_t (*_Original_geteuid)();
 extern gid_t (*_Original_getgid)();
 extern gid_t (*_Original_getegid)();
 
-void InstallHooks();
+// Returns HookResult (0 = HOOK_OK).
+int InstallHooks();

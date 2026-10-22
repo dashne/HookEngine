@@ -4,14 +4,42 @@
 #include <unistd.h>
 #include <android/log.h>
 #include <errno.h>
+#include <mutex>
+#include "arm64_reloc.h"
+#include "HookRegistry.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-#define ARM64_BRANCH_OFFSET(offset) (0x14000000 | (((offset) >> 2) & 0x03FFFFFF))
 #define ARM64_LDR_X17_8 0x58000051
 #define ARM64_BR_X17    0xD61F0220
+
+static std::mutex g_hook_mutex;
+
+static bool ReadPageProt(uintptr_t page, int *outProt) {
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return false;
+    char line[512];
+    bool ok = false;
+    while (fgets(line, sizeof(line), f)) {
+        unsigned long s, e;
+        char perms[8] = {0};
+        if (sscanf(line, "%lx-%lx %7s", &s, &e, perms) == 3) {
+            if (s <= page && page < e) {
+                int p = 0;
+                if (perms[0] == 'r') p |= PROT_READ;
+                if (perms[1] == 'w') p |= PROT_WRITE;
+                if (perms[2] == 'x') p |= PROT_EXEC;
+                *outProt = p;
+                ok = true;
+                break;
+            }
+        }
+    }
+    fclose(f);
+    return ok;
+}
 
 void* AllocateMemoryNear(void* target, size_t size) {
     long pageSize = sysconf(_SC_PAGESIZE);
@@ -23,10 +51,8 @@ void* AllocateMemoryNear(void* target, size_t size) {
         int n = 0;
         if (targetAddr >= off)       cand[n++] = (targetAddr - off) & ~(pageSize - 1);
         if (targetAddr + off > off)  cand[n++] = (targetAddr + off) & ~(pageSize - 1);
-
         for (int k = 0; k < n; k++) {
             void* hint = (void*)cand[k];
-            // RWX up front — caller writes the relay immediately
             void* m = mmap(hint, size, PROT_READ | PROT_WRITE | PROT_EXEC,
                            MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
             if (m == MAP_FAILED) continue;
@@ -39,83 +65,199 @@ void* AllocateMemoryNear(void* target, size_t size) {
         }
         return nullptr;
     };
-
     for (int i = 1; i <= 1024; i++) {
-        void* m = tryOffset((uintptr_t)i * pageSize);
-        if (m) return m;
+        void* m = tryOffset((uintptr_t)i * pageSize); if (m) return m;
     }
     for (int i = 1; i < 120; i++) {
-        void* m = tryOffset((uintptr_t)i * 1024 * 1024);
-        if (m) return m;
+        void* m = tryOffset((uintptr_t)i * 1024 * 1024); if (m) return m;
     }
     return nullptr;
 }
 
-extern "C" bool InstallInlineHook(void* targetFunc, void* fakeFunc, void** originalTrampoline) {
-    if (!targetFunc || !fakeFunc) return false;
-    uint32_t* targetCode = (uint32_t*)targetFunc;
+static HookResult BuildTrampoline(void* target, void* tramp, size_t tramp_size) {
+    uint32_t orig = *(volatile uint32_t*)target;
+    uint32_t out[16] = {0};
+    int n = EmitRelocated(orig, (uint64_t)target, (uint64_t)tramp, out, 16);
+    if (n == 0) {
+        LOGE("InlineHooker: cannot relocate insn 0x%08x (kind=%d) at %p",
+             orig, (int)ClassifyInsn(orig).kind, target);
+        return HOOK_UNSUPPORTED_INSN;
+    }
+    if ((size_t)(n + 1) * 4 > tramp_size) return HOOK_ALLOC_FAILED;
+
+    uint32_t ret;
+    if (!EncodeBranch(&ret, (uint64_t)tramp + n * 4, (uint64_t)target + 4, false)) {
+        LOGE("InlineHooker: return branch out of range");
+        return HOOK_ALLOC_FAILED;
+    }
+    out[n] = ret;
+
+    memcpy(tramp, out, (n + 1) * 4);
+    __builtin___clear_cache((char*)tramp, (char*)tramp + (n + 1) * 4);
+    return HOOK_OK;
+}
+
+extern "C" HookResult InstallInlineHookEx(void* targetFunc, void* fakeFunc,
+                                          void** originalTrampoline,
+                                          const char* name) {
+    if (!targetFunc || !fakeFunc) return HOOK_INTERNAL_ERROR;
+    LOGD("IIHE(%s): enter target=%p", name ? name : "?", targetFunc);
+
+    std::lock_guard<std::mutex> lock(g_hook_mutex);
+    LOGD("IIHE(%s): mutex acquired", name ? name : "?");
+    HookHandle* existing = FindHandle(targetFunc);
+    if (existing) {
+        if (existing->replacement != fakeFunc) {
+            LOGE("IIHE(%s): conflict — target %p already hooked with different replacement",
+                 name ? name : "?", targetFunc);
+            return HOOK_INTERNAL_ERROR;
+        }
+        return HOOK_ALREADY_HOOKED;
+    }
+    LOGD("IIHE(%s): not already hooked", name ? name : "?");
+
     long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) return HOOK_INTERNAL_ERROR;
+    uintptr_t pageStart = (uintptr_t)targetFunc & ~(pageSize - 1);
 
-    // Refuse PC-relative first instructions (naive trampoline would break them)
-    uint32_t insn = targetCode[0];
-    if ((insn & 0xFC000000) == 0x14000000) { LOGE("target starts with B — refusing"); return false; }
-    if ((insn & 0xFC000000) == 0x94000000) { LOGE("target starts with BL — refusing"); return false; }
-    if ((insn & 0x9F000000) == 0x10000000) { LOGE("target starts with ADR — refusing"); return false; }
-    if ((insn & 0x9F000000) == 0x90000000) { LOGE("target starts with ADRP — refusing"); return false; }
-    if ((insn & 0x3B000000) == 0x18000000) { LOGE("target starts with LDR-literal — refusing"); return false; }
+    int origProt = PROT_READ | PROT_EXEC;
+    if (!ReadPageProt(pageStart, &origProt)) return HOOK_INTERNAL_ERROR;
+    LOGD("IIHE(%s): origProt=0x%x", name ? name : "?", origProt);
 
-    void* relayPage = AllocateMemoryNear(targetFunc, pageSize);
-    if (!relayPage) { LOGE("no relay page within 120MB of %p", targetFunc); return false; }
-
-    uint32_t* relay = (uint32_t*)relayPage;
-    relay[0] = ARM64_LDR_X17_8;
-    relay[1] = ARM64_BR_X17;
-    *(uint64_t*)&relay[2] = (uint64_t)fakeFunc;
+    void* relay = AllocateMemoryNear(targetFunc, pageSize);
+    if (!relay) {
+        LOGE("IIHE(%s): no relay page", name ? name : "?");
+        return HOOK_ALLOC_FAILED;
+    }
+    LOGD("IIHE(%s): relay=%p", name ? name : "?", relay);
+    uint32_t* rp = (uint32_t*)relay;
+    rp[0] = ARM64_LDR_X17_8;
+    rp[1] = ARM64_BR_X17;
+    *(uint64_t*)&rp[2] = (uint64_t)fakeFunc;
     __builtin___clear_cache((char*)relay, (char*)relay + 16);
 
-    void* tramp = mmap(NULL, pageSize, PROT_READ | PROT_WRITE,
-                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (tramp == MAP_FAILED) { munmap(relayPage, pageSize); return false; }
+    void* tramp = AllocateMemoryNear(targetFunc, pageSize);
+    if (!tramp) {
+        LOGE("IIHE(%s): no tramp page", name ? name : "?");
+        munmap(relay, pageSize);
+        return HOOK_ALLOC_FAILED;
+    }
+    LOGD("IIHE(%s): tramp=%p", name ? name : "?", tramp);
 
-    uint32_t* tc = (uint32_t*)tramp;
-    tc[0] = insn;
-    tc[1] = ARM64_LDR_X17_8;
-    tc[2] = ARM64_BR_X17;
-    *(uint64_t*)&tc[3] = (uint64_t)targetFunc + 4;
+    LOGD("IIHE(%s): calling BuildTrampoline", name ? name : "?");
+    HookResult r = BuildTrampoline(targetFunc, tramp, pageSize);
+    LOGD("IIHE(%s): BuildTrampoline r=%d", name ? name : "?", (int)r);
+    if (r != HOOK_OK) {
+        munmap(tramp, pageSize);
+        munmap(relay, pageSize);
+        return r;
+    }
     if (mprotect(tramp, pageSize, PROT_READ | PROT_EXEC) != 0) {
-        munmap(tramp, pageSize); munmap(relayPage, pageSize); return false;
+        LOGE("IIHE(%s): tramp RX failed errno=%d", name ? name : "?", errno);
+        munmap(tramp, pageSize);
+        munmap(relay, pageSize);
+        return HOOK_MPROTECT_FAILED;
     }
-    __builtin___clear_cache((char*)tramp, (char*)tramp + 28);
+    LOGD("IIHE(%s): tramp RX OK", name ? name : "?");
 
-    uintptr_t tStart = (uintptr_t)targetFunc & ~(pageSize - 1);
-    if (mprotect((void*)tStart, pageSize, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        LOGE("mprotect RWX on target failed: %d", errno);
-        munmap(tramp, pageSize); munmap(relayPage, pageSize); return false;
+    uint32_t branch;
+    if (!EncodeBranch(&branch, (uint64_t)targetFunc, (uint64_t)relay, false)) {
+        LOGE("IIHE(%s): branch encode failed", name ? name : "?");
+        munmap(tramp, pageSize);
+        munmap(relay, pageSize);
+        return HOOK_ALLOC_FAILED;
     }
+    LOGD("IIHE(%s): target branch=0x%08x", name ? name : "?", branch);
 
-    int64_t off = (int64_t)relayPage - (int64_t)targetFunc;
-    uint32_t branch = ARM64_BRANCH_OFFSET(off);
-    targetCode[0] = branch;
+    if (mprotect((void*)pageStart, pageSize, origProt | PROT_WRITE) != 0) {
+        LOGE("IIHE(%s): target RW failed errno=%d", name ? name : "?", errno);
+        munmap(tramp, pageSize);
+        munmap(relay, pageSize);
+        return HOOK_MPROTECT_FAILED;
+    }
+    LOGD("IIHE(%s): target RW OK", name ? name : "?");
+
+    uint32_t saved = *(volatile uint32_t*)targetFunc;
+    *(volatile uint32_t*)targetFunc = branch;
     __builtin___clear_cache((char*)targetFunc, (char*)targetFunc + 4);
 
-    if (targetCode[0] != branch) {
-        LOGE("patch verify failed at %p", targetFunc);
-        targetCode[0] = insn;
+    if (*(volatile uint32_t*)targetFunc != branch) {
+        LOGE("IIHE(%s): patch verify failed", name ? name : "?");
+        *(volatile uint32_t*)targetFunc = saved;
         __builtin___clear_cache((char*)targetFunc, (char*)targetFunc + 4);
-        mprotect((void*)tStart, pageSize, PROT_READ | PROT_EXEC);   // restore even on failure
-        munmap(tramp, pageSize); munmap(relayPage, pageSize);
-        return false;
+        mprotect((void*)pageStart, pageSize, origProt);
+        munmap(tramp, pageSize);
+        munmap(relay, pageSize);
+        return HOOK_INTERNAL_ERROR;
     }
+    LOGD("IIHE(%s): patch verified", name ? name : "?");
 
-    // ---- CRITICAL: restore target page to RX (never leave RWX) ----
-    // Prevents BTI/MTE rejection on API 34+ and execmem SELinux audits.
-    mprotect((void*)tStart, pageSize, PROT_READ | PROT_EXEC);
+    if (mprotect((void*)pageStart, pageSize, origProt) != 0) {
+        LOGE("IIHE(%s): target restore failed errno=%d", name ? name : "?", errno);
+        mprotect((void*)pageStart, pageSize, origProt | PROT_WRITE);
+        *(volatile uint32_t*)targetFunc = saved;
+        __builtin___clear_cache((char*)targetFunc, (char*)targetFunc + 4);
+        mprotect((void*)pageStart, pageSize, origProt);
+        munmap(tramp, pageSize);
+        munmap(relay, pageSize);
+        return HOOK_MPROTECT_FAILED;
+    }
+    LOGD("IIHE(%s): target restored to 0x%x", name ? name : "?", origProt);
+
+    LOGD("IIHE(%s): RegistryAlloc", name ? name : "?");
+    HookHandle* h = RegistryAlloc();
+    if (!h) {
+        LOGE("IIHE(%s): no registry slot", name ? name : "?");
+        mprotect((void*)pageStart, pageSize, origProt | PROT_WRITE);
+        *(volatile uint32_t*)targetFunc = saved;
+        __builtin___clear_cache((char*)targetFunc, (char*)targetFunc + 4);
+        mprotect((void*)pageStart, pageSize, origProt);
+        munmap(tramp, pageSize);
+        munmap(relay, pageSize);
+        return HOOK_INTERNAL_ERROR;
+    }
+    h->type = HT_INLINE;
+    h->target = targetFunc;
+    h->replacement = fakeFunc;
+    h->saved = (void*)(uintptr_t)saved;
+    h->trampoline = tramp;
+    h->tramp_size = pageSize;
+    h->relay      = relay;
+    h->relay_size = pageSize;
+    h->orig_prot  = origProt;
+    h->page_size = pageSize;
+    h->state = HS_INSTALLED;
+    if (name) snprintf(h->name, sizeof(h->name), "%s", name);
+
+    if (originalTrampoline) *originalTrampoline = tramp;
+
+    LOGD("IIHE(%s): DONE relay=%p tramp=%p", name ? name : "?", relay, tramp);
+    return HOOK_OK;
+}
+
+extern "C" bool InstallInlineHook(void* targetFunc, void* fakeFunc, void** originalTrampoline) {
+    return InstallInlineHookEx(targetFunc, fakeFunc, originalTrampoline, "inline") == HOOK_OK;
+}
+
+extern "C" HookResult UninstallInlineHook(void* targetFunc) {
+    std::lock_guard<std::mutex> lock(g_hook_mutex);
+    HookHandle* h = FindHandle(targetFunc);
+    if (!h || h->type != HT_INLINE) return HOOK_NOT_HOOKED;
+    h->state = HS_REMOVING;
+
+    uintptr_t pageStart = (uintptr_t)targetFunc & ~(h->page_size - 1);
+    if (mprotect((void*)pageStart, h->page_size, h->orig_prot | PROT_WRITE) != 0) {
+        h->state = HS_INSTALLED;
+        return HOOK_MPROTECT_FAILED;
+    }
+    *(volatile uint32_t*)targetFunc = (uint32_t)(uintptr_t)h->saved;
     __builtin___clear_cache((char*)targetFunc, (char*)targetFunc + 4);
-    // ----------------------------------------------------------------
-
-    *originalTrampoline = tramp;
-    LOGD("inline hook %p OK: relay %p, dist 0x%lx",
-         targetFunc, relayPage,
-         (unsigned long)((intptr_t)relayPage - (intptr_t)targetFunc));
-    return true;
+    if (mprotect((void*)pageStart, h->page_size, h->orig_prot) != 0) {
+        h->state = HS_INSTALLED;
+        return HOOK_MPROTECT_FAILED;
+    }
+    munmap(h->trampoline, h->tramp_size);
+    if (h->relay) munmap(h->relay, h->relay_size);
+    RegistryFree(h);
+    return HOOK_OK;
 }

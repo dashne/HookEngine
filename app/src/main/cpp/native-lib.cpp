@@ -10,9 +10,11 @@
 #include <pthread.h>
 #include <time.h>
 #include <atomic>
-#include <fcntl.h>          // ← ADD
+#include <fcntl.h>
+#include <android/api-level.h>
 #include "Hooks.h"
 #include "RedirectTable.h"
+#include "HookRegistry.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -33,39 +35,23 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     JNIEnv* env = nullptr;
     if (vm->GetEnv((void**)&env, JNI_VERSION_1_6) != JNI_OK) return JNI_ERR;
     if (!env) return JNI_ERR;
-
     jclass t = env->FindClass("java/lang/Thread");
     if (t) g_threadCls = (jclass)env->NewGlobalRef(t);
     if (env->ExceptionCheck()) env->ExceptionClear();
-
     jclass e = env->FindClass("java/lang/StackTraceElement");
     if (e) g_elemCls = (jclass)env->NewGlobalRef(e);
     if (env->ExceptionCheck()) env->ExceptionClear();
-
     if (g_threadCls) {
-        g_currentThreadMethod = env->GetStaticMethodID(g_threadCls,
-                                                       "currentThread", "()Ljava/lang/Thread;");
-        g_getStackTraceMethod = env->GetMethodID(g_threadCls,
-                                                 "getStackTrace", "()[Ljava/lang/StackTraceElement;");
+        g_currentThreadMethod = env->GetStaticMethodID(g_threadCls, "currentThread", "()Ljava/lang/Thread;");
+        g_getStackTraceMethod = env->GetMethodID(g_threadCls, "getStackTrace", "()[Ljava/lang/StackTraceElement;");
         if (env->ExceptionCheck()) env->ExceptionClear();
     }
     if (g_elemCls) {
-        g_getClassNameMethod = env->GetMethodID(g_elemCls,
-                                                "getClassName", "()Ljava/lang/String;");
+        g_getClassNameMethod = env->GetMethodID(g_elemCls, "getClassName", "()Ljava/lang/String;");
         if (env->ExceptionCheck()) env->ExceptionClear();
     }
-    LOGD("JNI_OnLoad: cached Thread=%p Elem=%p (env=%p)",
-         g_threadCls, g_elemCls, env);
+    LOGD("JNI_OnLoad: cached Thread=%p Elem=%p", g_threadCls, g_elemCls);
     return JNI_VERSION_1_6;
-}
-
-
-static __thread int     g_inStackWalk  = 0;
-
-static int64_t NowNs() {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
 static bool IsFrameworkClass(const char* cn) {
@@ -86,96 +72,13 @@ static bool IsFrameworkClass(const char* cn) {
     return false;
 }
 
-static int SafeStackWalk(JNIEnv* env) {
-    if (!env) return -1;
-    if (!g_threadCls || !g_elemCls || !g_currentThreadMethod ||
-        !g_getStackTraceMethod || !g_getClassNameMethod) return -1;
-
-    if (env->PushLocalFrame(64) != JNI_OK) return -1;
-
-    int decision = -1;
-    jobject thread = nullptr;
-    jobjectArray stack = nullptr;
-
-    thread = env->CallStaticObjectMethod(g_threadCls, g_currentThreadMethod);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); goto done; }
-    if (!thread) goto done;
-
-    stack = (jobjectArray)env->CallObjectMethod(thread, g_getStackTraceMethod);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); goto done; }
-    if (!stack) goto done;
-
-    {
-        int len = env->GetArrayLength(stack);
-        bool sawApp = false;
-        bool sawFramework = false;
-        const char* firstNonSelf = nullptr;
-        char firstNonSelfBuf[128] = {0};
-
-        for (int i = 0; i < len && i < 40; i++) {
-            jobject elem = env->GetObjectArrayElement(stack, i);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); continue; }
-            if (!elem) continue;
-
-            jstring cnStr = (jstring)env->CallObjectMethod(elem, g_getClassNameMethod);
-            if (env->ExceptionCheck()) { env->ExceptionClear(); continue; }
-            if (cnStr) {
-                const char* cn = env->GetStringUTFChars(cnStr, nullptr);
-                if (env->ExceptionCheck()) { env->ExceptionClear(); cn = nullptr; }
-                if (cn) {
-                    // Record the first class we saw that's not our hook
-                    if (!firstNonSelf &&
-                        strstr(cn, "com.ims134.hookengine") == nullptr &&
-                        strncmp(cn, "java.", 5) != 0 &&
-                        strncmp(cn, "dalvik.", 7) != 0) {
-                        firstNonSelf = firstNonSelfBuf;
-                        strncpy(firstNonSelfBuf, cn, sizeof(firstNonSelfBuf) - 1);
-                    }
-
-                    if (IsFrameworkClass(cn)) {
-                        sawFramework = true;
-                        env->ReleaseStringUTFChars(cnStr, cn);
-                        break;
-                    }
-                    if (strncmp(cn, "com.ims134.hookengine.", 22) == 0) {
-                        sawApp = true;
-                    }
-                    env->ReleaseStringUTFChars(cnStr, cn);
-                }
-                env->DeleteLocalRef(cnStr);
-            }
-            env->DeleteLocalRef(elem);
-        }
-
-        if (sawFramework) {
-            decision = 0;   // real UID
-        } else if (sawApp) {
-            decision = 1;   // fake UID
-        } else {
-            // Uncertain: neither framework nor app identified.
-            // Default to real UID — safe. Framework keeps working.
-            decision = -1;
-            if (firstNonSelf) {
-                LOGD("getCallingUid: uncertain caller (%s) — returning real UID", firstNonSelf);
-            }
-        }
-    }
-
-    done:
-    env->PopLocalFrame(nullptr);
-    if (env->ExceptionCheck()) env->ExceptionClear();
-    return decision;
-}
-
 extern "C" int32_t JNICALL FakeBinderGetCallingUid(JNIEnv*, jclass) {
-    if (g_systemCallDepth.load(std::memory_order_acquire) > 0) {
+    if (g_systemCallDepth.load(std::memory_order_acquire) > 0)
         return (int32_t)syscall(SYS_getuid);
-    }
     char tname[32] = {0};
     if (pthread_getname_np(pthread_self(), tname, sizeof(tname)) == 0) {
-        if (strncmp(tname, "Binder:", 7) == 0 || strncmp(tname, "binder:", 7) == 0) {
+        if (strncmp(tname, "Binder:", 7) == 0 || strncmp(tname, "binder:", 7) == 0)
             return (int32_t)syscall(SYS_getuid);
-        }
     }
     return g_virtualUid;
 }
@@ -185,9 +88,26 @@ static void*  g_hooked_page        = nullptr;
 static int    g_hooked_orig_prot   = 0;
 static long   g_hooked_page_size   = 0;
 
-bool HookJavaMethod(JNIEnv* env, jobject methodObj, void* newFunc, void** originalFunc) {
+static constexpr int kMinApi = 34;
+static constexpr int kMaxApi = 37;
+
+extern "C" jint CheckHookCapability() {
+    int api = android_get_device_api_level();
+    if (api < kMinApi || api > kMaxApi) return HOOK_UNSUPPORTED_API;
+    if (sizeof(void*) != 8) return HOOK_UNSUPPORTED_ABI;
+    return HOOK_OK;
+}
+
+static HookResult HookJavaMethod(JNIEnv* env, jobject methodObj, void* newFunc, void** originalFunc) {
+    jint cap = CheckHookCapability();
+    if (cap != HOOK_OK) {
+        LOGE("HookJavaMethod: capability check failed (%d) api=%d",
+             (int)cap, android_get_device_api_level());
+        return (HookResult)cap;
+    }
+
     jmethodID methodId = env->FromReflectedMethod(methodObj);
-    if (!methodId) { LOGE("jmethodID null"); return false; }
+    if (!methodId) { LOGE("jmethodID null"); return HOOK_INTERNAL_ERROR; }
     void* artMethod = (void*)methodId;
 
     void** entryPoint = nullptr;
@@ -203,14 +123,13 @@ bool HookJavaMethod(JNIEnv* env, jobject methodObj, void* newFunc, void** origin
             }
         }
     }
-    if (!entryPoint) { LOGE("no native entry in ArtMethod"); return false; }
+    if (!entryPoint) { LOGE("no native entry in ArtMethod"); return HOOK_SYMBOL_MISSING; }
 
     *originalFunc = *entryPoint;
 
     long ps = sysconf(_SC_PAGESIZE);
     uintptr_t pg = (uintptr_t)entryPoint & ~(ps - 1);
 
-    // Read the ACTUAL current protection from /proc/self/maps
     int origProt = PROT_READ | PROT_WRITE;
     FILE* f = fopen("/proc/self/maps", "r");
     if (f) {
@@ -236,13 +155,13 @@ bool HookJavaMethod(JNIEnv* env, jobject methodObj, void* newFunc, void** origin
 
     if (mprotect((void*)pg, ps, origProt | PROT_WRITE) != 0) {
         LOGE("HookJavaMethod: mprotect RW failed: %d", errno);
-        return false;
+        return HOOK_MPROTECT_FAILED;
     }
     *entryPoint = newFunc;
     __builtin___clear_cache((char*)artMethod, (char*)artMethod + 64);
-    // ---- restore EXACTLY what was there before, no downgrade ----
     if (mprotect((void*)pg, ps, origProt) != 0) {
         LOGE("HookJavaMethod: restore mprotect failed: %d", errno);
+        return HOOK_MPROTECT_FAILED;
     }
 
     g_hooked_page        = (void*)pg;
@@ -252,7 +171,7 @@ bool HookJavaMethod(JNIEnv* env, jobject methodObj, void* newFunc, void** origin
 
     LOGD("ArtMethod hook at offset %d, restored to 0x%x",
          (int)((uint8_t*)entryPoint - (uint8_t*)artMethod), origProt);
-    return true;
+    return HOOK_OK;
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -274,15 +193,28 @@ Java_com_ims134_hookengine_RemoteService_restoreBinderMethod(JNIEnv*, jobject) {
          (void*)_OriginalGetCallingUid);
 }
 
-extern "C" JNIEXPORT void JNICALL
+// Returns HookResult as int (0 = OK). Callers must check.
+extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_RemoteService_hookBinderMethod(JNIEnv* env, jobject, jobject methodObj) {
     void* saved = nullptr;
-    if (HookJavaMethod(env, methodObj, (void*)FakeBinderGetCallingUid, &saved)) {
+    HookResult r = HookJavaMethod(env, methodObj, (void*)FakeBinderGetCallingUid, &saved);
+    if (r == HOOK_OK) {
         _OriginalGetCallingUid = (GetCallingUidFunc)saved;
         LOGD("JNI Hook installed, original=%p", saved);
     } else {
-        LOGE("JNI Hook failed.");
+        LOGE("JNI Hook failed: r=%d", (int)r);
     }
+    return (jint)r;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_RemoteService_capabilityCheck(JNIEnv*, jobject) {
+    return CheckHookCapability();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_RemoteService_hookCount(JNIEnv*, jobject) {
+    return (jint)RegistryCount();
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -297,9 +229,9 @@ Java_com_ims134_hookengine_RemoteService_setVirtualUid(JNIEnv*, jobject, jint ui
     LOGD("Virtual UID set to %d", (int)uid);
 }
 
-extern "C" JNIEXPORT void JNICALL
+extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_RemoteService_installNativeHooks(JNIEnv*, jobject) {
-    InstallHooks();
+    return (jint)InstallHooks();
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -340,8 +272,6 @@ Java_com_ims134_hookengine_RemoteService_hiddenApiInstall(JNIEnv*, jobject) { re
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_ims134_hookengine_RemoteService_diagRawZip(JNIEnv* env, jobject, jstring path) {
-    // Pure JNI check: open the APK as a ZIP via libziparchive without touching
-    // Java PackageManager. If this crashes, the file itself is broken.
     const char* p = env->GetStringUTFChars(path, nullptr);
     int fd = open(p, O_RDONLY | O_CLOEXEC);
     env->ReleaseStringUTFChars(path, p);
@@ -350,7 +280,6 @@ Java_com_ims134_hookengine_RemoteService_diagRawZip(JNIEnv* env, jobject, jstrin
         snprintf(buf, sizeof(buf), "open failed errno=%d", errno);
         return env->NewStringUTF(buf);
     }
-    // Read first 4 bytes — ZIP magic PK\3\4
     unsigned char magic[4] = {0};
     ssize_t n = read(fd, magic, 4);
     close(fd);

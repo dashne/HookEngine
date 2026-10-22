@@ -1,8 +1,6 @@
 cmake_minimum_required(VERSION 3.22.1)
 
-
 project("hookengine")
-
 
 add_library(${CMAKE_PROJECT_NAME} SHARED
         native-lib.cpp
@@ -11,13 +9,14 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         Hooks.cpp
         InlineHooker.cpp
         HiddenApi.cpp
+        HookRegistry.cpp
+        arm64_reloc.cpp
+        test_item1.cpp
+        test_item2.cpp
+        test_item3.cpp
 )
 
-find_library(
-        log-lib
-        log
-)
-
+find_library(log-lib log)
 
 target_link_libraries(${CMAKE_PROJECT_NAME}
         android
