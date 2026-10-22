@@ -175,7 +175,6 @@ class RemoteService : Service() {
                 Log.e("DualCore", "Item2 test crashed: $e")
             }
 
-
         }.start()
 
         return START_NOT_STICKY
