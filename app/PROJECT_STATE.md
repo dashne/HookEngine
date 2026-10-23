@@ -518,5 +518,205 @@ will not work.
 
 ---
 
+## MISSION #1 — Reproduce ApplicationProxy — declared 2026-10-24
+
+### Scope (permanent, supersedes all prior plans)
+
+Replicate the reference implementation
+`com.excelliance.kxqp.platform.ApplicationProxy` (decompiled) **completely**
+before any DualHost integration. The reference is ~90 native methods across
+11 categories. Every method must be present in our engine — either as a
+direct port, an equivalent under a different name, or (with justification)
+explicitly marked out-of-scope.
+
+**DualHost integration is BLOCKED until the reference surface is matched.**
+
+### Current coverage: 10 / 90 (~11%)
+
+**Delivered (matches reference):**
+| Method | Ours | Status |
+|---|---|---|
+| `attachBaseContext` | `DualApplication.attachBaseContext` | ✅ |
+| `onCreate` | `DualApplication.onCreate` | ✅ |
+| `nativeOnLoad` | `DualApplication.cpp::nativeOnLoad` | ⚠️ Partial — records paths, doesn't extract DEX |
+| `nativeFNLN` | `ClassLoaderBridge.installFor` | ✅ |
+| `getCallingUid` | `FakeBinderGetCallingUid` | ✅ |
+| `is64Bit` | Implicit (arm64-only build) | ✅ |
+| `nativeGetCpuABI` | Implicit (arm64-only build) | ✅ |
+| `nativeAIOR` | Frida port block | ⚠️ Partial — 1 category of N |
+| `nativeDNPO` | TracerPid filter | ⚠️ Partial — misses full ptrace detect |
+| `nativeAMRHook` | Path hide list | ⚠️ Partial — no mount spoof |
+
+**Not started (80 methods):**
+- **`tnFIN`** — Binder transact interceptor. **HIGHEST PRIORITY.** All Java-layer spoof is bypassable by direct transact.
+- **`handleJHMethod`** + `nativeCNVM` — Java method dispatcher
+- **`nativeInit`** (9 params) — full context config
+- **Per-signature hook family (13 methods)** — `nativeBINH`, `nativeBPNH`, `nativeCLFH`, `nativeFRNH`, `nativeFSC`, `nativeLILH`, `nativeMDRMH`, `nativeMMIORH`, `nativeNGSTHook`, `nativeNINH`, `nativeSSMH`, `nativeTSTNH`, `nativeVMRTH`
+- **Field/method getters (~15)** — `onGIF`, `onSIF`, `getFCO`, `getFNIR`, `getFIAAR`, `getFSTAF`, `getFBI`, `getFBABAI`, `getFWM`, `nativeGDFK`, `nativeGETDFNH`, `nativeGETDFS`, `nativeGETDMUH`, `getNIDS`, `nativeGIOMP`
+- **Anti-detection remaining (~20)** — `nativeADB`, `nativeADOI`, `nativeAURR`, `nativeASK`, `nativeALBNM`, `nativeDNPO` (full), `nativeEROT`, `nativeIMME`, `nativeSHH`, `nativeSDMD`, `nativeSDTWI`, `nativeSIOR`, `nativeUFPL`, `nativeSFU`, `nativeSGSP`, `nativeSNF`, `nativeSQHCT`, `nativeSTZ`, `nativeTTLHW`, `nativeSATSV`, `nativeDBTHL`, `nativeLNLIH`, `nativeRTIMs`, `nativeLFMH`, `nativeLFMUH`, `nativeMMPH`, `nativeDJCV`, `nativeNPX`, `nativeSPPL`
+- **File/IO (~5)** — `nativeSFSP`, `nativeSDO`, `nativeFCSCSG`, `nativeFIOR`, `nativeFGR`
+- **NLDS (~2)** — `nativeStartNLDS`, `nativeUpdateNLDS`
+- **ANR/crash/debug (~13)** — `nativeSignalAnrDetectiveInit`, `onANRDumped`, `onTraceFileDumpFinished`, `onPKTECB`, `reportAppExit`, `reportAppHaveDetected`, `reportHanhuaCorrupted`, `reportHanhuaUpdate`, `reportNativeCrashInfo`, `reportNewGameStarted`, `nativeDbgCaptureLog`, `nativeDbgClientInit`, `nativeDbgServerStart`
+- **Misc (~7)** — `nativeJH*` family (`nativeJHHJM`, `nativeJHIOJM`, `nativeJHJHC`, `nativeJHYABAH`, `nativeJHYAInit`, `nativeJHI`, `nativeJHJI`, `nativeJHANRM`)
+- **Public instance methods (~2)** — `call(int, Object[])`, `callAssistant(Context, int, Object[])`
+- **Static init** — DEX extraction from APK-JAR with checksum + file lock
+
+### Order of attack
+
+**Phase A — Core engine (blocking everything else):**
+1. `tnFIN` (Binder transact) ← **current session**
+2. `handleJHMethod` + `nativeCNVM` (Java dispatcher)
+3. `nativeInit` (full config)
+4. `nativeOnLoad` (full DEX extract, if needed)
+
+**Phase B — Java hook surface:**
+5. Per-signature hook family (13 methods)
+6. Field/method getters (~15)
+
+**Phase C — Anti-detection full suite (~20)**
+
+**Phase D — ANR / crash / debug (~13)**
+
+**Phase E — Misc + public instance methods**
+
+### Rules of engagement
+
+1. **Every session opens with the mission header.** No exceptions.
+2. **DualHost integration is out of scope until Phase A complete.** When Phase A is done, re-evaluate; DualHost may still wait for Phase B.
+3. **Coverage number in every message.** 10/90 now, must be higher every session.
+4. **Every method shipped must have a test.** Decision-function tests + E2E where the hook fires.
+5. **Do not declare a method "done" unless it matches the reference's behavior**, not just its signature.
+6. **Session-by-session commit discipline.** One method (or one logical group) per commit, tests green at every commit.
+
+### Current state (as of session 6 close)
+
+- 31 JUnit tests green
+- 27 process_hooks assertions, 18 anti_detection assertions
+- `IsSuPath` and `Fake_system` false-positive bugs fixed
+- `HiddenPaths.h` is single source of truth for path tables
+- Reference surface: 10/90
+
+---
+
+## Session 7 — BinderProbe results + strategy correction — 2026-10-24
+
+### Mission #1 status
+
+**Reference surface coverage: 10 / 90 (~11%).**
+DualHost integration blocked until all 90 methods are present. No exceptions.
+
+### What was probed
+
+`BinderProbe.cpp` scans `libbinder.so` `.dynsym` for the symbols we'd need
+to implement `tnFIN` (Binder transact interceptor).
+
+### Key findings
+
+1. **`BinderProxy::transact` is NOT a C++ symbol** in `libbinder.so`.
+   Neither mangling variant found. Reason: `android.os.BinderProxy.transact`
+   is a **Java `native` method**, implemented as JNI function
+   `android_os_BinderProxy_transact` in `libandroid_runtime.so`, registered
+   via `RegisterNatives`. It was never a C++ class method.
+
+2. **The reference's `tnFIN` signature confirms this:**
+   `tnFIN(Object obj, int i, Parcel parcel, Parcel parcel2, int i2)`
+   = JNI signature of a hooked `BinderProxy.transact`. The reference is
+   hooking the **Java** native method's JNI entry, not a C++ symbol.
+
+3. **All Parcel I/O methods are exported** in `libbinder.so`:
+    - `Parcel::readInt32`           `_ZNK7android6Parcel9readInt32EPi`
+    - `Parcel::writeInt32`          `_ZN7android6Parcel10writeInt32Ei`
+    - `Parcel::readString16`        `_ZNK7android6Parcel12readString16EPNS_8String16E`
+    - `Parcel::writeString16`       `_ZN7android6Parcel13writeString16EPKDsm`
+    - `Parcel::readStrongBinder`    `_ZNK7android6Parcel16readStrongBinderEPNS_2spINS_7IBinderEEE`
+    - `Parcel::writeStrongBinder`   `_ZN7android6Parcel17writeStrongBinderERKNS_2spINS_7IBinderEEE`
+    - `Parcel::data`                `_ZNK7android6Parcel4dataEv`
+    - `Parcel::dataSize`            `_ZNK7android6Parcel8dataSizeEv`
+    - `Parcel::dataPosition`        `_ZNK7android6Parcel12dataPositionEv`
+    - `Parcel::setDataPosition`     `_ZNK7android6Parcel15setDataPositionEm`
+
+   Fallback path for reading parcels if Java-side `Parcel.readInt()` ever
+   gets blocked.
+
+4. **`IPCThreadState::transact` IS exported**:
+   `_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j`
+   Signature: `(int handle, uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags)`
+   Alternative hook target if Java-level `BinderProxy.transact` proves
+   insufficient (e.g., Viber uses a native path that bypasses the Java
+   transact wrapper).
+
+### Strategy correction (supersedes prior plan)
+
+Old plan: hook `BinderProxy::transact` at C++ level via `InstallInlineHookEx`
+on a `libbinder.so` symbol — impossible, symbol doesn't exist.
+
+New plan: hook **Java** `BinderProxy.transact` via `JavaHookInstall`.
+- Mechanism: `JavaHookInstall(env, methodObj, FakeBinderTransact, &orig, ...)`
+- `FakeBinderTransact` is a standard JNI replacement
+  `(JNIEnv*, jobject thiz, jint code, jobject data, jobject reply, jint flags) -> jboolean`
+- Reads/writes Parcel via Java methods through JNI (`env->CallIntMethod(data, readInt)`)
+- Calls original via saved trampoline
+- Same mechanism we already use for `Binder.getCallingUid` and `Process.myPpid`
+- No new native infrastructure required
+
+This matches the reference `tnFIN` implementation exactly.
+
+### Session 7 deliverables
+
+- `BinderProbe.cpp` — symbol scanner for libbinder.so (dynsym only)
+- `BinderProbeTest.kt` — diagnostic test (will be deleted after session 8)
+- 32 JUnit tests green (31 + BinderProbeTest diagnostic)
+- All 90+ internal assertions still green
+
+### Next session (8) — `tnFIN` implementation
+
+Step 1: `BinderProxyProbeTest.kt`
+Verify `BinderProxy.transact` is a `native` Java method on API 37.
+- Use `BinderProxy::class.java.getDeclaredMethod("transact", Int::class.javaPrimitiveType, Parcel::class.java, Parcel::class.java, Int::class.javaPrimitiveType)`
+- Check `Modifier.isNative(modifiers)`
+- Log method ID, parameter types, return type
+- Gate: proceed only if `native=true`
+
+Step 2: `BinderTransactHook.kt`
+- Call `NativeTestBridge.installBinderTransactHook()`
+- Native side: reflect `BinderProxy.transact`, call `JavaHookInstall`
+- Returns `true` if hook installed, `false` if not
+
+Step 3: `FakeBinderTransact` (C++ handler)
+- Read `code` from `args[0]` (transaction code)
+- Match against known codes:
+    - `IPackageManager.TRANSACTION_getPackageInfo` (≈ 3)
+    - `IPackageManager.TRANSACTION_getInstalledPackages` (≈ 27)
+    - `IPackageManager.TRANSACTION_getCallingUid` (dynamic)
+    - `IPackageManager.TRANSACTION_GET_PACKAGE_INFO` etc.
+- For matching codes: parse `data` Parcel via Java methods, rewrite `reply`
+  Parcel for our own package queries (null signatures)
+- For all other codes: pass through to original
+- Careful: do NOT intercept our own calls (recursion)
+    - Solution: check thread name (`Binder:`, our own, etc.) or a
+      `__thread` "inside" flag set during our own PackageManager use
+- Return `true`/`false` matching original's return
+
+Step 4: `BinderTransactHookTest.kt`
+- Install hook
+- Make a raw `IBinder.transact(GET_PACKAGE_INFO)` call to the real
+  `IPackageManager` service, bypassing `PmSpoof`
+- Assert that returned `PackageInfo` has empty signatures
+- This is the definitive "signature check bypassed even via AIDL" test
+- Verify: `PmSpoof` route ALSO still works (no regression)
+
+Step 5: Delete `BinderProbeTest.kt` (diagnostic complete, keep BinderProbe.cpp
+for the .dynsym scanner, which will be used by the tnFIN hook for
+confirmation)
+
+### Rules restated (hold for all future sessions)
+
+1. Mission #1 header at top of every message.
+2. Coverage number in every message (currently 10/90).
+3. No DualHost discussion until Phase A (tnFIN + handleJHMethod +
+   nativeInit + nativeOnLoad full) is complete.
+4. Every method shipped with tests. No exceptions.
+5. `extern "C"` verification table in every message that touches C++ linkage.
+6. Probe before write, when the target is uncertain.
 
 

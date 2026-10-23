@@ -895,3 +895,9 @@ Java_com_ims134_hookengine_NativeTestBridge_deleteFileRaw(
     return ok;
 }
 
+extern "C" int BinderProbe();
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_binderProbe(JNIEnv*, jobject) {
+    return BinderProbe();
+}
+
