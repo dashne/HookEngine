@@ -15,32 +15,27 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 struct JavaHook {
-    void*   art_method;      // ArtMethod* (jmethodID cast)
-    void**  entry_slot;      // &ArtMethod->entry_point_*
-    void*   original;        // saved entry point
+    void*   art_method;
+    void**  entry_slot;
+    void*   original;
     void*   replacement;
-    int     orig_prot;       // page prot before swap
+    int     orig_prot;
     size_t  page_size;
     char    name[64];
 };
 
-static std::mutex          g_jh_mutex;
+static std::mutex            g_jh_mutex;
 static std::vector<JavaHook*> g_jh_hooks;
 
-// Locate the entry-pointer slot inside ArtMethod. On API 34+ / arm64,
-// offset 24 = data_ (jniCode for native methods), offset 32 = quick entry.
-// We scan 24..64 for a pointer that resolves to libart or libandroid_runtime.
-// Same scan as the existing HookJavaMethod in native-lib.cpp — proven to work
-// for Binder.getCallingUid on API 37.
+extern "C" jint CheckHookCapability();
+
 static void** FindEntrySlot(void* art_method) {
-    // Reject fast JNI / intrinsic methods. ART stores a small token in data_
-    // for methods registered via fast-JNI RegisterNatives (e.g. Process.myUid),
-    // not a real ArtMethod*. Guard both the pointer itself and the slot value.
     if ((uintptr_t)art_method < 0x1000) return nullptr;
 
     void* val = *(void**)((uint8_t*)art_method + 24);
     if (!val) return nullptr;
-    if ((uintptr_t)val < 0x1000) return nullptr;   // fast JNI token, not a pointer
+    if ((uintptr_t)val < 0x1000) return nullptr;
+
     Dl_info info;
     if (!dladdr(val, &info) || !info.dli_fname) {
         LOGE("FindEntrySlot: dladdr failed for val=%p", val);
@@ -82,8 +77,17 @@ static bool ReadProt(uintptr_t page, int* out_prot) {
 extern "C" JavaHook* JavaHookInstall(JNIEnv* env, jobject method_obj,
                                      void* replacement, void** out_original,
                                      const char* name) {
-    LOGD("JavaHookInstall[%s]: enter", name ? name : "?");
     if (!env || !method_obj || !replacement) return nullptr;
+
+    // Same gate as HookJavaMethod. Refuse on any ART build outside the
+    // verified range instead of patching offsets that may not mean the same
+    // thing. One bad offset = native crash or silent corruption.
+    jint cap = CheckHookCapability();
+    if (cap != HOOK_OK) {
+        LOGE("JavaHookInstall[%s]: capability refused (%d) — not patching",
+             name ? name : "?", (int)cap);
+        return nullptr;
+    }
 
     jmethodID mid = env->FromReflectedMethod(method_obj);
     if ((uintptr_t)mid < 0x1000) {
@@ -91,7 +95,6 @@ extern "C" JavaHook* JavaHookInstall(JNIEnv* env, jobject method_obj,
              name ? name : "?", (unsigned long)(uintptr_t)mid);
         return nullptr;
     }
-    LOGD("JavaHookInstall[%s]: mid=%p", name ? name : "?", (void*)mid);
     if (!mid) {
         LOGE("JavaHookInstall[%s]: FromReflectedMethod null", name ? name : "?");
         return nullptr;
@@ -117,14 +120,10 @@ extern "C" JavaHook* JavaHookInstall(JNIEnv* env, jobject method_obj,
     int prot = 0;
     if (!ReadProt(page, &prot)) prot = PROT_READ | PROT_WRITE;
 
-    LOGD("JavaHookInstall[%s]: about to mprotect page=%p size=%ld prot=0x%x",
-         name ? name : "?", (void*)page, ps, prot);
     if (mprotect((void*)page, (size_t)ps, prot | PROT_WRITE) != 0) {
         LOGE("JavaHookInstall[%s]: mprotect RW failed errno=%d", name ? name : "?", errno);
         return nullptr;
     }
-    LOGD("JavaHookInstall[%s]: mprotect RW OK, about to write slot=%p",
-         name ? name : "?", (void*)entry_slot);
     *entry_slot = replacement;
     __builtin___clear_cache((char*)entry_slot, (char*)entry_slot + 8);
     mprotect((void*)page, (size_t)ps, prot);
@@ -144,7 +143,7 @@ extern "C" JavaHook* JavaHookInstall(JNIEnv* env, jobject method_obj,
     }
     if (out_original) *out_original = original;
 
-    LOGD("JavaHookInstall[%s]: art_method=%p slot=%p orig=%p repl=%p",
+    LOGD("JavaHookInstall[%s]: ok art_method=%p slot=%p orig=%p repl=%p",
          h->name, art_method, entry_slot, original, replacement);
     return h;
 }

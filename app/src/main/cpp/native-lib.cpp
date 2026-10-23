@@ -537,3 +537,286 @@ Java_com_ims134_hookengine_NativeTestBridge_uninstallProcessHooks(JNIEnv*, jobje
     UninstallProcessHooks();
 }
 
+extern "C" int HiddenApi_Install();
+extern "C" int HiddenApi_Probe();
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_HiddenApiBridge_install(JNIEnv*, jobject) {
+    return HiddenApi_Install();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_HiddenApiBridge_probe(JNIEnv*, jobject) {
+    return HiddenApi_Probe();
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// PmSpoof JNI bridge — bypasses hiddenapi (JNI GetMethodID/NewObject do not
+// consult hiddenapi; only Java-level reflection does).
+// ─────────────────────────────────────────────────────────────────────────
+
+
+
+static jobject ReadMListFrom(JNIEnv* env, jclass c, jobject slice, const char* label) {
+    if (!c) return nullptr;
+    jfieldID f = env->GetFieldID(c, "mList", "Ljava/util/List;");
+    if (!f) { if (env->ExceptionCheck()) env->ExceptionClear(); return nullptr; }
+    jobject v = env->GetObjectField(slice, f);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); return nullptr; }
+    if (v) LOGD("getSliceListNative: OK via %s.mList", label);
+    return v;
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_ims134_hookengine_PmSpoof_getSliceListNative(JNIEnv* env, jobject, jobject slice) {
+    if (!slice) return nullptr;
+
+    // 1. GetFieldID on leaf — walks superclasses (this is the key line).
+    jclass leaf = env->GetObjectClass(slice);
+    if (jobject v = ReadMListFrom(env, leaf, slice, "leaf")) { env->DeleteLocalRef(leaf); return v; }
+    env->DeleteLocalRef(leaf);
+
+    // 2. Explicit walk through known names.
+    const char* names[] = {
+            "android/content/pm/BaseParceledListSlice",
+            "android/content/pm/ParceledListSlice",
+            nullptr
+    };
+    for (int i = 0; names[i]; i++) {
+        jclass c = env->FindClass(names[i]);
+        if (!c) { if (env->ExceptionCheck()) env->ExceptionClear(); continue; }
+        if (jobject v = ReadMListFrom(env, c, slice, names[i])) { env->DeleteLocalRef(c); return v; }
+        env->DeleteLocalRef(c);
+    }
+
+    // 3. Fallback method names (in case ROM renamed getList).
+    const char* methodNames[] = { "getList", "getElements", "elements", "asList", "toList", nullptr };
+    jclass sliceCls = env->FindClass("android/content/pm/ParceledListSlice");
+    if (sliceCls) {
+        for (int i = 0; methodNames[i]; i++) {
+            jmethodID m = env->GetMethodID(sliceCls, methodNames[i], "()Ljava/util/List;");
+            if (!m) { if (env->ExceptionCheck()) env->ExceptionClear(); continue; }
+            jobject v = env->CallObjectMethod(slice, m);
+            if (env->ExceptionCheck()) { env->ExceptionClear(); continue; }
+            if (v) { LOGD("getSliceListNative: OK via %s()", methodNames[i]); env->DeleteLocalRef(sliceCls); return v; }
+        }
+        env->DeleteLocalRef(sliceCls);
+    }
+
+    // 4. Definitive dump — shows every field & method via JNI (bypasses hidden API).
+    jclass cls = env->GetObjectClass(slice);
+    jclass classCls = env->FindClass("java/lang/Class");
+    jmethodID getName = env->GetMethodID(classCls, "getName", "()Ljava/lang/String;");
+    jmethodID getSuper = env->GetMethodID(classCls, "getSuperclass", "()Ljava/lang/Class;");
+    jmethodID getFields = env->GetMethodID(classCls, "getDeclaredFields", "()[Ljava/lang/reflect/Field;");
+    jmethodID getMethods = env->GetMethodID(classCls, "getDeclaredMethods", "()[Ljava/lang/reflect/Method;");
+    jclass fieldCls = env->FindClass("java/lang/reflect/Field");
+    jmethodID fName = env->GetMethodID(fieldCls, "getName", "()Ljava/lang/String;");
+    jmethodID fType = env->GetMethodID(fieldCls, "getType", "()Ljava/lang/Class;");
+    jclass methodCls = env->FindClass("java/lang/reflect/Method");
+    jmethodID mName = env->GetMethodID(methodCls, "getName", "()Ljava/lang/String;");
+
+    while (cls) {
+        jstring cn = (jstring) env->CallObjectMethod(cls, getName);
+        const char* cns = cn ? env->GetStringUTFChars(cn, nullptr) : "<null>";
+        LOGE("getSliceListNative dump: class %s", cns);
+        if (cn) { env->ReleaseStringUTFChars(cn, cns); env->DeleteLocalRef(cn); }
+
+        jobjectArray flds = (jobjectArray) env->CallObjectMethod(cls, getFields);
+        if (flds) {
+            jsize n = env->GetArrayLength(flds);
+            for (jsize i = 0; i < n; i++) {
+                jobject f = env->GetObjectArrayElement(flds, i);
+                jstring fn = (jstring) env->CallObjectMethod(f, fName);
+                jclass ft = (jclass) env->CallObjectMethod(f, fType);
+                jstring ftn = ft ? (jstring) env->CallObjectMethod(ft, getName) : nullptr;
+                const char* fns = fn ? env->GetStringUTFChars(fn, nullptr) : "?";
+                const char* ftns = ftn ? env->GetStringUTFChars(ftn, nullptr) : "?";
+                LOGE("getSliceListNative dump:   field %s %s", ftns, fns);
+                if (fn) { env->ReleaseStringUTFChars(fn, fns); env->DeleteLocalRef(fn); }
+                if (ftn) { env->ReleaseStringUTFChars(ftn, ftns); env->DeleteLocalRef(ftn); }
+                if (ft) env->DeleteLocalRef(ft);
+                env->DeleteLocalRef(f);
+            }
+            env->DeleteLocalRef(flds);
+        }
+        jobjectArray mths = (jobjectArray) env->CallObjectMethod(cls, getMethods);
+        if (mths) {
+            jsize n = env->GetArrayLength(mths);
+            for (jsize i = 0; i < n; i++) {
+                jobject m = env->GetObjectArrayElement(mths, i);
+                jstring mn = (jstring) env->CallObjectMethod(m, mName);
+                const char* mns = mn ? env->GetStringUTFChars(mn, nullptr) : "?";
+                LOGE("getSliceListNative dump:   method %s", mns);
+                if (mn) { env->ReleaseStringUTFChars(mn, mns); env->DeleteLocalRef(mn); }
+                env->DeleteLocalRef(m);
+            }
+            env->DeleteLocalRef(mths);
+        }
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        jclass sup = (jclass) env->CallObjectMethod(cls, getSuper);
+        env->DeleteLocalRef(cls);
+        cls = sup;
+    }
+    LOGE("getSliceListNative: all paths failed; see dump above");
+    return nullptr;
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_ims134_hookengine_PmSpoof_replaceSliceListNative(JNIEnv* env, jobject, jobject slice, jobject newList) {
+    if (!slice || !newList) return nullptr;
+
+    jclass leaf = env->GetObjectClass(slice);
+    if (leaf) {
+        jfieldID f = env->GetFieldID(leaf, "mList", "Ljava/util/List;");
+        if (f) {
+            env->SetObjectField(slice, f, newList);
+            if (!env->ExceptionCheck()) {
+                LOGD("replaceSliceListNative: OK via leaf.mList");
+                env->DeleteLocalRef(leaf);
+                return slice;
+            }
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(leaf);
+    }
+
+    const char* names[] = { "android/content/pm/BaseParceledListSlice", nullptr };
+    for (int i = 0; names[i]; i++) {
+        jclass c = env->FindClass(names[i]);
+        if (!c) { if (env->ExceptionCheck()) env->ExceptionClear(); continue; }
+        jfieldID f = env->GetFieldID(c, "mList", "Ljava/util/List;");
+        if (f) {
+            env->SetObjectField(slice, f, newList);
+            if (!env->ExceptionCheck()) {
+                LOGD("replaceSliceListNative: OK via BaseParceledListSlice.mList");
+                env->DeleteLocalRef(c);
+                return slice;
+            }
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(c);
+    }
+
+    jclass sliceCls = env->FindClass("android/content/pm/ParceledListSlice");
+    if (sliceCls) {
+        jmethodID ctor = env->GetMethodID(sliceCls, "<init>", "(Ljava/util/List;)V");
+        if (ctor) {
+            jobject fresh = env->NewObject(sliceCls, ctor, newList);
+            if (!env->ExceptionCheck() && fresh) {
+                LOGD("replaceSliceListNative: OK via fresh ParceledListSlice ctor");
+                env->DeleteLocalRef(sliceCls);
+                return fresh;
+            }
+            env->ExceptionClear();
+        }
+        env->DeleteLocalRef(sliceCls);
+    }
+
+    LOGE("replaceSliceListNative: all paths failed");
+    return nullptr;
+}
+
+#include <future>   // add to the top if not already present
+
+// ─────────────────────────────────────────────────────────────────────────
+// Hidden API bypass via native-attached-thread reflection.
+// Modeled on org.chickenhook.restrictionbypass.NativeReflectionBypass:
+// the filtered Java methods (Class.getDeclaredField/Method) skip the
+// hidden-API caller check when invoked from a thread with no app
+// classloader above the JNI boundary. AttachCurrentThread gives us
+// exactly that context.
+// ─────────────────────────────────────────────────────────────────────────
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_ims134_hookengine_HiddenApiBridge_reflectGetDeclaredField(
+        JNIEnv* env, jobject, jclass cls, jstring name) {
+    if (!cls || !name) return nullptr;
+    JavaVM* vm = nullptr;
+    env->GetJavaVM(&vm);
+    jobject gCls = env->NewGlobalRef(cls);
+    jstring gName = (jstring) env->NewGlobalRef(name);
+
+    auto fut = std::async(std::launch::async, [vm, gCls, gName]() -> jobject {
+        JNIEnv* e = nullptr;
+        if (vm->AttachCurrentThread(&e, nullptr) != JNI_OK) return nullptr;
+        jclass classCls = e->FindClass("java/lang/Class");
+        jmethodID m = e->GetMethodID(classCls, "getDeclaredField",
+                                     "(Ljava/lang/String;)Ljava/lang/reflect/Field;");
+        jobject res = nullptr;
+        if (m) {
+            res = e->CallObjectMethod(gCls, m, gName);
+            if (e->ExceptionCheck()) { e->ExceptionDescribe(); e->ExceptionClear(); res = nullptr; }
+        }
+        jobject g = res ? e->NewGlobalRef(res) : nullptr;
+        vm->DetachCurrentThread();
+        return g;
+    });
+    jobject r = fut.get();
+    env->DeleteGlobalRef(gCls);
+    env->DeleteGlobalRef(gName);
+    LOGD("reflectGetDeclaredField: %s", r ? "OK" : "null");
+    return r;
+}
+
+extern "C" JNIEXPORT jobject JNICALL
+Java_com_ims134_hookengine_HiddenApiBridge_reflectGetDeclaredMethod(
+        JNIEnv* env, jobject, jclass cls, jstring name, jobjectArray paramTypes) {
+    if (!cls || !name) return nullptr;
+    JavaVM* vm = nullptr;
+    env->GetJavaVM(&vm);
+    jobject gCls = env->NewGlobalRef(cls);
+    jstring gName = (jstring) env->NewGlobalRef(name);
+    jobjectArray gParams = paramTypes ? (jobjectArray) env->NewGlobalRef(paramTypes) : nullptr;
+
+    auto fut = std::async(std::launch::async, [vm, gCls, gName, gParams]() -> jobject {
+        JNIEnv* e = nullptr;
+        if (vm->AttachCurrentThread(&e, nullptr) != JNI_OK) return nullptr;
+        jclass classCls = e->FindClass("java/lang/Class");
+        jmethodID m = e->GetMethodID(classCls, "getDeclaredMethod",
+                                     "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
+        jobject res = nullptr;
+        if (m) {
+            res = e->CallObjectMethod(gCls, m, gName, gParams);
+            if (e->ExceptionCheck()) { e->ExceptionDescribe(); e->ExceptionClear(); res = nullptr; }
+        }
+        jobject g = res ? e->NewGlobalRef(res) : nullptr;
+        vm->DetachCurrentThread();
+        return g;
+    });
+    jobject r = fut.get();
+    env->DeleteGlobalRef(gCls);
+    env->DeleteGlobalRef(gName);
+    if (gParams) env->DeleteGlobalRef(gParams);
+    LOGD("reflectGetDeclaredMethod: %s", r ? "OK" : "null");
+    return r;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ims134_hookengine_HiddenApiBridge_reflectSetAccessible(
+        JNIEnv* env, jobject, jobject member) {
+    if (!member) return JNI_FALSE;
+    JavaVM* vm = nullptr;
+    env->GetJavaVM(&vm);
+    jobject gMember = env->NewGlobalRef(member);
+
+    auto fut = std::async(std::launch::async, [vm, gMember]() -> jboolean {
+        JNIEnv* e = nullptr;
+        if (vm->AttachCurrentThread(&e, nullptr) != JNI_OK) return JNI_FALSE;
+        jclass accCls = e->FindClass("java/lang/reflect/AccessibleObject");
+        jmethodID m = e->GetMethodID(accCls, "setAccessible", "(Z)V");
+        jboolean ok = JNI_FALSE;
+        if (m) {
+            e->CallVoidMethod(gMember, m, JNI_TRUE);
+            if (e->ExceptionCheck()) { e->ExceptionDescribe(); e->ExceptionClear(); }
+            else ok = JNI_TRUE;
+        }
+        vm->DetachCurrentThread();
+        return ok;
+    });
+    jboolean r = fut.get();
+    env->DeleteGlobalRef(gMember);
+    LOGD("reflectSetAccessible: %s", r ? "OK" : "false");
+    return r;
+}
+
