@@ -17,4 +17,6 @@ object NativeTestBridge {
     external fun deleteFileRaw(path: String): Boolean
     // NativeTestBridge.kt — add
     external fun binderProbe(): Int
+
+    external fun probeFromReflectedMethod(method: java.lang.reflect.Method): Long
 }

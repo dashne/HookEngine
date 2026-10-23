@@ -29,25 +29,72 @@ static std::vector<JavaHook*> g_jh_hooks;
 
 extern "C" jint CheckHookCapability();
 
+static bool IsAddressExecutable(uintptr_t addr) {
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (!f) return false;
+    char line[512];
+    bool ok = false;
+    while (fgets(line, sizeof(line), f)) {
+        unsigned long s, e;
+        char perms[8] = {0};
+        if (sscanf(line, "%lx-%lx %7s", &s, &e, perms) == 3) {
+            if (s <= addr && addr < e) {
+                ok = (perms[2] == 'x');
+                break;
+            }
+        }
+    }
+    fclose(f);
+    return ok;
+}
+
 static void** FindEntrySlot(void* art_method) {
-    if ((uintptr_t)art_method < 0x1000) return nullptr;
+    if ((uintptr_t)art_method < 0x1000) {
+        LOGE("FindEntrySlot: art_method=%p < 0x1000", art_method);
+        return nullptr;
+    }
 
     void* val = *(void**)((uint8_t*)art_method + 24);
-    if (!val) return nullptr;
-    if ((uintptr_t)val < 0x1000) return nullptr;
+    if (!val) {
+        LOGE("FindEntrySlot: data_(offset 24) is null on art_method=%p", art_method);
+        return nullptr;
+    }
+    if ((uintptr_t)val < 0x1000) {
+        // The actual safety check that must stay strict — fast-JNI tokens.
+        LOGE("FindEntrySlot: data_=%p < 0x1000 fast-JNI token, refusing", val);
+        return nullptr;
+    }
 
     Dl_info info;
-    if (!dladdr(val, &info) || !info.dli_fname) {
-        LOGE("FindEntrySlot: dladdr failed for val=%p", val);
+    bool dl_ok = dladdr(val, &info) && info.dli_fname;
+    bool exec = IsAddressExecutable((uintptr_t)val);
+
+    LOGD("FindEntrySlot: art_method=%p data_=%p dl_ok=%d exec=%d fname=%s",
+         art_method, val, dl_ok ? 1 : 0, exec ? 1 : 0,
+         dl_ok ? info.dli_fname : "<anon>");
+
+    // Accept any executable address. Two valid cases:
+    //
+    // 1. data_ resolves via dladdr to a lib (libart/libandroid_runtime/libc/etc).
+    //    The "legacy" native entry — Binder.getCallingUid's path.
+    //
+    // 2. data_ is executable but dladdr fails (JIT-compiled per-method JNI stub
+    //    or runtime trampoline in anon memory). API 34+ ART JIT-compiles JNI
+    //    stubs (art::jit::JniCompiler) for hot native methods. Hooking the JIT
+    //    stub address works — our replacement is called with standard JNI ABI,
+    //    and calling _orig delegates through the stub to the real native.
+    //    This is what BinderProxy.transactNative hits (data_=0x48167000).
+    //
+    // The fast-JNI guard above (`data_ >= 0x1000`) remains the true safety
+    // barrier. Anything below 0x1000 is a token (index into fast-JNI table),
+    // not callable. Executable data_ >= 0x1000 is a real call target.
+
+    if (!dl_ok && !exec) {
+        LOGE("FindEntrySlot: data_=%p neither dladdr-resolvable nor executable — refusing",
+             val);
         return nullptr;
     }
-    if (!strstr(info.dli_fname, "libart.so") &&
-        !strstr(info.dli_fname, "libandroid_runtime.so") &&
-        !strstr(info.dli_fname, "libc.so")) {
-        LOGE("FindEntrySlot: refusing to hook %p (in %s) — not a native entry",
-             val, info.dli_fname);
-        return nullptr;
-    }
+
     return (void**)((uint8_t*)art_method + 24);
 }
 

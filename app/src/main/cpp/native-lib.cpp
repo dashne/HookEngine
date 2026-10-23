@@ -901,3 +901,18 @@ Java_com_ims134_hookengine_NativeTestBridge_binderProbe(JNIEnv*, jobject) {
     return BinderProbe();
 }
 
+// ─── tnFIN probe bridge ───────────────────────────────────────────────
+// Returns FromReflectedMethod(method) as a long. 0 on failure.
+// Kotlin side checks: < 0x1000 = fast-JNI token, >= 0x1000 = real ArtMethod*.
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_probeFromReflectedMethod(
+        JNIEnv* env, jobject, jobject methodObj) {
+    if (!env || !methodObj) return 0;
+    jmethodID mid = env->FromReflectedMethod(methodObj);
+    if (!mid) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        return 0;
+    }
+    return (jlong)(uintptr_t)mid;
+}
+
