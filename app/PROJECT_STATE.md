@@ -287,3 +287,44 @@ Breakdown:
 
 ---
 
+
+---
+
+## §7.7 — CLOSED 2026-10-23
+
+File-based result channel + integration test. Device verification:
+`am instrument -w -r` → `numtests=11`, all suites green, final
+`OK (11 tests)`.
+
+- `writeSelftestFile(path)` JNI export in `native-lib.cpp` — reads
+  `testreport::Snapshot()`, writes one `PASS|name|detail` or
+  `FAIL|name|detail` line per entry, then `END <pass> <fail>`,
+  then `Reset()`. Truncates at start (`fopen(path, "w")`).
+- `RemoteService.onStartCommand` calls `writeSelftestFile(filesDir/selftest.txt)`
+  after the End marker and before spawning the diagnostic Thread.
+- `IntegrationTest.selftestReportIsComplete` deletes any stale file,
+  calls `startService(RemoteService)`, polls up to 60s for an END
+  marker, then asserts: file exists, END present, no `FAIL|` lines,
+  exactly 23 `PASS|` lines.
+
+**Why this matters:** per the Device test signal finding, this is
+the only test path where a failed hook run is observable as a
+non-zero Gradle outcome. The 10 tests from §7.5/§7.6 rely on
+per-run `am instrument` output; this one goes through
+`RemoteService`, which is the path the app actually uses. If the
+app breaks and `writeSelftestFile` isn't reached, `IntegrationTest`
+fails — that is the "assertion that can actually fail" applied to
+the integration surface, not just the individual hook primitives.
+
+**Observation:** `startService` on `RemoteService` from an
+instrumentation context succeeded on the target device (API 37),
+despite the app's `targetSdk 34` and Android 8+ background-service
+restrictions. Likely because the process is foregrounded during
+instrumentation. Not verified across other device states — if this
+test ever fails with `IllegalStateException: Not allowed to start
+service Intent`, that's the cause and the test must bind rather
+than start.
+
+**Next:** §7.9 (build-only CI, README limitations section).
+
+---
