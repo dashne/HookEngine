@@ -207,8 +207,7 @@ static HookResult HookJavaMethod(JNIEnv* env, jobject methodObj,
     return HOOK_OK;
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_ims134_hookengine_RemoteService_restoreBinderMethod(JNIEnv*, jobject) {
+static void RestoreBinderMethodImpl() {
     if (!g_hooked_entry_point || !_OriginalGetCallingUid) {
         LOGD("restoreBinderMethod: nothing to restore");
         return;
@@ -224,6 +223,11 @@ Java_com_ims134_hookengine_RemoteService_restoreBinderMethod(JNIEnv*, jobject) {
     mprotect(g_hooked_page, g_hooked_page_size, g_hooked_orig_prot);
     LOGD("restoreBinderMethod: entry point restored to %p",
          (void*)_OriginalGetCallingUid);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_RemoteService_restoreBinderMethod(JNIEnv*, jobject) {
+    RestoreBinderMethodImpl();
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -390,4 +394,85 @@ Java_com_ims134_hookengine_NativeTestBridge_setItem4Paths(
     SetItem4Paths(real, fake);
     if (real) env->ReleaseStringUTFChars(jReal, real);
     if (fake) env->ReleaseStringUTFChars(jFake, fake);
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Regression bug 1: HookJavaMethod destroyed page write permission.
+// ─────────────────────────────────────────────────────────────────────────
+static bool ReadPageProtReg(uintptr_t page, int* outProt) {
+    FILE* f = fopen("/proc/self/maps", "r");
+    if (!f) return false;
+    char line[512];
+    bool ok = false;
+    while (fgets(line, sizeof(line), f)) {
+        unsigned long s, e;
+        char perms[8] = {0};
+        if (sscanf(line, "%lx-%lx %7s", &s, &e, perms) == 3) {
+            if (s <= page && page < e) {
+                int p = 0;
+                if (perms[0] == 'r') p |= PROT_READ;
+                if (perms[1] == 'w') p |= PROT_WRITE;
+                if (perms[2] == 'x') p |= PROT_EXEC;
+                *outProt = p;
+                ok = true;
+                break;
+            }
+        }
+    }
+    fclose(f);
+    return ok;
+}
+
+extern "C" int RunRegressionBug1(JNIEnv* env) {
+    if (!env) {
+        testreport::Report("bug1_page_prot_restored", false, "no JNIEnv");
+        return 0;
+    }
+    jclass binderCls = env->FindClass("android/os/Binder");
+    if (!binderCls) {
+        testreport::Report("bug1_page_prot_restored", false, "FindClass failed");
+        return 0;
+    }
+    jmethodID m = env->GetStaticMethodID(binderCls, "getCallingUid", "()I");
+    if (!m) {
+        env->DeleteLocalRef(binderCls);
+        testreport::Report("bug1_page_prot_restored", false, "GetStaticMethodID failed");
+        return 0;
+    }
+    jobject method = env->ToReflectedMethod(binderCls, m, JNI_TRUE);
+    env->DeleteLocalRef(binderCls);
+    if (!method) {
+        testreport::Report("bug1_page_prot_restored", false, "ToReflectedMethod failed");
+        return 0;
+    }
+
+    jmethodID methodId = env->FromReflectedMethod(method);
+    uintptr_t artMethod = (uintptr_t)methodId;
+    uintptr_t pg = artMethod & ~(uintptr_t)0xFFF;
+
+    int prot_before = 0, prot_install = 0, prot_restore = 0;
+    bool ok_before = ReadPageProtReg(pg, &prot_before);
+
+    void* saved = nullptr;
+    HookResult hr = HookJavaMethod(env, method, (void*)FakeBinderGetCallingUid, &saved);
+    if (hr == HOOK_OK) {
+        _OriginalGetCallingUid = (GetCallingUidFunc)saved;
+        ReadPageProtReg(pg, &prot_install);
+        RestoreBinderMethodImpl();
+        ReadPageProtReg(pg, &prot_restore);
+    }
+
+    char d[160];
+    snprintf(d, sizeof d,
+             "before=0x%x install=0x%x restore=0x%x hr=%d",
+             prot_before, prot_install, prot_restore, (int)hr);
+
+    bool pass = ok_before
+                && hr == HOOK_OK
+                && prot_before == prot_install
+                && prot_install == prot_restore;
+    testreport::Report("bug1_page_prot_restored", pass, d);
+
+    env->DeleteLocalRef(method);
+    return pass ? 1 : 0;
 }

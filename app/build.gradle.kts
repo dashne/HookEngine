@@ -54,6 +54,7 @@ android {
 }
 
 dependencies {
+    implementation(libs.androidx.junit.ktx)
     // Compose BOM manages all compose versions perfectly
     val composeBom = platform("androidx.compose:compose-bom:2024.02.00")
     implementation(composeBom)

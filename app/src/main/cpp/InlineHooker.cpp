@@ -22,6 +22,8 @@ static std::mutex g_hook_mutex;
 // to finish executing (relay executes in ~2ns; 20ms is 10,000,000× margin).
 // Tests override this to a smaller value to keep the stress test fast.
 static long g_uninstall_grace_ms = 100;
+extern "C" int g_relay_alloc_count = 0;
+extern "C" int g_relay_free_count  = 0;
 
 extern "C" void SetUninstallGraceMs(long ms) { g_uninstall_grace_ms = ms; }
 extern "C" long GetUninstallGraceMs()        { return g_uninstall_grace_ms; }
@@ -240,6 +242,7 @@ extern "C" HookResult InstallInlineHookEx(void* targetFunc, void* fakeFunc,
 
     if (originalTrampoline) *originalTrampoline = tramp;
 
+    g_relay_alloc_count++;
     LOGD("IIHE(%s): DONE relay=%p tramp=%p", name ? name : "?", relay, tramp);
     return HOOK_OK;
 }
@@ -288,5 +291,6 @@ extern "C" HookResult UninstallInlineHook(void* targetFunc) {
     }
     if (relay) munmap(relay, relay_size);
     if (tramp) munmap(tramp, tramp_size);
+    g_relay_free_count++;
     return HOOK_OK;
 }

@@ -645,6 +645,10 @@ static bool ShouldHookDlopen(const char* name) {
     return false;
 }
 
+extern "C" bool ShouldHookDlopenForTest(const char* name) {
+    return ShouldHookDlopen(name);
+}
+
 static bool ShouldHookFileIO(const char* name) {
     if (!name || !name[0]) return false;
     if (strstr(name, "startup_agents")) return false;
