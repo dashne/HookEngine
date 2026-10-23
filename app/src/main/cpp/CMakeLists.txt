@@ -13,6 +13,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         arm64_reloc.cpp
         JavaHook.cpp
         ProcessHooks.cpp
+        DualApplication.cpp
         test_item1.cpp
         test_item2.cpp
         test_item3.cpp
