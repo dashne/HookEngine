@@ -46,7 +46,7 @@ All capabilities below were verified on a physical device in a single session.
 | ROM | HyperOS |
 | Android | 17 (API 37) |
 | ABI | ARM64 |
-| Build | v27 |
+| Build | v29 |
 
 Targets API 37 / ART on ARM64. Earlier Android versions are untested and will need
 adjustments to the ArtMethod layout and GOT hook target list.
@@ -54,3 +54,77 @@ adjustments to the ArtMethod layout and GOT hook target list.
 ---
 
 ## Architecture
+
+```
+
+    app/src/main/cpp/
+      native-lib.cpp        JNI surface, Binder ArtMethod hook, test harness exports
+      Hooks.cpp             GOT patches for file/property/UID/dlopen
+      InlineHooker.cpp      ARM64 relay + trampoline inline hooker
+      arm64_reloc.cpp       Instruction relocator (B, BL, ADRP, ADR)
+      HookRegistry.cpp      512-slot hook registry
+      elf_hooker.cpp        GOT lookup via dl_iterate_phdr
+      RedirectTable.cpp     Path prefix rewrite table
+      HiddenApi.cpp         libart.so symbol probe and hiddenapi bypass
+      TestReport.h          PASS/FAIL sink shared by all test files
+      test_item1..5.cpp     Behaviour tests (23 cases)
+      test_regression.cpp   Bug 1-5 regression tests
+      test_suite.cpp        Harness dispatch
+
+    app/src/androidTest/java/com/ims134/hookengine/
+      NativeTestBridge.kt   JNI bridge object
+      NativeItemTest.kt     5 parameterized item tests
+      RegressionTest.kt     5 regression tests (bugs 1-5)
+      IntegrationTest.kt    1 selftest.txt verification
+
+```
+
+---
+
+## Testing
+
+### CI
+
+The GitHub Actions workflow (`.github/workflows/test.yml`) is **build-only**:
+
+```
+./gradlew :app:assembleDebug :app:assembleDebugAndroidTest
+```
+
+This compiles the harness and the test APK. It does **not** run the hook engine, does not run any of the 33 tests, and does not produce device signal. Do not describe it as test coverage.
+
+### Device tests are manual
+
+The target device is a single API 37 arm64 physical device (Xiaomi 17T / HyperOS). Two automated paths exist and **both are broken on this device**:
+
+1. **`:app:connectedDebugAndroidTest`** — fails to install the test APK with `SecurityException: INSTALL_GRANT_RUNTIME_PERMISSIONS` (UTP-injects a signature-permission flag MIUI refuses), logs `AndroidTestRunner failed`, and then reports `BUILD SUCCESSFUL`. Zero tests run; the task returns green. Do not rely on it.
+
+2. **`am instrument -w` exit code** — returns `INSTRUMENTATION_CODE: -1` (RESULT_OK) on both success and failure. Exit code is meaningless.
+
+### Verified device workflow
+
+```
+adb install -r -t app/build/outputs/apk/debug/app-debug.apk
+adb install -r -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb logcat -c
+adb shell am instrument -w -r com.ims134.hookengine.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+Pass criterion: the string `OK (N tests)` appears in the output, **and** no line contains `INSTRUMENTATION_STATUS_CODE: -2`. Both conditions must be checked; neither is implied by the exit code.
+
+### What the device suite covers
+
+| Class | Tests | What it verifies |
+|---|---|---|
+| `NativeItemTest` | 5 | 23 underlying cases across items 1–5 (inline hooking, rollback, concurrency, ELF, gate) |
+| `RegressionTest` | 5 | Bugs 1–5 (page prot restore, dlopen invariant, PM field patch, relay leak, deferred free) |
+| `IntegrationTest` | 1 | `selftest.txt` file channel through `RemoteService` — the only test that verifies the app's actual `onStartCommand` path |
+
+Total: **11 JUnit tests**, exercising **33 underlying assertions**.
+
+### Limitations
+
+- Only verified on API 37 / arm64 / HyperOS. Other API levels are refused by `CheckHookCapability` — see Item 5.
+- `testBuildType` is set to `debug`; release builds do not include the instrumentation suite.
+- `abiFilters` is locked to `arm64-v8a` — test files contain ARM64 inline assembly and do not compile for x86, x86_64, or armv7.
+- `connectedDebugAndroidTest` is not part of any workflow in this project.
