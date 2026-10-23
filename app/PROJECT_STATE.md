@@ -328,3 +328,33 @@ than start.
 **Next:** §7.9 (build-only CI, README limitations section).
 
 ---
+
+
+---
+
+## §7.9 — CLOSED 2026-10-23
+
+Build-only CI workflow committed at `.github/workflows/test.yml`.
+Runs `:app:assembleDebug :app:assembleDebugAndroidTest` on push/PR.
+Does not run device tests. README documents this under **Testing → CI**
+along with the two broken automation paths.
+
+**Item 7 is CLOSED.** Final device state: `am instrument -w -r` →
+`numtests=11`, `OK (11 tests)`. 33 underlying assertions (23 item + 8
+regression + 1 integration + 1 Kotlin bug3), 0 failures.
+
+Files added across Item 7:
+- `app/src/main/cpp/TestReport.h`
+- `app/src/main/cpp/test_suite.h` / `test_suite.cpp`
+- `app/src/main/cpp/test_regression.cpp`
+- `app/src/androidTest/java/com/ims134/hookengine/NativeTestBridge.kt`
+- `app/src/androidTest/java/com/ims134/hookengine/NativeItemTest.kt`
+- `app/src/androidTest/java/com/ims134/hookengine/RegressionTest.kt`
+- `app/src/androidTest/java/com/ims134/hookengine/IntegrationTest.kt`
+- `app/src/main/java/com/ims134/hookengine/PmSpoof.kt`
+- `.github/workflows/test.yml`
+
+**Next:** Phase 2 direction TBD (per-function reloc tests / new API level /
+DualHost integration).
+
+---
