@@ -12,6 +12,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include "HiddenPaths.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -152,16 +153,11 @@ static HookHandle* g_h_kill    = nullptr;
 
 // ─── Path checks ─────────────────────────────────────────────────────
 static bool IsSuPath(const char* p) {
-    if (!p) return false;
-    static const char* deny[] = {
-            "su", "/system/bin/su", "/system/xbin/su", "/sbin/su",
-            "/system/sd/xbin/su", "/system/bin/failsafe/su",
-            "/system/xbin/daemonsu", "/system/bin/.ext/.su",
-            "/system/usr/we-need-root/su-backup", "/su/bin/su",
-            "/magisk", "/sbin/.magisk", nullptr
-    };
-    for (int i = 0; deny[i]; i++) if (strstr(p, deny[i])) return true;
-    return false;
+    return HiddenPaths::IsBlockedExecPath(p);
+}
+
+extern "C" int IsSuPathForTest(const char* path) {
+    return IsSuPath(path) ? 1 : 0;
 }
 
 // ─── Fake execs ──────────────────────────────────────────────────────

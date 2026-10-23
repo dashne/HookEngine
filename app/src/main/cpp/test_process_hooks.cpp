@@ -16,6 +16,7 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 extern "C" int32_t g_virtualUid;
+extern "C" int IsSuPathForTest(const char* path);
 
 static jint FakeMyUidTest(JNIEnv*, jclass) { return 42; }
 
@@ -199,6 +200,62 @@ extern "C" int RunProcessHooksTests(JNIEnv* env) {
         char d[96];
         snprintf(d, sizeof d, "real_pid=%d rc=%d", real_pid, rc);
         emit(rc == 0, "kill_self_allowed", d);
+    }
+
+    // ── Test 10: bare "su" blocked ──
+    {
+        int block = IsSuPathForTest("su");
+        emit(block == 1, "execve_bare_su_blocked",
+             block ? "blocked" : "NOT BLOCKED (bug!)");
+    }
+
+    // ── Test 11: magisk binary blocked ──
+    {
+        int block = IsSuPathForTest("/system/bin/magisk");
+        emit(block == 1, "execve_magisk_blocked",
+             block ? "blocked" : "NOT BLOCKED (bug!)");
+    }
+
+    // ── Test 12: real su path still blocked after fix ──
+    {
+        int block = IsSuPathForTest("/system/bin/su");
+        emit(block == 1, "execve_real_su_still_blocked",
+             block ? "blocked" : "NOT BLOCKED (bug!)");
+    }
+
+    // ── Test 13: /data/adb prefix blocked ──
+    {
+        int block = IsSuPathForTest("/data/adb/magisk.db");
+        emit(block == 1, "execve_data_adb_blocked",
+             block ? "blocked" : "NOT BLOCKED (bug!)");
+    }
+
+    // ── Test 14: FALSE POSITIVE — "issue" contains "su" ──
+    {
+        int block = IsSuPathForTest("/data/app/com.example.issue/bin");
+        emit(block == 0, "execve_false_positive_issue_not_blocked",
+             block ? "BLOCKED (strstr bug!)" : "not blocked (correct)");
+    }
+
+    // ── Test 15: FALSE POSITIVE — "sunshine" ──
+    {
+        int block = IsSuPathForTest("/system/bin/sunshine");
+        emit(block == 0, "execve_false_positive_sunshine_not_blocked",
+             block ? "BLOCKED (strstr bug!)" : "not blocked (correct)");
+    }
+
+    // ── Test 16: FALSE POSITIVE — "measure" ──
+    {
+        int block = IsSuPathForTest("/data/app/measure/libarm64/libx.so");
+        emit(block == 0, "execve_false_positive_measure_not_blocked",
+             block ? "BLOCKED (strstr bug!)" : "not blocked (correct)");
+    }
+
+    // ── Test 17: FALSE POSITIVE — "subin" (starts with "su" but no boundary) ──
+    {
+        int block = IsSuPathForTest("/data/local/subin");
+        emit(block == 0, "execve_false_positive_boundary_not_blocked",
+             block ? "BLOCKED (boundary bug!)" : "not blocked (correct)");
     }
 
     LOGD("RunProcessHooksTests: %d passed, %d failed", pass, fail);

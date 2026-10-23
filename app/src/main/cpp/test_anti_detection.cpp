@@ -112,6 +112,34 @@ extern "C" int RunAntiDetectionTests(JNIEnv* env) {
         emit(hide == 1, "debug_ramdisk_logically_hidden", d);
     }
 
+    // ── Test: /debug_ramdisk/foo prefix matched ──
+    {
+        int hide = ShouldHidePathForTest("/debug_ramdisk/foo");
+        emit(hide == 1, "debug_ramdisk_prefix_hidden",
+             hide ? "hidden" : "VISIBLE (bug!)");
+    }
+
+    // ── Test: /debug_ramdiskXYZ boundary NOT matched ──
+    {
+        int hide = ShouldHidePathForTest("/debug_ramdiskXYZ");
+        emit(hide == 0, "debug_ramdisk_boundary_rejected",
+             hide ? "HIDDEN (boundary bug!)" : "visible (correct)");
+    }
+
+    // ── Test: /cache/magisk/foo prefix matched ──
+    {
+        int hide = ShouldHidePathForTest("/cache/magisk/foo");
+        emit(hide == 1, "cache_magisk_prefix_hidden",
+             hide ? "hidden" : "VISIBLE (bug!)");
+    }
+
+    // ── Test: /cache/magiskXYZ boundary NOT matched ──
+    {
+        int hide = ShouldHidePathForTest("/cache/magiskXYZ");
+        emit(hide == 0, "cache_magisk_boundary_rejected",
+             hide ? "HIDDEN (boundary bug!)" : "visible (correct)");
+    }
+
     // 12. Normal path not hidden (no overreach)
     {
         int hide = ShouldHidePathForTest("/data/app/com.example/base.apk");

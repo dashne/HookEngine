@@ -18,8 +18,8 @@ class AntiDetectionTest {
         val lines = NativeTestBridge.runSuite("anti_detection")
         assertTrue("anti_detection produced no result lines", lines.isNotEmpty())
         assertTrue(
-            "anti_detection produced ${lines.size} cases, expected >= 14",
-            lines.size >= 14
+            "anti_detection produced ${lines.size} cases, expected >= 18",
+            lines.size >= 18
         )
         val failures = lines.filter { it.startsWith("FAIL|") }
         assertTrue(

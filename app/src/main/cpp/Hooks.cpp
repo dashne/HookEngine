@@ -19,6 +19,7 @@
 #include <chrono>
 #include <unordered_set>
 #include <vector>
+#include "HiddenPaths.h"
 
 #ifndef MFD_CLOEXEC
 #define MFD_CLOEXEC 0x0001U
@@ -87,29 +88,7 @@ gid_t (*_Original_getgid)() = nullptr;
 gid_t (*_Original_getegid)() = nullptr;
 
 static bool ShouldHidePath(const char* path) {
-    if (!path) return false;
-    if (strncmp(path, "/data/adb/", 10) == 0) return true;
-    if (strncmp(path, "/sbin/.magisk", 13) == 0) return true;
-    if (strcmp(path, "/debug_ramdisk") == 0) return true;
-    if (strncmp(path, "/debug_ramdisk/", 15) == 0) return true;
-    if (strcmp(path, "/cache/magisk") == 0) return true;
-    if (strncmp(path, "/cache/magisk/", 14) == 0) return true;
-    // Test-only marker: any path containing this substring is hidden.
-    // Enables end-to-end verification that GOT hooks fire from Java.
-    // Production paths never contain this string.
-    if (strstr(path, ".hookengine-test-hidden")) return true;
-    static const char* kHidden[] = {
-            "/system/bin/su", "/system/xbin/su", "/sbin/su",
-            "/system/sd/xbin/su", "/system/bin/failsafe/su",
-            "/system/xbin/daemonsu","/system/bin/magisk", "/system/xbin/magisk",
-            "/sbin/magisk", "/system/app/Superuser.apk",
-            "/system/app/SuperSU/SuperSU.apk", "/system/etc/.has_su_daemon",
-            "/system/bin/.ext/.su", "/system/usr/we-need-root/su-backup",
-            nullptr
-    };
-    for (int i = 0; kHidden[i]; i++)
-        if (strcmp(path, kHidden[i]) == 0) return true;
-    return false;
+    return HiddenPaths::IsHiddenFilePath(path);
 }
 
 extern "C" int ShouldHidePathForTest(const char* path) {
