@@ -445,3 +445,25 @@ Underlying assertions: 33+ (items) + 9 (process_hooks) + 3×bug4 + 3×bug5 +
 
 ---
 
+PmSpoof filter delivered; hidden API bypass via thread-attached reflection
+
+Two separate fixes:
+
+1. JavaHook gate: CheckHookCapability() now called inside JavaHookInstall.
+   Prior code only protected HookJavaMethod; ProcessHooks.cpp called
+   JavaHookInstall directly and would patch ArtMethod offset 24 blind on
+   any ART build outside [37,37].
+
+2. Hidden API bypass: Class.getDeclaredField / getDeclaredMethod calls
+   issued from an AttachCurrentThread'ed thread bypass the hidden-API
+   caller-domain check. Modeled on org.chickenhook.restrictionbypass.
+   Resolves BaseParceledListSlice.mList, enabling PmSpoof list filtering
+   to read, filter, and write back the item list without parcel
+   marshalling, Unsafe offsets, or CREATOR reflection.
+
+Test suite: 21/21 green. PmSpoof 4/4. Process hooks 9/9.
+
+---
+
+
+
