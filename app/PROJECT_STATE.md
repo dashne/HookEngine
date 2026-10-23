@@ -465,5 +465,58 @@ Test suite: 21/21 green. PmSpoof 4/4. Process hooks 9/9.
 
 ---
 
+## Batch 2c — DEFERRED pending design decision — 2026-10-23
+
+Probe results on API 37 / HyperOS (ClassLoaderProbeTest):
+
+    DexFile.loadClassBinaryName(String, ClassLoader)   NOT FOUND
+    DexFile.loadClass(String, ClassLoader)             native=false public
+    ClassLoader.loadClass(String)                      native=false public
+    ClassLoader.loadClass(String, boolean)             native=false protected
+    ClassLoader.findClass(String)                      native=false protected
+    BaseDexClassLoader.findClass(String)               native=false protected
+
+Conclusion: **every class-loading entry point is a Java method.**
+`JavaHookInstall` (which only replaces `ArtMethod.data_` = JNI entry,
+offset 24) cannot hook any of them. `ClassLoaderHooks.cpp` as
+originally planned is impossible.
+
+The reference NativeEngine does NOT hook loadClass either. It caches
+`DexFile.openDexFileNative` (a real native method) — that's DEX-file-
+swapping, where merged/prepended DEX files make `loadClass` succeed
+naturally. That's a different architecture, not a hook.
+
+### Decision required before any 2c code
+
+Three viable paths, all with different cost/benefit:
+
+1. **Java proxy on guest ClassLoader instance** — wrap the guest's
+   BaseDexClassLoader with a subclass that falls through to the host
+   classloader on ClassNotFoundException. Requires subclassing a
+   concrete class (impossible via Proxy), or bytecode manipulation
+   of the guest's existing classloader. **Cost: high. Fragile.**
+
+2. **DEX-file-swapping via openDexFileNative hook** — intercept DEX
+   open, return a merged DEX that includes both guest and host DEX.
+   Matches the reference engine. **Cost: very high** (build merged
+   DEX at runtime, multidex handling, pathList swap via hidden API).
+   Delivers the correct semantics.
+
+3. **Rely on guest/host classloader compatibility** — if DualHost
+   already loads host and guest DEX in the same classloader chain,
+   Viber's `loadClass` calls may naturally find host classes.
+   **Cost: zero.** Verify at integration time whether this is needed
+   at all.
+
+**Recommendation:** path 3 first. Attempt DualHost integration, watch
+whether Viber actually fails with `ClassNotFoundException` on host
+classes. If yes, path 1. Path 2 only if path 1 proves insufficient
+in practice.
+
+Do not write ClassLoaderHooks.cpp as a JavaHookInstall target. It
+will not work.
+
+---
+
 
 
