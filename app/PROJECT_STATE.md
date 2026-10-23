@@ -358,3 +358,42 @@ Files added across Item 7:
 DualHost integration).
 
 ---
+
+
+---
+
+## Phase 2 — per-function reloc tests — CLOSED 2026-10-23
+
+40 cases across `ClassifyInsn` (20), `EncodeBranch` (8),
+`EmitRelocated` (12). Device: `am instrument -w -r` → `numtests=12`,
+`OK (12 tests)`, all reloc cases pass.
+
+Coverage beyond Item 1:
+- `ClassifyInsn` — 20 canonical/boundary words, raw roundtrip
+- `EncodeBranch` — forward/backward/self, B vs BL opcode,
+  unaligned rejection, ±128MB edge (in and out), decode roundtrip
+- `EmitRelocated` — NORMAL cap=0/1, B negative offset, BL 3-instruction
+  seq (STP/BL/LDP) + cap=2 rejection, ADRP negative page, ADR short
+  (n=1), ADR long fallback to ADRP+ADD (n=2), all four
+  unsupported-kind rejections (B.cond, CBZ, TBZ, LDR-literal)
+
+Two test bugs found and fixed while writing:
+1. `EncodeBranch` "edge in" test used `+(1LL<<27)` which is out of
+   range — max valid forward is `2^27 - 4`. Fixed.
+2. `make_adr(1, 0x200000)` overflowed the 21-bit signed field —
+   encoded `ADR x1, +0`, so EmitRelocated produced `n=1` not `n=2`.
+   Fixed with `make_adr(1, 0x80000)` and `new_pc=0x400000`.
+
+Both are test-only; the underlying `arm64_reloc.cpp` is unchanged and
+still passes all original Item 1 cases.
+
+**Remaining Phase 2 work if pursued:** `arm64_reloc.cpp` internals
+`enc_adrp`, `enc_adr`, `enc_adrp_add` are file-static and tested only
+via their public callers (`EmitRelocated`). Making them public and
+testing individually would catch encoding bugs that don't affect
+`EmitRelocated`'s public contract. Not required — the public contract
+is what callers depend on.
+
+**Next:** Option B (second API level) or C (DualHost integration).
+
+---

@@ -18,6 +18,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         test_item5.cpp
         test_suite.cpp
         test_regression.cpp
+        test_reloc.cpp
 )
 
 find_library(log-lib log)

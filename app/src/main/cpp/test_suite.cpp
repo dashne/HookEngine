@@ -11,6 +11,7 @@ extern "C" int RunRegressionBug1(JNIEnv*);
 extern "C" int RunRegressionBug2();
 extern "C" int RunRegressionBug4();
 extern "C" int RunRegressionBug5();
+extern "C" int RunRelocTests();
 
 extern "C" int RunTestSuite(JNIEnv* env, const char* suite) {
     testreport::Reset();
@@ -24,5 +25,6 @@ extern "C" int RunTestSuite(JNIEnv* env, const char* suite) {
     if (!strcmp(suite, "regression_bug2")) return RunRegressionBug2();
     if (!strcmp(suite, "regression_bug4")) return RunRegressionBug4();
     if (!strcmp(suite, "regression_bug5")) return RunRegressionBug5();
+    if (!strcmp(suite, "reloc")) return RunRelocTests();
     return -1;
 }
