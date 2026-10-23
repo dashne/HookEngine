@@ -2,6 +2,7 @@
 #include <android/log.h>
 #include "Hooks.h"
 #include "ProcessHooks.h"
+#include "AntiDetection.h"
 
 #define TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
@@ -46,7 +47,11 @@ Java_com_ims134_hookengine_DualApplication_nativeAttachBaseContext(
 
     // 2. Process hooks (getpid, getppid, exec*, system, ptrace, kill, myPpid)
     int n = InstallProcessHooks(env);
+    // 3. Anti-detection (connect-port blocking, status filter via Hooks.cpp)
+
     LOGD("nativeAttachBaseContext: InstallProcessHooks installed=%d", n);
+    int a = InstallAntiDetection(env);
+    LOGD("nativeAttachBaseContext: InstallAntiDetection installed=%d", a);
 }
 
 extern "C" JNIEXPORT void JNICALL

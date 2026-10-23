@@ -90,10 +90,15 @@ static bool ShouldHidePath(const char* path) {
     if (!path) return false;
     if (strncmp(path, "/data/adb/", 10) == 0) return true;
     if (strncmp(path, "/sbin/.magisk", 13) == 0) return true;
+    if (strcmp(path, "/debug_ramdisk") == 0) return true;
+    if (strncmp(path, "/debug_ramdisk/", 15) == 0) return true;
+    if (strcmp(path, "/cache/magisk") == 0) return true;
+    if (strncmp(path, "/cache/magisk/", 14) == 0) return true;
     static const char* kHidden[] = {
             "/system/bin/su", "/system/xbin/su", "/sbin/su",
             "/system/sd/xbin/su", "/system/bin/failsafe/su",
-            "/system/xbin/daemonsu", "/system/app/Superuser.apk",
+            "/system/xbin/daemonsu","/system/bin/magisk", "/system/xbin/magisk",
+            "/sbin/magisk", "/system/app/Superuser.apk",
             "/system/app/SuperSU/SuperSU.apk", "/system/etc/.has_su_daemon",
             "/system/bin/.ext/.su", "/system/usr/we-need-root/su-backup",
             nullptr
@@ -101,6 +106,10 @@ static bool ShouldHidePath(const char* path) {
     for (int i = 0; kHidden[i]; i++)
         if (strcmp(path, kHidden[i]) == 0) return true;
     return false;
+}
+
+extern "C" int ShouldHidePathForTest(const char* path) {
+    return ShouldHidePath(path) ? 1 : 0;
 }
 
 static bool ShouldHideDirent(const char* name) {
@@ -292,11 +301,67 @@ static bool IsMapsPath(const char* path) {
     return strcmp(path, pidPath) == 0;
 }
 
+static bool IsStatusPath(const char* path) {
+    if (!path) return false;
+    if (strcmp(path, "/proc/self/status") == 0) return true;
+    static char pidStatusPath[64] = {0};
+    static pid_t cachedPid = -1;
+    pid_t pid = getpid();
+    if (pid != cachedPid) {
+        snprintf(pidStatusPath, sizeof(pidStatusPath), "/proc/%d/status", pid);
+        cachedPid = pid;
+    }
+    return strcmp(path, pidStatusPath) == 0;
+}
+
+extern "C" int ShouldFilterStatusPath(const char* path) {
+    return IsStatusPath(path) ? 1 : 0;
+}
+
+static std::string BuildFilteredStatus() {
+    int fd = (int)syscall(__NR_openat, AT_FDCWD, "/proc/self/status", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return "";
+    std::string raw;
+    char buf[8192];
+    ssize_t n;
+    while ((n = (ssize_t)syscall(__NR_read, fd, buf, sizeof(buf))) > 0)
+        raw.append(buf, n);
+    syscall(__NR_close, fd);
+
+    std::string out = raw;
+    // Filter every "TracerPid:" line to 0
+    size_t pos = 0;
+    while ((pos = out.find("TracerPid:", pos)) != std::string::npos) {
+        size_t eol = out.find('\n', pos);
+        if (eol == std::string::npos) break;
+        out.replace(pos, eol - pos, "TracerPid:\t0");
+        pos = eol + 1;
+    }
+    return out;
+}
+
+static int OpenFilteredStatusFd() {
+    std::string s = BuildFilteredStatus();
+    if (s.empty()) return -1;
+    int fd = (int)syscall(__NR_memfd_create, "dhstatus", MFD_CLOEXEC);
+    if (fd < 0) return -1;
+    if (syscall(__NR_write, fd, s.data(), s.size()) != (ssize_t)s.size()) {
+        syscall(__NR_close, fd);
+        return -1;
+    }
+    lseek(fd, 0, SEEK_SET);
+    return fd;
+}
+
 int Fake_open(const char* path, int flags, ...) {
     if (ShouldHidePath(path)) { errno = ENOENT; return -1; }
     mode_t mode = 0;
     bool hasMode = (flags & (O_CREAT | O_TMPFILE)) != 0;
     if (hasMode) { va_list a; va_start(a, flags); mode = va_arg(a, mode_t); va_end(a); }
+    if (IsStatusPath(path) && (flags & O_ACCMODE) == O_RDONLY) {
+        int fd = OpenFilteredStatusFd();
+        if (fd >= 0) return fd;
+    }
     if (IsMapsPath(path) && (flags & O_ACCMODE) == O_RDONLY) {
         int fd = OpenFilteredMapsFd();
         if (fd >= 0) return fd;
@@ -312,6 +377,10 @@ int Fake_open64(const char* path, int flags, ...) {
     mode_t mode = 0;
     bool hasMode = (flags & (O_CREAT | O_TMPFILE)) != 0;
     if (hasMode) { va_list a; va_start(a, flags); mode = va_arg(a, mode_t); va_end(a); }
+    if (IsStatusPath(path) && (flags & O_ACCMODE) == O_RDONLY) {
+        int fd = OpenFilteredStatusFd();
+        if (fd >= 0) return fd;
+    }
     if (IsMapsPath(path) && (flags & O_ACCMODE) == O_RDONLY) {
         int fd = OpenFilteredMapsFd();
         if (fd >= 0) return fd;
@@ -324,6 +393,10 @@ int Fake_open64(const char* path, int flags, ...) {
 
 int Fake__open_2(const char* path, int flags) {
     if (ShouldHidePath(path)) { errno = ENOENT; return -1; }
+    if (IsStatusPath(path) && (flags & O_ACCMODE) == O_RDONLY) {
+        int fd = OpenFilteredStatusFd();
+        if (fd >= 0) return fd;
+    }
     if (IsMapsPath(path) && (flags & O_ACCMODE) == O_RDONLY) {
         int fd = OpenFilteredMapsFd();
         if (fd >= 0) return fd;
@@ -338,6 +411,10 @@ int Fake_openat(int dfd, const char* path, int flags, ...) {
     mode_t mode = 0;
     bool hasMode = (flags & (O_CREAT | O_TMPFILE)) != 0;
     if (hasMode) { va_list a; va_start(a, flags); mode = va_arg(a, mode_t); va_end(a); }
+    if (IsStatusPath(path) && (flags & O_ACCMODE) == O_RDONLY) {
+        int fd = OpenFilteredStatusFd();
+        if (fd >= 0) return fd;
+    }
     if (IsMapsPath(path) && (flags & O_ACCMODE) == O_RDONLY) {
         int fd = OpenFilteredMapsFd();
         if (fd >= 0) return fd;
@@ -353,6 +430,10 @@ int Fake_openat64(int dfd, const char* path, int flags, ...) {
     mode_t mode = 0;
     bool hasMode = (flags & (O_CREAT | O_TMPFILE)) != 0;
     if (hasMode) { va_list a; va_start(a, flags); mode = va_arg(a, mode_t); va_end(a); }
+    if (IsStatusPath(path) && (flags & O_ACCMODE) == O_RDONLY) {
+        int fd = OpenFilteredStatusFd();
+        if (fd >= 0) return fd;
+    }
     if (IsMapsPath(path) && (flags & O_ACCMODE) == O_RDONLY) {
         int fd = OpenFilteredMapsFd();
         if (fd >= 0) return fd;
@@ -365,6 +446,10 @@ int Fake_openat64(int dfd, const char* path, int flags, ...) {
 
 int Fake__openat_2(int dfd, const char* path, int flags) {
     if (ShouldHidePath(path)) { errno = ENOENT; return -1; }
+    if (IsStatusPath(path) && (flags & O_ACCMODE) == O_RDONLY) {
+        int fd = OpenFilteredStatusFd();
+        if (fd >= 0) return fd;
+    }
     if (IsMapsPath(path) && (flags & O_ACCMODE) == O_RDONLY) {
         int fd = OpenFilteredMapsFd();
         if (fd >= 0) return fd;
@@ -376,6 +461,10 @@ int Fake__openat_2(int dfd, const char* path, int flags) {
 
 FILE* Fake_fopen(const char* path, const char* mode) {
     if (ShouldHidePath(path)) { errno = ENOENT; return nullptr; }
+    if (path && mode && IsStatusPath(path) && mode[0] == 'r' && !strchr(mode, '+')) {
+        int fd = OpenFilteredStatusFd();
+        if (fd >= 0) { FILE* f = fdopen(fd, mode); if (f) return f; close(fd); }
+    }
     if (path && mode && IsMapsPath(path) && mode[0] == 'r' && !strchr(mode, '+')) {
         int fd = OpenFilteredMapsFd();
         if (fd >= 0) { FILE* f = fdopen(fd, mode); if (f) return f; close(fd); }
@@ -387,6 +476,10 @@ FILE* Fake_fopen(const char* path, const char* mode) {
 
 FILE* Fake_fopen64(const char* path, const char* mode) {
     if (ShouldHidePath(path)) { errno = ENOENT; return nullptr; }
+    if (path && mode && IsStatusPath(path) && mode[0] == 'r' && !strchr(mode, '+')) {
+        int fd = OpenFilteredStatusFd();
+        if (fd >= 0) { FILE* f = fdopen(fd, mode); if (f) return f; close(fd); }
+    }
     if (path && mode && IsMapsPath(path) && mode[0] == 'r' && !strchr(mode, '+')) {
         int fd = OpenFilteredMapsFd();
         if (fd >= 0) { FILE* f = fdopen(fd, mode); if (f) return f; close(fd); }

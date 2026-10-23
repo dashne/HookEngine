@@ -14,6 +14,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         JavaHook.cpp
         ProcessHooks.cpp
         DualApplication.cpp
+        AntiDetection.cpp
         test_item1.cpp
         test_item2.cpp
         test_item3.cpp
@@ -23,6 +24,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         test_regression.cpp
         test_reloc.cpp
         test_process_hooks.cpp
+        test_anti_detection.cpp
 )
 
 find_library(log-lib log)
