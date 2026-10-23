@@ -94,6 +94,10 @@ static bool ShouldHidePath(const char* path) {
     if (strncmp(path, "/debug_ramdisk/", 15) == 0) return true;
     if (strcmp(path, "/cache/magisk") == 0) return true;
     if (strncmp(path, "/cache/magisk/", 14) == 0) return true;
+    // Test-only marker: any path containing this substring is hidden.
+    // Enables end-to-end verification that GOT hooks fire from Java.
+    // Production paths never contain this string.
+    if (strstr(path, ".hookengine-test-hidden")) return true;
     static const char* kHidden[] = {
             "/system/bin/su", "/system/xbin/su", "/sbin/su",
             "/system/sd/xbin/su", "/system/bin/failsafe/su",

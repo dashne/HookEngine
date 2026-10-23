@@ -15,6 +15,9 @@ object PmSpoof {
 
     @Volatile var hiddenPackages: Set<String> = emptySet()
 
+    /** True only if proxy + list field are both in place. */
+    fun isInstalled(): Boolean = storedProxy != null && listFieldResolved
+
     // Guards a single proxy instance across every install() call.
     @Volatile private var storedProxy: Any? = null
     @Volatile private var cachedListField: Field? = null

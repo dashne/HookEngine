@@ -820,3 +820,78 @@ Java_com_ims134_hookengine_HiddenApiBridge_reflectSetAccessible(
     return r;
 }
 
+// ─── Test bridge for E2E anti-detection tests ─────────────────────────
+int InstallHooks();
+extern "C" int InstallAntiDetection(JNIEnv*);
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_installFileHooks(JNIEnv*, jobject) {
+    return (jint)InstallHooks();   // 0 = HOOK_OK, idempotent on repeat
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_installAntiDetection(JNIEnv* env, jobject) {
+    return (jint)InstallAntiDetection(env);
+}
+
+// Raw file write via syscall — bypasses our own hooks (libhookengine is
+// not GOT-patched). Lets the test create a file that ShouldHidePath will
+// then hide from Java-side File.exists().
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_writeFileRaw(
+        JNIEnv* env, jobject, jstring jpath, jstring jcontent) {
+    if (!jpath || !jcontent) return JNI_FALSE;
+    const char* path = env->GetStringUTFChars(jpath, nullptr);
+    const char* content = env->GetStringUTFChars(jcontent, nullptr);
+    if (!path || !content) {
+        if (path) env->ReleaseStringUTFChars(jpath, path);
+        if (content) env->ReleaseStringUTFChars(jcontent, content);
+        return JNI_FALSE;
+    }
+    int fd = (int)syscall(__NR_openat, AT_FDCWD, path,
+                          O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    jboolean ok = JNI_FALSE;
+    if (fd >= 0) {
+        ssize_t want = (ssize_t)strlen(content);
+        ssize_t got = (ssize_t)syscall(__NR_write, fd, content, (size_t)want);
+        syscall(__NR_close, fd);
+        if (got == want) ok = JNI_TRUE;
+    }
+    env->ReleaseStringUTFChars(jpath, path);
+    env->ReleaseStringUTFChars(jcontent, content);
+    LOGD("writeFileRaw(%s): %d", path, ok);
+    return ok;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_readFileRaw(
+        JNIEnv* env, jobject, jstring jpath) {
+    if (!jpath) return env->NewStringUTF("");
+    const char* path = env->GetStringUTFChars(jpath, nullptr);
+    if (!path) return env->NewStringUTF("");
+    int fd = (int)syscall(__NR_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        env->ReleaseStringUTFChars(jpath, path);
+        return env->NewStringUTF("");
+    }
+    char buf[256] = {0};
+    ssize_t n = (ssize_t)syscall(__NR_read, fd, buf, sizeof(buf) - 1);
+    syscall(__NR_close, fd);
+    env->ReleaseStringUTFChars(jpath, path);
+    if (n < 0) n = 0;
+    buf[n] = '\0';
+    return env->NewStringUTF(buf);
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_deleteFileRaw(
+        JNIEnv* env, jobject, jstring jpath) {
+    if (!jpath) return JNI_FALSE;
+    const char* path = env->GetStringUTFChars(jpath, nullptr);
+    if (!path) return JNI_FALSE;
+    int rc = (int)syscall(__NR_unlinkat, AT_FDCWD, path, 0);
+    jboolean ok = (rc == 0 || errno == ENOENT) ? JNI_TRUE : JNI_FALSE;
+    env->ReleaseStringUTFChars(jpath, path);
+    return ok;
+}
+

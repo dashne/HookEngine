@@ -10,4 +10,9 @@ object NativeTestBridge {
 
     external fun installProcessHooks(): Int
     external fun uninstallProcessHooks()
+    external fun installFileHooks(): Int
+    external fun installAntiDetection(): Int
+    external fun writeFileRaw(path: String, content: String): Boolean
+    external fun readFileRaw(path: String): String
+    external fun deleteFileRaw(path: String): Boolean
 }

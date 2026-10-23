@@ -17,22 +17,33 @@ object ClassLoaderBridge {
     private const val TAG = "DualCore"
     private var installed = false
 
+    /**
+     * Idempotent install using the current thread's context classloader as
+     * guest and our own loader as host. Called from DualApplication.attachBaseContext.
+     */
     @Synchronized
     fun install(): Boolean {
         if (installed) return true
-
         val guest = try { Thread.currentThread().contextClassLoader } catch (_: Throwable) { null }
-        val host = ClassLoaderBridge::class.java.classLoader
+        val host  = ClassLoaderBridge::class.java.classLoader
         if (guest == null || host == null) {
-            Log.e(TAG, "ClassLoaderBridge: null loader (guest=$guest host=$host)")
+            Log.e(TAG, "ClassLoaderBridge.install: null loader (guest=$guest host=$host)")
             return false
         }
+        return installFor(guest, host)
+    }
+
+    /**
+     * Explicit form for testing and DualHost integration. Chains host dex
+     * elements into guest DexPathList. Safe to call multiple times.
+     */
+    @Synchronized
+    fun installFor(guest: ClassLoader, host: ClassLoader): Boolean {
         if (guest === host) {
-            Log.d(TAG, "ClassLoaderBridge: guest == host, nothing to chain")
+            Log.d(TAG, "ClassLoaderBridge.installFor: guest == host, nothing to chain")
             installed = true
             return true
         }
-
         return try {
             chain(guest, host)
             installed = true
@@ -43,6 +54,8 @@ object ClassLoaderBridge {
             false
         }
     }
+
+    fun isInstalled(): Boolean = installed
 
     private fun chain(guest: ClassLoader, host: ClassLoader) {
         val pathListField = findField(guest.javaClass, "pathList")
