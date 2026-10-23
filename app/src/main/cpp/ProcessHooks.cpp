@@ -155,6 +155,9 @@ static HookHandle* g_h_kill    = nullptr;
 static bool IsSuPath(const char* p) {
     return HiddenPaths::IsBlockedExecPath(p);
 }
+extern "C" int IsBlockedShellCommandForTest(const char* cmd) {
+    return HiddenPaths::IsBlockedShellCommand(cmd) ? 1 : 0;
+}
 
 extern "C" int IsSuPathForTest(const char* path) {
     return IsSuPath(path) ? 1 : 0;
@@ -177,7 +180,7 @@ static int Fake_execvp(const char* file, char* const argv[]) {
     return _execvp(file, argv);
 }
 static int Fake_system(const char* cmd) {
-    if (cmd && (strstr(cmd, "su ") || strcmp(cmd, "su") == 0)) {
+    if (cmd && HiddenPaths::IsBlockedShellCommand(cmd)) {
         LOGE("system DENIED: %s", cmd);
         return -1;
     }

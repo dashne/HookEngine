@@ -29,8 +29,8 @@ class ProcessHooksTest {
         val lines = NativeTestBridge.runSuite("process_hooks")
         assertTrue("process_hooks produced no result lines", lines.isNotEmpty())
         assertTrue(
-            "process_hooks produced ${lines.size} cases, expected >= 17",
-            lines.size >= 17
+            "process_hooks produced ${lines.size} cases, expected >= 27",
+            lines.size >= 27
         )
         val failures = lines.filter { it.startsWith("FAIL|") }
         assertTrue(

@@ -89,4 +89,57 @@ namespace HiddenPaths {
         return false;
     }
 
+    // ─── Shell-command denial ──────────────────────────────────────────────
+// Tokenizes a shell command string on shell metacharacters and checks
+// each token against IsBlockedExecPath. Handles:
+//   "su"                    → blocked (bare)
+//   "su -c id"              → blocked (su token)
+//   "echo hi; su"           → blocked (su token after ;)
+//   "echo hi && su"         → blocked (su token after &&)
+//   "foo | su"              → blocked (su token after |)
+//   "/system/bin/su -c id"  → blocked (path token)
+//   "$(su)" / "`su`"        → blocked (su token, ( ) ` are boundaries)
+//   "issue --help"          → allowed (issue is not su, not a blocked path)
+//   "sunshine"              → allowed (sunshine is not su)
+//   "subin"                 → allowed
+//   "sudo apt install"      → allowed (sudo is a distinct binary)
+//
+// Does NOT handle quoted tokens: `sh -c '"su"'` still bypasses this check.
+// That's acceptable — the shell eventually execve()s the real binary and
+// the execve hook (IsSuPath) catches it at the last mile. system() is a
+// first-line defense; execve is the actual gate.
+    inline bool IsBlockedShellCommand(const char* cmd) {
+        if (!cmd || !cmd[0]) return false;
+
+        auto isBoundary = [](char c) {
+            return c == '\0' || c == ' ' || c == '\t' || c == '\n' ||
+                   c == '\r' || c == ';' || c == '|' || c == '&' ||
+                   c == '`' || c == '(' || c == ')' || c == '{' ||
+                   c == '}' || c == '<' || c == '>';
+        };
+
+        const char* tokStart = nullptr;
+        for (const char* p = cmd; ; p++) {
+            bool boundary = isBoundary(*p);
+            if (tokStart == nullptr && !boundary) {
+                tokStart = p;
+            }
+            if (tokStart != nullptr && boundary) {
+                size_t len = (size_t)(p - tokStart);
+                if (len == 2 && tokStart[0] == 's' && tokStart[1] == 'u') {
+                    return true;   // bare "su" token
+                }
+                if (len > 0 && len < 256) {
+                    char buf[256];
+                    memcpy(buf, tokStart, len);
+                    buf[len] = '\0';
+                    if (IsBlockedExecPath(buf)) return true;
+                }
+                tokStart = nullptr;
+            }
+            if (*p == '\0') break;
+        }
+        return false;
+    }
+
 } // namespace HiddenPaths

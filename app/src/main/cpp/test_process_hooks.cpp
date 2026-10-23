@@ -17,6 +17,7 @@
 
 extern "C" int32_t g_virtualUid;
 extern "C" int IsSuPathForTest(const char* path);
+extern "C" int IsBlockedShellCommandForTest(const char* cmd);
 
 static jint FakeMyUidTest(JNIEnv*, jclass) { return 42; }
 
@@ -256,6 +257,78 @@ extern "C" int RunProcessHooksTests(JNIEnv* env) {
         int block = IsSuPathForTest("/data/local/subin");
         emit(block == 0, "execve_false_positive_boundary_not_blocked",
              block ? "BLOCKED (boundary bug!)" : "not blocked (correct)");
+    }
+
+    // ── Test 18: bare "su" blocked ──
+    {
+        int b = IsBlockedShellCommandForTest("su");
+        emit(b == 1, "system_bare_su_blocked",
+             b ? "blocked" : "NOT BLOCKED (bug!)");
+    }
+
+    // ── Test 19: "su -c id" blocked ──
+    {
+        int b = IsBlockedShellCommandForTest("su -c id");
+        emit(b == 1, "system_su_with_args_blocked",
+             b ? "blocked" : "NOT BLOCKED (bug!)");
+    }
+
+    // ── Test 20: "echo hi && su" blocked ──
+    {
+        int b = IsBlockedShellCommandForTest("echo hi && su");
+        emit(b == 1, "system_su_after_and_blocked",
+             b ? "blocked" : "NOT BLOCKED (bug!)");
+    }
+
+    // ── Test 21: "echo hi; su" blocked ──
+    {
+        int b = IsBlockedShellCommandForTest("echo hi; su");
+        emit(b == 1, "system_su_after_semicolon_blocked",
+             b ? "blocked" : "NOT BLOCKED (bug!)");
+    }
+
+    // ── Test 22: "/system/bin/su -c id" blocked (path form) ──
+    {
+        int b = IsBlockedShellCommandForTest("/system/bin/su -c id");
+        emit(b == 1, "system_su_path_blocked",
+             b ? "blocked" : "NOT BLOCKED (bug!)");
+    }
+
+    // ── Test 23: "/system/bin/magisk --version" blocked ──
+    {
+        int b = IsBlockedShellCommandForTest("/system/bin/magisk --version");
+        emit(b == 1, "system_magisk_blocked",
+             b ? "blocked" : "NOT BLOCKED (bug!)");
+    }
+
+    // ── Test 24: "issue --help" NOT blocked ──
+    {
+        int b = IsBlockedShellCommandForTest("issue --help");
+        emit(b == 0, "system_false_positive_issue_not_blocked",
+             b ? "BLOCKED (strstr bug!)" : "not blocked (correct)");
+    }
+
+    // ── Test 25: "sunshine" NOT blocked ──
+    {
+        int b = IsBlockedShellCommandForTest("sunshine");
+        emit(b == 0, "system_false_positive_sunshine_not_blocked",
+             b ? "BLOCKED (strstr bug!)" : "not blocked (correct)");
+    }
+
+    // ── Test 26: "subin" NOT blocked ──
+    {
+        int b = IsBlockedShellCommandForTest("subin");
+        emit(b == 0, "system_false_positive_subin_not_blocked",
+             b ? "BLOCKED (prefix bug!)" : "not blocked (correct)");
+    }
+
+    // ── Test 27: "sudo apt install foo" NOT blocked ──
+    // sudo is a distinct binary from su; blocking it would break
+    // legitimate workflows on already-rooted test devices.
+    {
+        int b = IsBlockedShellCommandForTest("sudo apt install foo");
+        emit(b == 0, "system_sudo_not_blocked",
+             b ? "BLOCKED (overreach!)" : "not blocked (correct)");
     }
 
     LOGD("RunProcessHooksTests: %d passed, %d failed", pass, fail);
