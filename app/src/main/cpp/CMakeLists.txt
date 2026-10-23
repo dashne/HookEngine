@@ -11,6 +11,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         HiddenApi.cpp
         HookRegistry.cpp
         arm64_reloc.cpp
+        JavaHook.cpp
+        ProcessHooks.cpp
         test_item1.cpp
         test_item2.cpp
         test_item3.cpp
@@ -19,8 +21,6 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         test_suite.cpp
         test_regression.cpp
         test_reloc.cpp
-        JavaHook.cpp
-        ProcessHooks.cpp
         test_process_hooks.cpp
 )
 

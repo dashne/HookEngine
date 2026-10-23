@@ -515,3 +515,25 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_RemoteService_uninstallProcessHooks(JNIEnv*, jobject) {
     return UninstallProcessHooks();
 }
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_spoofProcessStatics(JNIEnv* env, jobject, jint uid, jint pid) {
+    return SpoofProcessStatics(env, uid, pid);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_restoreProcessStatics(JNIEnv* env, jobject) {
+    RestoreProcessStatics();
+}
+
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_installProcessHooks(JNIEnv* env, jobject) {
+    return InstallProcessHooks(env);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_uninstallProcessHooks(JNIEnv*, jobject) {
+    UninstallProcessHooks();
+}
+

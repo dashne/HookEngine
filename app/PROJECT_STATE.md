@@ -397,3 +397,46 @@ is what callers depend on.
 **Next:** Option B (second API level) or C (DualHost integration).
 
 ---
+
+## Finding: MY_UID / MY_PID absent on API 37 — 2026-10-23
+
+`android.os.Process.MY_UID` and `MY_PID` do NOT exist as static fields on
+API 37 (verified: GetStaticFieldID returns null + NoSuchFieldError for both).
+`Process.myUid()` / `Process.myPid()` are fast-JNI natives; they do not read
+any static field. The handoff's Batch 2a plan ("spoof MY_UID / MY_PID via
+SetStaticIntField, then verify Process.myUid() returns 10000") is therefore
+a no-op on this API: there is nothing to spoof.
+
+What actually works on API 37:
+- `Binder.getCallingUid()` ArtMethod hook — proven (Item 5, ProcessHooksTest)
+- `getpid()` inline hook (libc) — proven (`native_getpid_spoofed` test)
+- `getuid()` / `geteuid()` / `getgid()` / `getegid()` GOT hooks in
+  libjavacore / libopenjdk — partial (only libs that reference the symbol)
+
+What does NOT work on API 37:
+- Reflective field spoof of Process.MY_UID / MY_PID (fields don't exist)
+- ArtMethod hook of Process.myUid / myPid / myTid / myTgid (fast-JNI tokens)
+
+Consequences for Batch 2a: retire the "static field spoof" plan on API 37.
+Audit what the target app (Viber) actually calls to obtain its UID:
+(a) Binder.getCallingUid() → already hookable
+(b) Process.myUid()        → needs native getuid hook or fast-JNI surgery
+(c) direct getuid syscall  → out of scope (needs seccomp / kernel)
+Then extend the hook surface along the path the app actually uses.
+
+Test-suite changes:
+- `ProcessHooksTest.spoofProcessStaticsReturnCode` renamed to
+  `spoofProcessStaticsApi37State` and now asserts return code in {0, -2}.
+- `ProcessHooksTest.doesFrameworkSeeNativeHook` now tolerates both outcomes
+  (myPid() returns real pid OR virtual pid 10000) — it only verifies that
+  install/uninstall don't corrupt the framework call.
+- `test_process_hooks.cpp` Test 3 now clears JNI exceptions between field
+  probes (ART 37 aborts on JNI calls with pending NoSuchFieldError).
+- `test_process_hooks.cpp` Test 4 (getpid) tightened: asserts return == 10000
+  rather than just "> 0". Test 8 (kill) now uses raw `__NR_getpid` syscall
+  so it targets the real pid, not the hooked libc getpid.
+- Suite now produces exactly 9 assertions in `process_hooks`; the Kotlin
+  assertion threshold was already bumped to >= 9 in a prior commit.
+
+---
+
