@@ -476,3 +476,32 @@ extern "C" int RunRegressionBug1(JNIEnv* env) {
     env->DeleteLocalRef(method);
     return pass ? 1 : 0;
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// §7.7 — selftest.txt file channel. Called once per onStartCommand, after
+// all 5 item suites have run (sink holds 23 lines). Writes each as
+// "PASS|name|detail" or "FAIL|name|detail", then "END <pass> <fail>",
+// then resets the sink for the next run.
+// ─────────────────────────────────────────────────────────────────────────
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_RemoteService_writeSelftestFile(
+        JNIEnv* env, jobject, jstring jpath) {
+    if (!env || !jpath) return -1;
+    const char* path = env->GetStringUTFChars(jpath, nullptr);
+    if (!path) return -1;
+    auto lines = testreport::Snapshot();
+    FILE* f = fopen(path, "w");
+    env->ReleaseStringUTFChars(jpath, path);
+    if (!f) return -1;
+    int pass = 0, fail = 0;
+    for (const auto& l : lines) {
+        fprintf(f, "%s|%s|%s\n",
+                l.pass ? "PASS" : "FAIL",
+                l.name.c_str(), l.detail.c_str());
+        if (l.pass) pass++; else fail++;
+    }
+    fprintf(f, "END %d %d\n", pass, fail);
+    fclose(f);
+    testreport::Reset();
+    return pass;
+}

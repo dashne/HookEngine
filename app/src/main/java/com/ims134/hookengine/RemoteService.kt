@@ -35,6 +35,8 @@ class RemoteService : Service() {
     external fun restoreBinderMethod()
     external fun diagRawZip(path: String): String
 
+    external fun writeSelftestFile(path: String): Int
+
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -71,6 +73,17 @@ class RemoteService : Service() {
         }
 
         Log.d("DualCore","==============================================------------End----------=============================================");
+
+        try {
+            val selftest = File(filesDir, "selftest.txt")
+            val pass = writeSelftestFile(selftest.absolutePath)
+            Log.d("DualCore", "selftest.txt written: $pass pass")
+        } catch (t: Throwable) {
+            Log.e("DualCore", "writeSelftestFile threw: $t")
+        }
+
+
+
         Thread {
             // ============================================================
             // STEP 0 — Diagnostic BEFORE any hooks

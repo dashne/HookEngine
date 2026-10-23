@@ -243,3 +243,47 @@ Compiles the harness. Does not run hooks. No CI task can verify device tests on 
 - Any device other than the API 37 / arm64 physical device.
 - Runtime CI. Build-only.
 - connectedDebugAndroidTest as a verification path — the task is broken on MIUI.
+
+---
+
+
+---
+
+## §7.6 — CLOSED 2026-10-23
+
+Regression suites for historical bugs 1–5. Device verification:
+`am instrument -w -r` → `numtests=10`, all suites
+`INSTRUMENTATION_STATUS_CODE: 0`, final `OK (10 tests)`.
+
+Breakdown:
+
+| Suite | Location | Assertions |
+|---|---|---|
+| bug1_page_prot_restored | C++ `native-lib.cpp` | ArtMethod page prot before == install == restore |
+| bug2_dlopen_hooks_disabled | C++ `test_regression.cpp` | 9 paths match `ShouldHookDlopen` expectation |
+| bug3_both_pm_fields_patched | Kotlin `RegressionTest.kt` | both `mPM` and `sPackageManager` hold same proxy class |
+| bug4_no_relay_leak | C++ `test_regression.cpp` | 1000 cycles, alloc==free==1000, bytes restored, registry zero |
+| bug5_deferred_free | C++ `test_regression.cpp` | 3 callers, grace=20ms, alloc==free==1, post==11 |
+
+**Findings during §7.6:**
+
+1. **`test_suite.cpp` dispatch was initially incomplete.** Only `regression_bug1` was wired; `bug2/4/5` fell through to `return -1` without calling their functions, so `Snapshot()` returned the empty post-Reset sink. Caught by Kotlin assertion `lines.isNotEmpty()` — `regression_bug4 produced no result lines`. Fixed by adding all four dispatch cases. This is the assertion that can fail, doing its job.
+
+2. **Bug 3 C++ stub removed.** The initial §7.6 pass included `RunRegressionBug3()` that unconditionally reported `[PASS]`. Same "assertion that cannot fail" pattern as `regAfter == regBefore` pre-tightening. Deleted. Bug 3 is verified only by the Kotlin reflection assertion in `RegressionTest.kt`, which can fail — and does, if `PmSpoof.install` doesn't set both fields or sets them to different proxy classes.
+
+3. **`PmSpoof.kt` extracted from `RemoteService`.** Needed so `RegressionTest.bug3_both_pm_fields_patched` can call `PmSpoof.install(ctx)` from the test. `RemoteService.installPmSignatureSpoof()` now delegates. Extraction is idempotent (`installed` flag) so the `:remote` process's own `onStartCommand` chain still works.
+
+4. **`RegressionTest.kt` was created in the wrong source set** (`main/java` instead of `androidTest/java`) and had to be moved. Files in `main/` go into the app APK, not the test APK — `numtests` stayed at 5 until the move.
+
+**Verified bug details on device:**
+
+- bug4: `alloc=1000 free=1000` — no relay page leak over 1000 cycles at grace=0.
+- bug5: `alloc=1 free=1` — deferred-free completes, counters balanced.
+- bug1: `before == install == restore` — ArtMethod page prot survives hook/unhook cycle unchanged.
+- bug2: all 9 `ShouldHookDlopen` paths match expected bool.
+- bug3: `instance.mPM` and `static.sPackageManager` hold the same `$Proxy` class after `PmSpoof.install`.
+
+**Next:** §7.7 (selftest.txt file channel + IntegrationTest.kt).
+
+---
+
