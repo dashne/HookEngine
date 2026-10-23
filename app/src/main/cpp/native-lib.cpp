@@ -18,6 +18,7 @@
 #include "HookRegistry.h"
 #include "TestReport.h"
 #include "test_suite.h"
+#include "ProcessHooks.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -504,4 +505,13 @@ Java_com_ims134_hookengine_RemoteService_writeSelftestFile(
     fclose(f);
     testreport::Reset();
     return pass;
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_RemoteService_installProcessHooks(JNIEnv* env, jobject) {
+    return InstallProcessHooks(env);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_RemoteService_uninstallProcessHooks(JNIEnv*, jobject) {
+    return UninstallProcessHooks();
 }

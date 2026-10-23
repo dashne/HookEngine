@@ -19,6 +19,9 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         test_suite.cpp
         test_regression.cpp
         test_reloc.cpp
+        JavaHook.cpp
+        ProcessHooks.cpp
+        test_process_hooks.cpp
 )
 
 find_library(log-lib log)

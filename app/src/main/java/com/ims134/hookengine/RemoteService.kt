@@ -22,6 +22,8 @@ class RemoteService : Service() {
     external fun nativeGetpid(): Int
     external fun hiddenApiProbe(): Int
     external fun hiddenApiInstall(): Int
+    external fun installProcessHooks(): Int
+    external fun uninstallProcessHooks(): Int
 
     external fun runItem1Tests(): String
     external fun runItem2Tests(): String
