@@ -353,7 +353,7 @@ Java_com_ims134_hookengine_RemoteService_diagRawZip(JNIEnv* env, jobject, jstrin
 // the array is the source of truth for assertions.
 // ─────────────────────────────────────────────────────────────────────────
 extern "C" JNIEXPORT jobjectArray JNICALL
-Java_com_ims134_hookengine_NativeTestBridge_runSuite(JNIEnv* env, jclass, jstring jsuite) {
+Java_com_ims134_hookengine_NativeTestBridge_runSuite(JNIEnv* env, jobject, jstring jsuite) {
     if (!env || !jsuite) return nullptr;
     const char* suite = env->GetStringUTFChars(jsuite, nullptr);
     if (!suite) return nullptr;
@@ -379,7 +379,7 @@ Java_com_ims134_hookengine_NativeTestBridge_runSuite(JNIEnv* env, jclass, jstrin
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_ims134_hookengine_NativeTestBridge_uninstallAll(JNIEnv*, jclass) {
+Java_com_ims134_hookengine_NativeTestBridge_uninstallAll(JNIEnv*, jobject) {
     UninstallAllHooks();
 }
 
@@ -387,7 +387,7 @@ extern "C" void SetItem4Paths(const char* realDir, const char* fakeDir);
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_setItem4Paths(
-        JNIEnv* env, jclass, jstring jReal, jstring jFake) {
+        JNIEnv* env, jobject , jstring jReal, jstring jFake) {
     if (!env || !jReal || !jFake) return;
     const char* real = env->GetStringUTFChars(jReal, nullptr);
     const char* fake = env->GetStringUTFChars(jFake, nullptr);
