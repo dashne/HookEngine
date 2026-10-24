@@ -1,10 +1,8 @@
-## Status
-
 Last verified build: v29, verified on device 2026-10-23, items 1–5 all green (23 tests), Item 7 §7.1–§7.5 green on device.
 
-Session 11 closed 2026-10-24: tnFIN rewriter exception safety, drainCodes stub fix, code-36 reply captured + hex-dumped. 47 tests green. Coverage 13/90 (unchanged — code 36 not delivered).
+Session 12 closed 2026-10-24: Q1 flags-check measured (code 36 only matters for signature-flag callers), code-36 byte-rewrite deferred, exception-path test added, AidlProbe narrowed. 48 tests green. Coverage 13/90 (unchanged — no new reference method shipped this session; pivot to handleJHMethod next).
 
-Session 10 closed 2026-10-24: tnFIN production delivery live for code 3 (getPackageInfo). 43 tests green. Coverage 13/90.
+Session 11 closed 2026-10-24: tnFIN rewriter exception safety, drainCodes stub fix, code-36 reply captured + hex-dumped. 47 tests green. Coverage 13/90 (unchanged — code 36 not delivered).
 
 Completed:
 - Registry finding DISPROVED — RegistryCount() counts inline hooks, regDuring=1 observed. Assertion tightened in both directions.
@@ -389,8 +387,7 @@ explicitly marked out-of-scope.
 | `getCallingUid` | `FakeBinderGetCallingUid` | ✅ |
 | `is64Bit` | Implicit (arm64-only build) | ✅ |
 | `nativeGetCpuABI` | Implicit (arm64-only build) | ✅ |
-| `tnFIN` | `BinderTransactHook` + `ParcelRewriter` + `CppParcelRewriter` | ✅ Production delivery for code 3 (getPackageInfo). Code 36 (getInstalledPackages) dispatched (Session 11 confirmed code 36 correct), byte-rewrite skipped — see Session 11 §Code 36 status. |
-| `nativeAIOR` | Frida port block | ⚠️ Partial — 1 category of N |
+| | `tnFIN` | `BinderTransactHook` + `ParcelRewriter` + `CppParcelRewriter` | ✅ Production delivery for code 3 (getPackageInfo). Code 36 (getInstalledPackages) dispatched but byte-rewrite deferred — see Session 12 decision note. Code 36 only matters for callers passing signature flags; not observed as a target requirement. |
 | `nativeDNPO` | TracerPid filter | ⚠️ Partial — misses full ptrace detect |
 | `nativeAMRHook` | Path hide list | ⚠️ Partial — no mount spoof |
 
@@ -411,10 +408,10 @@ explicitly marked out-of-scope.
 
 ### Order of attack
 
-**Phase A — Core engine (blocking everything else):**
+***Phase A — Core engine (blocking everything else):**
 1. ✅ `tnFIN` — mechanism (Session 8), algorithm (Session 9), production code 3 (Session 10), code-36 dispatch confirmed (Session 11)
-2. 🔲 `tnFIN` code 36 byte-rewrite (Session 12+; decomp required)
-3. 🔲 `handleJHMethod` + `nativeCNVM` (Java dispatcher)
+2. ⏸️ `tnFIN` code 36 byte-rewrite — DEFERRED (Session 12). Code 36 measured irrelevant for flags=0 callers. Reopen if a target is shown to require signature-flag `getInstalledPackages`, or if decomp of `PackageInfo.readFromParcel` + `BaseParceledListSlice.readFromParcel` lands.
+3. 🔲 `handleJHMethod` + `nativeCNVM` (Java dispatcher) — **NEXT**
 4. 🔲 `nativeInit` (full config)
 5. 🔲 `nativeOnLoad` (full DEX extract, if needed)
 
@@ -695,6 +692,89 @@ in Session 10. Session 11 carried the diagnostic forward.
 
 ## Session 11 — rewriter exception safety + code-36 diagnostics — 2026-10-24
 
+## Session 12 — Q1 measured: code 36 deprioritized — 2026-10-24
+
+### Mission #1 status: 13 / 90 (~14%) — UNCHANGED at time of decision
+
+### Q1 result (measured on device, Session 12)
+
+The flags-check probe from the Session 12 handoff ran on device:
+
+    getInstalledPackages(0): 278 pkgs, 0 with non-null sigs
+    getInstalledPackages(GET_SIGNATURES): 278 pkgs, 278 with non-null sigs
+
+This is decision-tree row 2: **flags=0 has null signatures;
+GET_SIGNATURES has non-null signatures.**
+
+### Consequence
+
+`PackageInfo.signatures` / `signingInfo` are null unless the caller
+explicitly passes `GET_SIGNATURES` / `GET_SIGNING_CERTIFICATES`. This is
+standard framework behavior, not a MIUI quirk — the framework strips
+signatures unless requested.
+
+Code 36 (`getInstalledPackages`) therefore has nothing to redact for a
+caller that does not pass signature flags. The MIUI wire-format fix
+(`writeString8` for `packageName`, plus the three int32s at 80/84/88)
+remains correct to pursue *if we determine a target calls
+`getInstalledPackages` with signature flags*. For Viber specifically,
+that determination is out of scope for this repo.
+
+### Decision
+
+**Deprioritize code 36. Pivot Phase A item 2 to a deferred state and
+move to Phase A item 3 (`handleJHMethod` + `nativeCNVM`).**
+
+Rationale:
+1. Code 3 (`getPackageInfo(pkg, GET_SIGNATURES)`) already covers the
+   standard signature-check AIDL path. That is the path tamper
+   detectors actually use.
+2. The code-36 fix still requires IDA decomp of
+   `PackageInfo.readFromParcel` and `BaseParceledListSlice.readFromParcel`
+   on this ROM. Per Rule 7, no parse code without decomp.
+3. Session 11 was a flat-coverage session. Session 12 must grow
+   coverage (Rule 3). `handleJHMethod` is a Phase A blocker that
+   grows coverage by a real method.
+4. The "general correctness" argument is real but weak: if the
+   reference `ApplicationProxy` redacts `getInstalledPackages` with
+   signature flags and we don't, we are technically short of "matches
+   reference behavior" by one code path. This is honestly stated. It
+   is a reason to come back to code 36 *if* a target is shown to
+   require it.
+
+### What does NOT change
+
+- The code-36 skip-guard in `BinderTransactHook.cpp` stays in place.
+  The rewriter would still crash on `ParceledListSlice.CREATOR.createFromParcel`
+  on this ROM if the guard were removed.
+- The captured 66 KB code-36 reply (`g_last_code36_reply`) remains
+  available via `dumpLastCode36Reply` JNI — useful if decomp ever lands.
+- The hex dump in `Session11Code36ReplyTest` remains green and diagnostic.
+- The 3-int32 hypothesis at offsets 80/84/88 remains unverified.
+  Decomp is still required to close it. If it is never closed, the
+  documented reason is: **code 36 works for flags=0 callers (nothing to
+  redact) and only matters for signature-flag callers, which we have
+  not observed as a target requirement.**
+
+### What Session 12 commits
+
+- `rewriterExceptionPreservesReplySize` — the Session 11 fix now
+  has a test. Uses code 36 to force `createFromParcel` throw and
+  asserts reply size preservation. Independent of the code-36 scope
+  decision.
+- `AidlCodeProbeTest` narrowed to codes 3 and 36 only. The broad PM
+  method sweep is dropped; those calls put the whole instrumentation
+  suite at risk if any future reply is malformed.
+- This decision note.
+
+### Next session
+
+Phase A item 3: `handleJHMethod` + `nativeCNVM` dispatcher design and
+implementation. This is a Java-method dispatcher, likely an ArtMethod
+hook family + a native entry point that reflects to `handleJHMethod`.
+Design discussion belongs to the next session — do not carry code-36
+context forward.
+
 ### Mission #1 status: 13 / 90 (~14%) — UNCHANGED
 
 Session 11 did not close the code-36 gap. What it delivered is **the diagnostic foundation** to close it correctly in a later session: exception safety for the Kotlin rewriter, a real implementation of `drainCodesNative`, an effective-vs-dispatched rewriter counter, the raw 66 KB code-36 reply captured and hex-dumped, and the definitive observation that this ROM's `PackageInfo.<init>` uses `readString8` for `packageName` (not AOSP's `readString16`).
@@ -822,6 +902,92 @@ Before any code:
 - The code-36 skip-guard until Path A or B is verified
 
 ---
+
+## Session 12 — Q1 measured, code 36 deprioritized — 2026-10-24
+
+### Mission #1 status: 13 / 90 (~14%)
+
+### Q1 result (measured on device, Session 12)
+
+The flags-check probe from the Session 12 handoff ran on device:
+
+    getInstalledPackages(0): 278 pkgs, 0 with non-null sigs
+    getInstalledPackages(GET_SIGNATURES): 278 pkgs, 278 with non-null sigs
+
+This is decision-tree row 2: flags=0 has null signatures;
+GET_SIGNATURES has non-null signatures.
+
+### Consequence
+
+`PackageInfo.signatures` / `signingInfo` are null unless the caller
+explicitly passes `GET_SIGNATURES` / `GET_SIGNING_CERTIFICATES`. This
+is standard framework behavior, not a MIUI quirk — the framework strips
+signatures unless requested.
+
+Code 36 (`getInstalledPackages`) therefore has nothing to redact for a
+caller that does not pass signature flags. The MIUI wire-format fix
+(`writeString8` for `packageName`, plus the three int32s at offsets
+80/84/88) remains correct to pursue *if* a target is shown to call
+`getInstalledPackages` with signature flags. For Viber specifically,
+that determination is out of scope for this repo.
+
+### Decision
+
+**Deprioritize code 36. Defer Phase A item 2 (code-36 byte-rewrite) and
+move to Phase A item 3 (`handleJHMethod` + `nativeCNVM`).**
+
+Rationale:
+1. Code 3 (`getPackageInfo(pkg, GET_SIGNATURES)`) already covers the
+   standard signature-check AIDL path. That is the path tamper
+   detectors actually use.
+2. The code-36 byte-rewrite still requires IDA decomp of
+   `PackageInfo.readFromParcel` and `BaseParceledListSlice.readFromParcel`
+   on this ROM. Per Rule 7, no parse code without decomp.
+3. Session 11 was a flat-coverage session. Session 12 must grow
+   coverage (Rule 3). `handleJHMethod` is a Phase A blocker and
+   closes a real reference method.
+4. The "general correctness" argument is real but weak: if the
+   reference `ApplicationProxy` redacts `getInstalledPackages` with
+   signature flags and we don't, we are technically short of "matches
+   reference behavior" by one code path. This is honestly stated. It
+   is a reason to come back to code 36 *if* a target is shown to
+   require it, or *if* decomp lands.
+
+### What does NOT change
+
+- The code-36 skip-guard in `BinderTransactHook.cpp` stays in place.
+  The Kotlin rewriter would still crash on
+  `ParceledListSlice.CREATOR.createFromParcel` on this ROM if the guard
+  were removed.
+- The captured 66 KB code-36 reply (`g_last_code36_reply`) remains
+  available via `dumpLastCode36Reply` JNI.
+- `Session11Code36ReplyTest` remains green and diagnostic.
+- The 3-int32 hypothesis at offsets 80/84/88 remains unverified.
+  Decomp is still required to close it. If it is never closed, the
+  documented reason is: code 36 works for flags=0 callers (nothing to
+  redact) and only matters for signature-flag callers, which we have
+  not observed as a target requirement.
+
+### Deliverables this session
+
+- `BinderTransactE2ETest.rewriterExceptionPreservesReplySize` — the
+  Session 11 exception-path fix now has a direct test. Uses code 36 to
+  force `createFromParcel` throw and asserts reply size preservation.
+  Independent of the code-36 scope decision.
+- `AidlCodeProbeTest` narrowed to codes 3 and 36 only. The broad PM
+  method sweep was dropped to reduce the risk that a malformed reply
+  from an unrelated AIDL method brings down the whole instrumentation
+  suite.
+- This decision note.
+
+### Test count: 48 green (up from 47). Coverage: 13/90 (unchanged).
+
+### Next session
+
+Phase A item 3: `handleJHMethod` + `nativeCNVM` dispatcher design and
+implementation. Design discussion belongs to the next session — do not
+carry code-36 context forward except as the deferral note above.
+
 
 ## Hard-won facts (canonical reference)
 

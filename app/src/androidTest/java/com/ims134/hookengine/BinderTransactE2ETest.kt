@@ -41,9 +41,6 @@ class BinderTransactE2ETest {
 
     @Test
     fun hookFiresOnRealPackageManagerQuery() {
-        // getInstalledPackages returns a large uncacheable reply —
-        // reliably hits IPC on every call. Avoids framework cache
-        // that made getPackageInfo(pkg, GET_SIGNATURES) a no-op.
         val before = BinderTransactHook.fireCount()
         ctx.packageManager.getInstalledPackages(0)
         val after = BinderTransactHook.fireCount()
@@ -58,9 +55,6 @@ class BinderTransactE2ETest {
 
     @Test
     fun rewriterDispatchesForOurPackage() {
-        // rewriteCount increments in Hook_Transact when MatchesRequest returns
-        // true, before the rewriter body runs. getInstalledPackages is code 36
-        // (matches any package) — reliably dispatches, never cached.
         val before = BinderTransactHook.rewriteCount()
         ctx.packageManager.getInstalledPackages(0)
         val after = BinderTransactHook.rewriteCount()
@@ -75,7 +69,6 @@ class BinderTransactE2ETest {
 
     @Test
     fun realQueryDoesNotCrash() {
-        // The primary win over Session 10: caller thread does pure C++ only.
         repeat(5) {
             ctx.packageManager.getInstalledPackages(0)
             try {
@@ -190,6 +183,46 @@ class BinderTransactE2ETest {
         } finally { request.recycle() }
     }
 
+    /**
+     * Session 11 fix has no test. Force createFromParcel to throw on code 36
+     * (absurd N=0x7FFFFFF0), then assert reply.dataSize() is unchanged.
+     * Before the fix, setDataSize(dataPosition()) truncated the caller's
+     * reply to 8 bytes on the exception path.
+     *
+     * This test exercises rewriteReply directly, not the C++ dispatch — the
+     * code-36 skip-guard returns before reaching the rewriter. That means
+     * this test validates the Kotlin contract independent of guard state.
+     */
+    @Test
+    fun rewriterExceptionPreservesReplySize() {
+        ParcelRewriter.ourPackageName = ctx.packageName
+        val request = Parcel.obtain()
+        try {
+            request.writeInterfaceToken("android.content.pm.IPackageManager")
+            request.writeString(ctx.packageName)
+            request.writeLong(0L)
+            request.writeInt(0)
+
+            val reply = Parcel.obtain()
+            try {
+                reply.writeInt(0)              // ex
+                reply.writeInt(1)              // hasResult
+                reply.writeInt(0x7FFFFFF0)     // absurd N
+                val sizeBefore = reply.dataSize()
+
+                ParcelRewriter.rewriteReply(36, request, reply)
+
+                val sizeAfter = reply.dataSize()
+                android.util.Log.d("DualCore",
+                    "rewriterExceptionPreservesReplySize: before=$sizeBefore after=$sizeAfter")
+
+                assertEquals(
+                    "reply size must be preserved when rewriter throws",
+                    sizeBefore, sizeAfter)
+            } finally { reply.recycle() }
+        } finally { request.recycle() }
+    }
+
     @Test
     fun dumpFirstItemInt32s() {
         BinderTransactHook.uninstall()
@@ -217,12 +250,10 @@ class BinderTransactE2ETest {
             val classLen = reply.readInt()
             Log.d("DualCore", "int32dump: ex=$ex has=$has count=$count classLen=$classLen")
 
-            // Read class name as UTF-16 chars, not as String (avoid String parsing)
             val classChars = StringBuilder()
             for (i in 0 until classLen) classChars.append(reply.readInt().toChar())
             Log.d("DualCore", "int32dump: class='$classChars' pos=${reply.dataPosition()}")
 
-            // Dump 100 int32s from current position (past class name)
             val start = reply.dataPosition()
             for (i in 0 until 100) {
                 val v = reply.readInt()
@@ -232,5 +263,4 @@ class BinderTransactE2ETest {
             request.recycle(); reply.recycle()
         }
     }
-
 }
