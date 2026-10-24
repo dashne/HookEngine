@@ -230,6 +230,7 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
     const uint8_t* newData = ParcelRewriter_GetData(freshPtr);
     size_t newSize = ParcelRewriter_GetSize(freshPtr);
 
+    bool swapped = false;
     if (rewriterOk && newData && newSize > 0) {
         // Swap: caller gets fresh's rewritten buffer.
         // mDataSize/mDataCapacity = newSize; mDataPos = callerReplyPos (typically 0).
@@ -244,6 +245,8 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
         *(size_t*)((uint8_t*)freshPtr + 16) = 0;
         *(size_t*)((uint8_t*)freshPtr + 24) = 0;
         *(size_t*)((uint8_t*)freshPtr + 32) = 0;
+        swapped = true;
+
     }
 
     // Recycle fresh.
@@ -269,10 +272,15 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
         env->DeleteLocalRef(wData);
     }
 
-    g_rewrite_effective_count.fetch_add(1, std::memory_order_relaxed);
-
-    LOGD("RewriteOnFreshThread: swapped reply (%zu -> %zu bytes) pos=%zu",
-         callerReplySize, newSize, callerReplyPos);
+    if (swapped) {
+        g_rewrite_effective_count.fetch_add(1, std::memory_order_relaxed);
+        LOGD("RewriteOnFreshThread: swapped reply (%zu -> %zu bytes) pos=%zu",
+             callerReplySize, newSize, callerReplyPos);
+    } else {
+        LOGD("RewriteOnFreshThread: no swap (rewriterOk=%d newData=%p newSize=%zu) "
+             "— caller sees original reply",
+             rewriterOk ? 1 : 0, (const void*)newData, newSize);
+    }
 }
 
 // ─── Hook body ───────────────────────────────────────────────────────
