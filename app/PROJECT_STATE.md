@@ -1,6 +1,6 @@
 Last verified build: v29, verified on device 2026-10-23, items 1–5 all green (23 tests), Item 7 §7.1–§7.5 green on device.
 
-Session 13 closed 2026-10-25: baseline confirmed at 48 tests green. handleJHMethod DEFERRED — no sub_29E168 decomp, body unchanged, surface wired but behavior unverified. nativeCNVM decomp-verified against sub_30BF7C + sub_30C238. Coverage 13/90 (unchanged — handleJHMethod deferred, nativeCNVM surface present but not counted as reference-behavior-match until ProxyBridgeSurfaceTest is confirmed running in the suite).
+Session 13 closed 2026-10-25: nativeCNVM decomp-verified vs sub_30BF7C + sub_30C238; 4 tests green in ProxyBridgeSurfaceTest (nativeCNVMMatchesReferenceSignature, nativeCNVMNullArgsIsNoOp, nativeCNVMInvokesVoidMethodWithCorrectArgs, nativeCNVMCoercesBoxedIntegersToJvalueInt). handleJHMethod DEFERRED (no sub_29E168 decomp). 52 tests total, 51 pass, 1 fail (IntegrationTest.selftestReportIsComplete — :remote process bad, pre-existing, out of scope). Coverage 14/90.
 
 Session 12 closed 2026-10-24: Q1 flags-check measured (code 36 only matters for signature-flag callers), code-36 byte-rewrite deferred, exception-path test added, AidlProbe narrowed. 48 tests green. Coverage 13/90 (unchanged — pivot to handleJHMethod next).
 
@@ -392,10 +392,10 @@ explicitly marked out-of-scope.
 | | `tnFIN` | `BinderTransactHook` + `ParcelRewriter` + `CppParcelRewriter` | ✅ Production delivery for code 3 (getPackageInfo). Code 36 (getInstalledPackages) dispatched but byte-rewrite deferred — see Session 12 decision note. Code 36 only matters for callers passing signature flags; not observed as a target requirement. |
 | `nativeDNPO` | TracerPid filter | ⚠️ Partial — misses full ptrace detect |
 | `nativeAMRHook` | Path hide list | ⚠️ Partial — no mount spoof |
+- **`nativeCNVM`** | `ProxyBridge.nativeCNVM` + `ProxyBridge.cpp::nativeCNVM` | ✅ Decomp-verified vs sub_30BF7C + sub_30C238 (Session 13). 4 tests in `ProxyBridgeSurfaceTest` (`nativeCNVM*`). Three safe-strengthening divergences vs reference documented in ProxyBridge.cpp header.
+- **`handleJHMethod`** | — | ⏸️ **DEFERRED.** Body exists in `ProxyBridge.cpp` but behavior unverified (no sub_29E168 decomp). No test claimed; not counted toward coverage.
 
 **Not started (77 methods):**
-- **`nativeCNVM`** — JNI dispatcher. Surface wired (`ProxyBridge.nativeCNVM` + `ProxyBridge.cpp`); body decomp-verified against sub_30BF7C + sub_30C238 (Session 13). Not yet counted as reference-behavior-match until `ProxyBridgeSurfaceTest` is confirmed present in the suite.
-- **`handleJHMethod`** — **DEFERRED**. No decomp of sub_29E168. Body in `ProxyBridge.cpp` present but not claimed as behavior-verified per Rule 5. Known open issues that will be fixed together with sub_29E168: (1) `BoxResult` FindClass-per-call local ref leak; (2) static dispatch uses `GetObjectClass(obj)` — declaring class unverified; (3) `IsStaticMethod` FindClass-per-call leak.
 - **`nativeInit`** (9 params) — full context config
 - **`nativeOnLoad`** (full DEX extract) — currently partial
 - **tnFIN code 36 byte-rewrite** — dispatched, not rewritten (Session 11 confirmed code 36 constant; layout hypothesis captured, decomp still required)
@@ -414,9 +414,9 @@ explicitly marked out-of-scope.
 ***Phase A — Core engine (blocking everything else):**
 1. ✅ `tnFIN` — mechanism (Session 8), algorithm (Session 9), production code 3 (Session 10), code-36 dispatch confirmed (Session 11)
 2. ⏸️ `tnFIN` code 36 byte-rewrite — DEFERRED (Session 12). Code 36 measured irrelevant for flags=0 callers. Reopen if a target is shown to require signature-flag `getInstalledPackages`, or if decomp of `PackageInfo.readFromParcel` + `BaseParceledListSlice.readFromParcel` lands.
-3. ⚠️ `handleJHMethod` + `nativeCNVM` (Java dispatcher)
-    - `nativeCNVM` — surface delivered; decomp-verified vs sub_30BF7C + sub_30C238 (Session 13). Coverage credit pending ProxyBridgeSurfaceTest in suite.
-    - `handleJHMethod` — **DEFERRED** (no sub_29E168 decomp; body unchanged; three open issues listed in the "Not started" section).
+3. ⚠️ `nativeCNVM` ✅ decomp-verified + tested (Session 13).
+   `handleJHMethod` ⏸️ DEFERRED — body present, behavior unverified.
+   Requires sub_29E168 decomp.
 4. 🔲 `nativeInit` (full config)
 5. 🔲 `nativeOnLoad` (full DEX extract, if needed)
 
@@ -1079,7 +1079,8 @@ Coverage history:
 - Session 9: 12 / 90 (~13%)
 - Session 10: 13 / 90 (~14%)
 - Session 11: 13 / 90 (~14%) — unchanged, honestly reported
-- - Session 13: 13 / 90 (~14%) — unchanged. handleJHMethod deferred; nativeCNVM surface present but not counted.
+- Session 12: 48
+- Session 13: **52** (52 pass)
 
 ---
 
