@@ -20,4 +20,6 @@ object NativeTestBridge {
     external fun probeFromReflectedMethod(method: java.lang.reflect.Method): Long
 
     external fun parcelRewriterReady(): Boolean
+
+    external fun dumpLastCode36Reply(): ByteArray?
 }

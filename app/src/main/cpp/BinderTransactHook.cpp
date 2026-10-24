@@ -17,6 +17,8 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <link.h>
+#include <vector>
+#include <mutex>
 #include "HookRegistry.h"
 
 #define TAG "DualCore"
@@ -101,6 +103,19 @@ static std::atomic<int> g_rewrite_count{0};
 static std::atomic<int> g_last_code{0};
 static std::atomic<int> g_inside{0};
 
+// ─── Diagnostic state (Session 11) ──────────────────────────────────
+static std::mutex             g_codes_mutex;
+static std::vector<int>       g_codes;
+static std::atomic<int>       g_rewrite_effective_count{0};
+
+static std::mutex             g_reply_mutex;
+static std::vector<uint8_t>   g_last_code36_reply;
+
+static void PushCode(int code) {
+    std::lock_guard<std::mutex> lk(g_codes_mutex);
+    if (g_codes.size() < 10000) g_codes.push_back(code);
+}
+
 static JavaVM*   g_vm                    = nullptr;
 static jclass    g_rewriter_class        = nullptr;
 static jmethodID g_rewriter_rewriteReply = nullptr;
@@ -135,6 +150,10 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
     // Hex dump before anything: diagnostic for getInstalledPackages.
     HexDump(code == kCodeGetInstalledPackages ? "RewriteOnFreshThread: code 36 in" : "RewriteOnFreshThread: code 3 in",
             callerReplyBuf, callerReplySize, 32);
+    if (code == kCodeGetInstalledPackages && callerReplySize <= 256 * 1024) {
+        std::lock_guard<std::mutex> lk(g_reply_mutex);
+        g_last_code36_reply.assign(callerReplyBuf, callerReplyBuf + callerReplySize);
+    }
     LOGD("RewriteOnFreshThread: code=%d size=%zu pos=%zu",
          code, callerReplySize, callerReplyPos);
 
@@ -168,7 +187,17 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
     *freshDataField = newBuf;
     *(size_t*)((uint8_t*)freshPtr + 16) = callerReplySize;
     *(size_t*)((uint8_t*)freshPtr + 24) = callerReplySize;
-    *(size_t*)((uint8_t*)freshPtr + 32) = 0;  // fresh starts at pos 0
+    *(size_t*)((uint8_t*)freshPtr + 32) = 0;
+
+// Copy parcel state from the caller's reply parcel. Our fresh parcel came
+// from Parcel.obtain() with default state; the caller's reply parcel came
+// from the binder kernel with different state. Same bytes, same reader,
+// different struct state → different parse result. Copy the fields that
+// influence createFromParcel / readString8 behavior.
+    *(int32_t*)((uint8_t*)freshPtr + 0)  = *(int32_t*)((uint8_t*)replyPtr + 0);  // mError
+    *(uint8_t*)((uint8_t*)freshPtr + 81) = *(uint8_t*)((uint8_t*)replyPtr + 81); // mParseHeader
+    *(uint8_t*)((uint8_t*)freshPtr + 82) = *(uint8_t*)((uint8_t*)replyPtr + 82); // mParseHeaderPadding
+    *(int32_t*)((uint8_t*)freshPtr + 88) = *(int32_t*)((uint8_t*)replyPtr + 88); // mType
 
     // Wrap data parcel (read-only source is fine).
     jlong origData = 0;
@@ -184,12 +213,16 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
     if (!wData) { env->ExceptionClear(); env->DeleteLocalRef(wReplyFresh); return; }
 
     // Run rewriter on the writable copy.
+    bool rewriterOk = false;
     if (g_rewriter_rewriteReply) {
         env->CallStaticVoidMethod(g_rewriter_class, g_rewriter_rewriteReply,
                                   code, wData, wReplyFresh);
         if (env->ExceptionCheck()) {
-            LOGE("RewriteOnFreshThread: rewriter threw code=%d", code);
+            LOGE("RewriteOnFreshThread: rewriter threw code=%d — skipping swap", code);
             env->ExceptionClear();
+            rewriterOk = false;
+        } else {
+            rewriterOk = true;
         }
     }
 
@@ -197,7 +230,7 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
     const uint8_t* newData = ParcelRewriter_GetData(freshPtr);
     size_t newSize = ParcelRewriter_GetSize(freshPtr);
 
-    if (newData && newSize > 0) {
+    if (rewriterOk && newData && newSize > 0) {
         // Swap: caller gets fresh's rewritten buffer.
         // mDataSize/mDataCapacity = newSize; mDataPos = callerReplyPos (typically 0).
         // Bug A fix: was newPos (= end of data), now callerReplyPos (= 0).
@@ -236,6 +269,8 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
         env->DeleteLocalRef(wData);
     }
 
+    g_rewrite_effective_count.fetch_add(1, std::memory_order_relaxed);
+
     LOGD("RewriteOnFreshThread: swapped reply (%zu -> %zu bytes) pos=%zu",
          callerReplySize, newSize, callerReplyPos);
 }
@@ -245,6 +280,8 @@ extern "C" int32_t Hook_Transact(void* self, int32_t handle, uint32_t code,
                                  const void* data, void* reply, uint32_t flags) {
     g_transact_count.fetch_add(1, std::memory_order_relaxed);
     g_last_code.store((int)code, std::memory_order_relaxed);
+
+    PushCode((int)code);
 
     if (!_orig_transact) return -1;
 
@@ -370,5 +407,31 @@ Java_com_ims134_hookengine_BinderTransactHook_lastCodeNative(JNIEnv*, jobject) {
 
 extern "C" JNIEXPORT jintArray JNICALL
 Java_com_ims134_hookengine_BinderTransactHook_drainCodesNative(JNIEnv* env, jobject) {
-    return env->NewIntArray(0);
+    std::lock_guard<std::mutex> lk(g_codes_mutex);
+    int n = (int)g_codes.size();
+    jintArray arr = env->NewIntArray(n);
+    if (arr && n > 0) {
+        env->SetIntArrayRegion(arr, 0, n, g_codes.data());
+    }
+    g_codes.clear();
+    return arr;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_BinderTransactHook_rewriteEffectiveCountNative(
+        JNIEnv*, jobject) {
+    return g_rewrite_effective_count.load(std::memory_order_relaxed);
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_dumpLastCode36Reply(
+        JNIEnv* env, jobject) {
+    std::lock_guard<std::mutex> lk(g_reply_mutex);
+    jsize n = (jsize)g_last_code36_reply.size();
+    jbyteArray arr = env->NewByteArray(n);
+    if (arr && n > 0) {
+        env->SetByteArrayRegion(arr, 0, n,
+                                (const jbyte*)g_last_code36_reply.data());
+    }
+    return arr;
 }

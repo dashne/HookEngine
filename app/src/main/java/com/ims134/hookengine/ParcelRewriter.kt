@@ -17,20 +17,22 @@ object ParcelRewriter {
 
     @JvmStatic
     fun rewriteReply(code: Int, data: Parcel, reply: Parcel) {
-        try {
+        val startSize = try { reply.dataSize() } catch (_: Throwable) { 0 }
+        val ok = try {
             when (code) {
                 3  -> rewriteGetPackageInfo(data, reply)
                 36 -> rewriteGetInstalledPackages(reply)
             }
-            // Truncate: nulling signatures shrinks the marshal stream.
-            try {
-                reply.setDataSize(reply.dataPosition())
-            } catch (_: Throwable) {
-                // Non-fatal — client sees the old size.
-            }
+            true
         } catch (t: Throwable) {
             Log.e(TAG, "ParcelRewriter: code=$code threw: " +
                     "${t.javaClass.simpleName}: ${t.message}", t)
+            false
+        }
+        if (ok) {
+            try { reply.setDataSize(reply.dataPosition()) } catch (_: Throwable) { }
+        } else {
+            try { reply.setDataSize(startSize) } catch (_: Throwable) { }
         }
     }
 
@@ -61,66 +63,55 @@ object ParcelRewriter {
     }
 
     private fun rewriteGetPackageInfo(data: Parcel, reply: Parcel) {
-        val requested = readRequestedPackage(data)
-        if (requested == null) return
+        val requested = readRequestedPackage(data) ?: return
         val ourPkg = ourPackageName ?: return
         if (requested != ourPkg) return
 
-        try {
-            reply.setDataPosition(0)
-            val exception = reply.readInt()
-            if (exception != 0) return
-            val hasResult = reply.readInt()
-            if (hasResult == 0) return
+        reply.setDataPosition(0)
+        val exception = reply.readInt()
+        if (exception != 0) return
+        val hasResult = reply.readInt()
+        if (hasResult == 0) return
 
-            val pi = PackageInfo.CREATOR.createFromParcel(reply)
-            PmSpoof.nullOutSignatures(pi)
+        val pi = PackageInfo.CREATOR.createFromParcel(reply)
+        PmSpoof.nullOutSignatures(pi)
 
-            reply.setDataPosition(0)
-            reply.writeInt(0)
-            reply.writeInt(1)
-            pi.writeToParcel(reply, 0)
-            Log.d(TAG, "ParcelRewriter: code 3 signatures nulled for $requested")
-        } catch (t: Throwable) {
-            Log.e(TAG, "ParcelRewriter: rewriteGetPackageInfo threw: " +
-                    "${t.javaClass.simpleName}: ${t.message}", t)
-        }
+        reply.setDataPosition(0)
+        reply.writeInt(0)
+        reply.writeInt(1)
+        pi.writeToParcel(reply, 0)
+        Log.d(TAG, "ParcelRewriter: code 3 signatures nulled for $requested")
     }
 
     private fun rewriteGetInstalledPackages(reply: Parcel) {
-        try {
-            reply.setDataPosition(0)
-            val exception = reply.readInt()
-            if (exception != 0) return
-            val hasResult = reply.readInt()
-            if (hasResult == 0) return
+        reply.setDataPosition(0)
+        val exception = reply.readInt()
+        if (exception != 0) return
+        val hasResult = reply.readInt()
+        if (hasResult == 0) return
 
-            val slice = readParceledSlice(reply) ?: run {
-                Log.e(TAG, "ParcelRewriter: readParceledSlice failed")
-                return
-            }
-            val list = PmSpoof.getSliceListNative(slice) ?: run {
-                Log.e(TAG, "ParcelRewriter: getSliceListNative failed on ${slice.javaClass.name}")
-                return
-            }
-            var modified = 0
-            for (item in list) {
-                if (item is PackageInfo) {
-                    PmSpoof.nullOutSignatures(item)
-                    modified++
-                }
-            }
-            if (modified == 0) return
-
-            reply.setDataPosition(0)
-            reply.writeInt(0)
-            reply.writeInt(1)
-            (slice as Parcelable).writeToParcel(reply, 0)
-            Log.d(TAG, "ParcelRewriter: code 36 nulled signatures in $modified PackageInfos")
-        } catch (t: Throwable) {
-            Log.e(TAG, "ParcelRewriter: rewriteGetInstalledPackages threw: " +
-                    "${t.javaClass.simpleName}: ${t.message}", t)
+        val slice = readParceledSlice(reply) ?: run {
+            Log.e(TAG, "ParcelRewriter: readParceledSlice failed")
+            return
         }
+        val list = PmSpoof.getSliceListNative(slice) ?: run {
+            Log.e(TAG, "ParcelRewriter: getSliceListNative failed on ${slice.javaClass.name}")
+            return
+        }
+        var modified = 0
+        for (item in list) {
+            if (item is PackageInfo) {
+                PmSpoof.nullOutSignatures(item)
+                modified++
+            }
+        }
+        if (modified == 0) return
+
+        reply.setDataPosition(0)
+        reply.writeInt(0)
+        reply.writeInt(1)
+        (slice as Parcelable).writeToParcel(reply, 0)
+        Log.d(TAG, "ParcelRewriter: code 36 nulled signatures in $modified PackageInfos")
     }
 
     private fun readParceledSlice(reply: Parcel): Parcelable? {
@@ -130,11 +121,10 @@ object ParcelRewriter {
             Log.e(TAG, "ParcelRewriter: ParceledListSlice class load failed: $t")
             return null
         }
-        val field = HiddenApiBridge.reflectGetDeclaredField(cls, "CREATOR")
-            ?: run {
-                Log.e(TAG, "ParcelRewriter: CREATOR field not found")
-                return null
-            }
+        val field = HiddenApiBridge.reflectGetDeclaredField(cls, "CREATOR") ?: run {
+            Log.e(TAG, "ParcelRewriter: CREATOR field not found")
+            return null
+        }
         if (!HiddenApiBridge.reflectSetAccessible(field)) {
             Log.e(TAG, "ParcelRewriter: setAccessible(CREATOR) failed")
             return null

@@ -1,6 +1,6 @@
 package com.ims134.hookengine
 
-import android.util.Log
+import java.lang.reflect.Field
 
 /**
  * Lifts hidden-API enforcement via reflection calls issued from a
@@ -36,7 +36,7 @@ object HiddenApiBridge {
     ): java.lang.reflect.Method?
 
     /** Sets accessible on a member via the same bypass path. */
-    external fun reflectSetAccessible(member: java.lang.reflect.AccessibleObject): Boolean
+    external fun reflectSetAccessible(member: Field?): Boolean
 
     @Volatile var lastError: String = ""
         private set

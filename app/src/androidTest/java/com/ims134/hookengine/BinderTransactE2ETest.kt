@@ -3,12 +3,14 @@ package com.ims134.hookengine
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.os.Parcel
+import android.os.Parcelable
+import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.After
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -187,4 +189,48 @@ class BinderTransactE2ETest {
             } finally { reply.recycle() }
         } finally { request.recycle() }
     }
+
+    @Test
+    fun dumpFirstItemInt32s() {
+        BinderTransactHook.uninstall()
+
+        val pm = ctx.packageManager
+        val mPMField = pm.javaClass.getDeclaredField("mPM").apply { isAccessible = true }
+        val mPM = mPMField.get(pm) as android.os.IInterface
+        val binder = mPM.asBinder()
+
+        val request = Parcel.obtain()
+        val reply = Parcel.obtain()
+        try {
+            request.writeInterfaceToken("android.content.pm.IPackageManager")
+            request.writeInt(0)   // flags
+            request.writeInt(0)   // userId
+
+            val ok = binder.transact(36, request, reply, 0)
+            val size = reply.dataSize()
+            Log.d("DualCore", "int32dump: ok=$ok size=$size")
+
+            reply.setDataPosition(0)
+            val ex = reply.readInt()
+            val has = reply.readInt()
+            val count = reply.readInt()
+            val classLen = reply.readInt()
+            Log.d("DualCore", "int32dump: ex=$ex has=$has count=$count classLen=$classLen")
+
+            // Read class name as UTF-16 chars, not as String (avoid String parsing)
+            val classChars = StringBuilder()
+            for (i in 0 until classLen) classChars.append(reply.readInt().toChar())
+            Log.d("DualCore", "int32dump: class='$classChars' pos=${reply.dataPosition()}")
+
+            // Dump 100 int32s from current position (past class name)
+            val start = reply.dataPosition()
+            for (i in 0 until 100) {
+                val v = reply.readInt()
+                Log.d("DualCore", "int32dump: [+${start + i * 4}] 0x%08x (%d)".format(v, v))
+            }
+        } finally {
+            request.recycle(); reply.recycle()
+        }
+    }
+
 }

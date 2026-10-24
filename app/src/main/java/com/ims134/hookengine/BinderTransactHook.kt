@@ -26,6 +26,9 @@ object BinderTransactHook {
     private external fun lastCodeNative(): Int
     private external fun drainCodesNative(): IntArray
 
+    private external fun rewriteEffectiveCountNative(): Int
+    fun rewriteEffectiveCount(): Int = rewriteEffectiveCountNative()
+
     @Synchronized
     fun install(): Boolean {
         if (installed) return true
