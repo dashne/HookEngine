@@ -15,8 +15,9 @@ object NativeTestBridge {
     external fun writeFileRaw(path: String, content: String): Boolean
     external fun readFileRaw(path: String): String
     external fun deleteFileRaw(path: String): Boolean
-    // NativeTestBridge.kt — add
     external fun binderProbe(): Int
 
     external fun probeFromReflectedMethod(method: java.lang.reflect.Method): Long
+
+    external fun parcelRewriterReady(): Boolean
 }

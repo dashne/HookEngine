@@ -896,10 +896,15 @@ Java_com_ims134_hookengine_NativeTestBridge_deleteFileRaw(
 }
 
 extern "C" int BinderProbe();
+
 extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_binderProbe(JNIEnv*, jobject) {
     return BinderProbe();
 }
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_parcelRewriterReady(
+        JNIEnv* env, jobject);
 
 // ─── tnFIN probe bridge ───────────────────────────────────────────────
 // Returns FromReflectedMethod(method) as a long. 0 on failure.

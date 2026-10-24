@@ -3,62 +3,34 @@ package com.ims134.hookengine
 import android.util.Log
 
 /**
- * `tnFIN` — Binder transact interceptor (reference equivalent).
+ * tnFIN — Binder transact interceptor.
  *
- * Hooks `BinderProxy.transactNative(int, Parcel, Parcel, int)`, the native
- * entry point behind every Java-side AIDL transaction. When installed, all
- * `IPackageManager$Stub$Proxy.transact(...)` calls route through
- * `FakeBinderTransact` before reaching the remote service.
+ * Session 10 (Option 2): hooks android::IPCThreadState::transact (C++ target,
+ * via inline hook) instead of BinderProxy.transactNative (Java target).
  *
- * Session 8: pass-through + fire counter (mechanism proven).
- * Session 9: parcel rewriting for signature spoofing via AIDL.
+ * Rationale: on this ROM, ANY JNI call touching a jobject on the Java hook's
+ * caller thread crashes (CheckJNI ScopedCheck walks the JIT frame). The C++
+ * target lets the caller thread do only pure C++ memcpy + async dispatch,
+ * with all JNI work on a fresh (safe) thread.
  */
 object BinderTransactHook {
     init { System.loadLibrary("hookengine") }
 
-    private external fun drainCodesNative(): IntArray
+    @Volatile var installed = false; private set
+    @Volatile var lastError: String = ""; private set
 
-    @Volatile var installed = false
-        private set
-
-    @Volatile var lastError: String = ""
-        private set
-
-    private external fun installNative(method: java.lang.reflect.Method): Int
+    private external fun installNative(): Int
     private external fun uninstallNative(): Int
     private external fun fireCountNative(): Int
+    private external fun rewriteCountNative(): Int
     private external fun lastCodeNative(): Int
+    private external fun drainCodesNative(): IntArray
 
     @Synchronized
     fun install(): Boolean {
         if (installed) return true
         lastError = ""
-
-        val cls = try {
-            Class.forName("android.os.BinderProxy")
-        } catch (t: Throwable) {
-            lastError = "Class.forName(BinderProxy): $t"
-            return false
-        }
-
-        val params = arrayOf<Class<*>>(
-            Integer.TYPE,
-            android.os.Parcel::class.java,
-            android.os.Parcel::class.java,
-            Integer.TYPE,
-        )
-
-        val method = try {
-            cls.getDeclaredMethod("transactNative", *params)
-        } catch (_: Throwable) {
-            // Reflection may be filtered even on public methods after our bypass
-            HiddenApiBridge.reflectGetDeclaredMethod(cls, "transactNative", params)
-        } ?: run {
-            lastError = "transactNative not found"
-            return false
-        }
-
-        val rc = installNative(method)
+        val rc = installNative()
         if (rc != 0) {
             lastError = "installNative rc=$rc"
             Log.e("DualCore", "BinderTransactHook: $lastError")
@@ -79,11 +51,7 @@ object BinderTransactHook {
 
     fun isInstalled(): Boolean = installed
     fun fireCount(): Int = fireCountNative()
+    fun rewriteCount(): Int = rewriteCountNative()
     fun lastCode(): Int = lastCodeNative()
-
-    /**
-     * Returns the transaction codes observed since the last drain, then
-     * resets the buffer. Diagnostic only — used by AidlCodeProbeTest.
-     */
     fun drainCodes(): IntArray = drainCodesNative()
 }
