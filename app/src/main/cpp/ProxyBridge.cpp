@@ -366,7 +366,12 @@ Java_com_ims134_hookengine_ProxyBridge_nativeCNVM(
         if (elem) env->DeleteLocalRef(elem);
     }
 
+
+
+    size_t sigLen = strlen(sig);
     env->ReleaseStringUTFChars(str, sig);
+
+
 
     jmethodID mid = env->FromReflectedMethod(method);
     if (!mid) {
@@ -388,7 +393,7 @@ Java_com_ims134_hookengine_ProxyBridge_nativeCNVM(
     // without GetMethodID/reflection, so we rely on `sig`: the
     // descriptor's length minus the leading return tag *is* the
     // parameter count by contract. If they disagree, refuse.
-    size_t paramCount = strlen(sig) > 0 ? strlen(sig) - 1 : 0;
+    size_t paramCount = sigLen > 0 ? sigLen - 1 : 0;
     if ((size_t)n != paramCount) {
         LOGD("ProxyBridge.nativeCNVM: arity mismatch n=%d paramCount=%zu — refusing dispatch",
              (int)n, paramCount);
