@@ -2,6 +2,8 @@ Last verified build: v29, verified on device 2026-10-23, items 1–5 all green (
 
 Session 12 closed 2026-10-24: Q1 flags-check measured (code 36 only matters for signature-flag callers), code-36 byte-rewrite deferred, exception-path test added, AidlProbe narrowed. 48 tests green. Coverage 13/90 (unchanged — no new reference method shipped this session; pivot to handleJHMethod next).
 
+Session 12 closed 2026-10-24: Q1 flags-check measured (code 36 only matters for signature-flag callers), code-36 byte-rewrite deferred, exception-path test added, AidlProbe narrowed. 48 tests green. Coverage 13/90 (unchanged — pivot to handleJHMethod next).
+
 Session 11 closed 2026-10-24: tnFIN rewriter exception safety, drainCodes stub fix, code-36 reply captured + hex-dumped. 47 tests green. Coverage 13/90 (unchanged — code 36 not delivered).
 
 Completed:
@@ -973,11 +975,10 @@ Rationale:
 - `BinderTransactE2ETest.rewriterExceptionPreservesReplySize` — the
   Session 11 exception-path fix now has a direct test. Uses code 36 to
   force `createFromParcel` throw and asserts reply size preservation.
-  Independent of the code-36 scope decision.
-- `AidlCodeProbeTest` narrowed to codes 3 and 36 only. The broad PM
-  method sweep was dropped to reduce the risk that a malformed reply
-  from an unrelated AIDL method brings down the whole instrumentation
-  suite.
+  Verified on device: `before=12 after=12` (OOM at absurd N=0x7FFFFFF0
+  caught, startSize restored).
+- `AidlCodeProbeTest` narrowed from 15 probe calls to 4 (codes 3 and
+  36 only). Broad PM method sweep dropped.
 - This decision note.
 
 ### Test count: 48 green (up from 47). Coverage: 13/90 (unchanged).
@@ -987,6 +988,15 @@ Rationale:
 Phase A item 3: `handleJHMethod` + `nativeCNVM` dispatcher design and
 implementation. Design discussion belongs to the next session — do not
 carry code-36 context forward except as the deferral note above.
+
+### Workflow convention (added this session)
+
+When a handoff specifies whole-file replacements + verification
+checklist + explicit `git commit` block, the developer pastes the whole
+file (no line-by-line edits), runs the verify checklist, then runs the
+commit command. This convention applies to every future handoff —
+assume it without asking.
+
 
 
 ## Hard-won facts (canonical reference)
@@ -1081,7 +1091,7 @@ Coverage history:
 10. Reply parcel's `mData` is read-only post-transact. Never write into it. Swap the pointer.
 11. Kotlin `object` instance fields are not static. Use `@JvmStatic` accessors.
 12. Test assertions must be able to fail. If a test can only pass, it's not a test. Session 11's `confirmGetPackageInfoCode` returns empty codes — diagnostic only, not a regression check.
-    Summary of changes to the file:
+13. Handoffs deliver whole-file replacements, not line-by-line edits. Every handoff must include: (a) change summary per file, (b) full file content to paste, (c) verify-before-commit checklist, (d) explicit `git add` + `git commit -m "..."` block. The developer does not want to be asked "how would you like to receive this" — assume whole-file format every time.
 
 Header updated: Session 11 closed, 47 tests, coverage 13/90.
 

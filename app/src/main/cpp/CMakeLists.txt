@@ -18,6 +18,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         BinderProbe.cpp
         BinderTransactHook.cpp
         CppParcelRewriter.cpp
+        ProxyBridge.cpp
         test_item1.cpp
         test_item2.cpp
         test_item3.cpp
