@@ -1,6 +1,7 @@
 package com.ims134.hookengine
 
 import android.content.Intent
+import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertEquals
@@ -18,7 +19,32 @@ class IntegrationTest {
         val f = File(ctx.filesDir, "selftest.txt")
         if (f.exists()) f.delete()
 
-        ctx.startService(Intent(ctx, RemoteService::class.java))
+        // Session 16: :remote startService flake. AMS occasionally marks
+        // :remote "process is bad" and rejects startService with
+        // SecurityException at the caller. Observed 2 fails / 5 runs across
+        // Sessions 13-16. Passing runs show :remote starting cleanly in
+        // logcat (DualApplication.attachBaseContext → onCreate → onStartCommand,
+        // no code crash captured). The bad mark is AMS state, cleared after
+        // a delay; retry with backoff. If all 3 attempts fail, the flake
+        // is not transient this run and the test fails honestly (rule 12).
+        var lastEx: SecurityException? = null
+        var started = false
+        for (attempt in 1..3) {
+            try {
+                ctx.startService(Intent(ctx, RemoteService::class.java))
+                started = true
+                break
+            } catch (e: SecurityException) {
+                lastEx = e
+                Log.w("DualCore",
+                    "IntegrationTest: startService attempt $attempt failed: ${e.message}")
+                if (attempt < 3) Thread.sleep(2000L * attempt)
+            }
+        }
+        if (!started) {
+            throw AssertionError(
+                "startService failed after 3 attempts (last: ${lastEx?.message})", lastEx)
+        }
 
         val deadline = System.currentTimeMillis() + 60_000
         while (System.currentTimeMillis() < deadline) {
