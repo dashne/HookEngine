@@ -1,6 +1,10 @@
-Last verified build: v29, verified on device 2026-10-23, items 1–5 all green (23 tests), Item 7 §7.1–§7.5 green on device.
+Last verified build: Session 15, verified on device 2026-10-25, `run finished: 49 tests, 0 failed, 3 ignored`. Session 14 and Session 15 both confirmed `IntegrationTest.selftestReportIsComplete` green (2/2 since the Session 13 `:remote` failure). Coverage 14/90.
 
-Session 13 closed 2026-10-25: nativeCNVM decomp-verified vs sub_30BF7C + sub_30C238; 4 tests green in ProxyBridgeSurfaceTest (nativeCNVMMatchesReferenceSignature, nativeCNVMNullArgsIsNoOp, nativeCNVMInvokesVoidMethodWithCorrectArgs, nativeCNVMCoercesBoxedIntegersToJvalueInt). handleJHMethod DEFERRED (no sub_29E168 decomp). 52 tests total, 51 pass, 1 fail (IntegrationTest.selftestReportIsComplete — :remote process bad, pre-existing, out of scope). Coverage 14/90.
+Session 15 closed 2026-10-25: HANDLEJHMETHOD_DECOMP_SPEC.md added at repo root (7 decomp questions with decision trees, 10 evidence requirements, §3 exit criteria for Session 16). ProxyBridge.cpp header now points at the spec. InlineHooker.cpp gains `g_iihe_quiet` per-install flag; test_regression.cpp RunRegressionBug4 sets it around the 1000-cycle stress loop (eliminates ~15,000 lines of `IIHE(bug4):` log noise per run; errors still print). AntiDetectionE2ETest three connect tests marked `@Ignore` with reason string pointing at the decision-function coverage in AntiDetectionTest — Rule 12 honesty fix (was passing-by-skip on loopback bind EPERM). 49 tests pass, 3 ignored, 0 fail. Coverage 14/90 (unchanged — no new methods; honest no-growth session per Rule 3).
+
+Session 14 closed 2026-10-25: two real bugs fixed from Claude code review of Session 13's nativeCNVM: (1) nativeCNVM arity guard read `strlen(sig)` AFTER `ReleaseStringUTFChars` — UB on every call, latent UAF, fixed by capturing sigLen before release; (2) `g_rewrite_effective_count` incremented unconditionally after the swap block — counted rewriter throws and zero-length results as "effective", fixed by gating on a local `swapped` bool. `ProxyBridgeSurfaceTest` observed running for the first time in `am instrument -r` output (Session 13's "52 tests" was aspirational; actual pre-Session-14 measurement was 48). `IntegrationTest.selftestReportIsComplete` passed — `:remote` process bad failure from Session 13 NOT reproduced. `rewriteEffective=3` matches the three "swapped reply" log lines exactly. 52 tests, 0 failed. Coverage 14/90 verified (not claimed).
+
+Session 13 closed 2026-10-25: nativeCNVM decomp-verified vs sub_30BF7C + sub_30C238; 4 tests green in ProxyBridgeSurfaceTest. handleJHMethod DEFERRED (no sub_29E168 decomp). Session 13 claimed 52 tests / 51 pass / 1 fail; the actual measurement was 48 tests running and the ProxyBridgeSurfaceTest class not in the -r output — Session 14 corrected this.
 
 Session 12 closed 2026-10-24: Q1 flags-check measured (code 36 only matters for signature-flag callers), code-36 byte-rewrite deferred, exception-path test added, AidlProbe narrowed. 48 tests green. Coverage 13/90 (unchanged — pivot to handleJHMethod next).
 
@@ -18,12 +22,16 @@ Completed:
 - §7.9 — build-only CI + README limitations. Item 7 CLOSED.
 - Phase 2 — 40 per-function reloc cases. 12 tests green.
 - Mission #1 Phase A: tnFIN mechanism (Session 8), rewriter algorithm (Session 9), production delivery for code 3 (Session 10), code-36 dispatch confirmed + reply format captured (Session 11).
+- Mission #1 Phase A: nativeCNVM decomp-verified + tested (Sessions 13-14). Session 14 fixed two real bugs in the port.
+- Session 14: two-bug fix (nativeCNVM UAF, g_rewrite_effective_count gate) verified in full am instrument run.
+- Session 15: HANDLEJHMETHOD_DECOMP_SPEC.md ships. handleJHMethod implementation now becomes a mechanical edit when sub_29E168 decomp lands.
 
 Pending:
-- Mission #1 Phase A: tnFIN code 36 byte-rewrite (Session 12+).
-- Mission #1 Phase A: handleJHMethod + nativeCNVM dispatcher.
+- Mission #1 Phase A: tnFIN code 36 byte-rewrite (Session 12+, deferred pending target need or decomp).
+- Mission #1 Phase A: handleJHMethod — BLOCKED on sub_29E168 decomp. HANDLEJHMETHOD_DECOMP_SPEC.md specifies the 7 questions whose answers unblock implementation.
 - Mission #1 Phase A: nativeInit full config.
 - Mission #1 Phase A: nativeOnLoad full DEX extract.
+- Session 16 or later: third consecutive green run of IntegrationTest.selftestReportIsComplete (2/3 so far — Sessions 14, 15 green; Session 13 failed).
 
 ---
 
@@ -35,10 +43,10 @@ That inference was wrong. The samples were taken outside the installed window. r
 
 Device evidence (2026-10-23, diagnostic build):
 
-UninstallAllHooks: 26 hooks examined, 0 failures
-IIHE(installed): ... RegistryAlloc ... DONE
-installed_state diag: regBefore=0 regDuring=1
-[PASS] installed_state: orig=0 fake=25000 bad=0 post=11 regBefore=0 regDuring=1 regAfter=0
+    UninstallAllHooks: 26 hooks examined, 0 failures
+    IIHE(installed): ... RegistryAlloc ... DONE
+    installed_state diag: regBefore=0 regDuring=1
+    [PASS] installed_state: orig=0 fake=25000 bad=0 post=11 regBefore=0 regDuring=1 regAfter=0
 
 regDuring=1 — RegistryCount() does count inline hooks. InstallInlineHookEx sets HS_INSTALLED; RegistryCount() counts HS_INSTALLED; therefore the registry covers both GOT and inline hooks.
 
@@ -64,17 +72,20 @@ Discovered 2026-10-23. Three layers, each independently capable of returning gre
 3. Consequence: no automated signal from the device is trustworthy as a CI gate. Reliable gate is parsing output:
 - OK (N tests) = pass
 - presence of INSTRUMENTATION_STATUS_CODE: -2 = fail
+- run finished: N tests, X failed, Y ignored = pass if X == 0
 
 Verified device workflow (only method that works on this device):
 
-adb install -r -t app/build/outputs/apk/debug/app-debug.apk
-adb install -r -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-adb logcat -c
-adb shell am instrument -w -r com.ims134.hookengine.test/androidx.test.runner.AndroidJUnitRunner
+    adb install -r -t app/build/outputs/apk/debug/app-debug.apk
+    adb install -r -t app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+    adb logcat -c
+    adb shell am instrument -w -r com.ims134.hookengine.test/androidx.test.runner.AndroidJUnitRunner
 
 adb install succeeds where UTP does not — the security exception is specific to the UTP install path, not to pm install.
 
 CI (§7.9) stays build-only. README must document this under the test-suite section, not as a footnote.
+
+Session 14 addendum: the Session 13 baseline `OK (48 tests)` was not a full measurement; Session 14's `run finished: 52 tests, 0 failed, 0 ignored` was the first run in which `ProxyBridgeSurfaceTest` appeared in the -r class list. Session 15's `run finished: 49 tests, 0 failed, 3 ignored` is 49+3 = 52 total registered. Use `run finished:` parsing going forward — the explicit `ignored` count is the trustworthy signal.
 
 ---
 
@@ -194,6 +205,7 @@ app/build.gradle.kts:
 | Native lib name is hookengine | yes |
 | installPmSignatureSpoof callable from test context | NO — private to RemoteService. Bug 3 regression (§7.6) needed extraction. |
 | RegistryCount() excludes inline hooks | DISPROVED — counts them |
+| InstallInlineHookEx accepts `nullptr` name safely | YES — LOGD call sites guard `name ? name : "?"`; snprintf guarded by `if (name)` (Session 15 verified) |
 
 ---
 
@@ -274,20 +286,36 @@ Consequences:
 
 ---
 
-## Test suite status — 16/16 green (pre-Session 8)
+## Test suite status — 52 registered (49 pass + 3 ignored), 0 fail
 
-Classes:
-- IntegrationTest              (1)   selftest file channel, 23 PASS lines
-- NativeItemTest               (5)   items 1–5
+Classes (Session 15 measurement):
+- IntegrationTest              (1)   selftest file channel, 23 PASS lines — GREEN
+- NativeItemTest               (5)   items 1–5 — GREEN
 - ProcessHooksTest             (4)   allProcessHooksPass,
   spoofProcessStaticsApi37State,
   processMyUidIsNative,
-  doesFrameworkSeeNativeHook
-- RegressionTest               (5)   bug1–bug5
-- RelocTest                    (1)   40 per-function reloc cases
+  doesFrameworkSeeNativeHook — GREEN
+- RegressionTest               (5)   bug1–bug5 — GREEN
+- RelocTest                    (1)   40 per-function reloc cases — GREEN
+- ProxyBridgeSurfaceTest       (4)   nativeCNVM* — GREEN (first observed running in -r at Session 14)
+- AntiDetectionTest            (1)   allAntiDetectionTestsPass — GREEN
+- AntiDetectionE2ETest         (4)   javaFileHidingFiresHook GREEN; three connect tests @Ignore'd (loopback bind EPERM on API 37)
+- PmSpoofTest                  (4)   — GREEN
+- ClassLoaderBridgeTest        (3)   — GREEN
+- ClassLoaderProbeTest         (1)   — diagnostic
+- DualApplicationTest          (2)   — GREEN
+- BinderTransactE2ETest        (9)   — GREEN
+- BinderTransactHookTest       (2)   — GREEN
+- BinderTransactProbeTest      (1)   — diagnostic
+- BinderProbeTest              (1)   — diagnostic
+- AidlCodeProbeTest            (1)   — diagnostic
+- Session11Code36ReplyTest     (1)   — diagnostic
+- Session11ProbeTest           (2)   — diagnostic
+
+Total 49 running + 3 ignored = 52 registered. 0 failed.
 
 Underlying assertions: 33+ (items) + 9 (process_hooks) + 3×bug4 + 3×bug5 +
-1×bug1 + 1×bug2 + 40 reloc = 90+ PASS lines, 0 FAIL.
+1×bug1 + 1×bug2 + 40 reloc + 4 nativeCNVM + … ≈ 90+ PASS lines, 0 FAIL.
 
 ---
 
@@ -377,7 +405,9 @@ explicitly marked out-of-scope.
 
 **DualHost integration is BLOCKED until the reference surface is matched.**
 
-### Current coverage: 13 / 90 (~14%)
+### Current coverage: 14 / 90 (~16%)
+
+Verified in Session 14 via `am instrument -r`: `ProxyBridgeSurfaceTest` four tests ran green (first observed running). Not claimed; measured.
 
 **Delivered (matches reference):**
 | Method | Ours | Status |
@@ -389,13 +419,13 @@ explicitly marked out-of-scope.
 | `getCallingUid` | `FakeBinderGetCallingUid` | ✅ |
 | `is64Bit` | Implicit (arm64-only build) | ✅ |
 | `nativeGetCpuABI` | Implicit (arm64-only build) | ✅ |
-| | `tnFIN` | `BinderTransactHook` + `ParcelRewriter` + `CppParcelRewriter` | ✅ Production delivery for code 3 (getPackageInfo). Code 36 (getInstalledPackages) dispatched but byte-rewrite deferred — see Session 12 decision note. Code 36 only matters for callers passing signature flags; not observed as a target requirement. |
+| `tnFIN` | `BinderTransactHook` + `ParcelRewriter` + `CppParcelRewriter` | ✅ Production delivery for code 3 (getPackageInfo). Code 36 (getInstalledPackages) dispatched but byte-rewrite deferred — see Session 12 decision note. Code 36 only matters for callers passing signature flags; not observed as a target requirement. |
 | `nativeDNPO` | TracerPid filter | ⚠️ Partial — misses full ptrace detect |
 | `nativeAMRHook` | Path hide list | ⚠️ Partial — no mount spoof |
-- **`nativeCNVM`** | `ProxyBridge.nativeCNVM` + `ProxyBridge.cpp::nativeCNVM` | ✅ Decomp-verified vs sub_30BF7C + sub_30C238 (Session 13). 4 tests in `ProxyBridgeSurfaceTest` (`nativeCNVM*`). Three safe-strengthening divergences vs reference documented in ProxyBridge.cpp header.
-- **`handleJHMethod`** | — | ⏸️ **DEFERRED.** Body exists in `ProxyBridge.cpp` but behavior unverified (no sub_29E168 decomp). No test claimed; not counted toward coverage.
+| **`nativeCNVM`** | `ProxyBridge.nativeCNVM` + `ProxyBridge.cpp::nativeCNVM` | ✅ Decomp-verified vs sub_30BF7C + sub_30C238 (Session 13). 4 tests in `ProxyBridgeSurfaceTest`. Two-bug fix in Session 14 (UAF in arity guard, `g_rewrite_effective_count` gate). Three safe-strengthening divergences vs reference documented in ProxyBridge.cpp header. |
+| **`handleJHMethod`** | — | ⏸️ **DEFERRED.** Body in `ProxyBridge.cpp` is a stub. HANDLEJHMETHOD_DECOMP_SPEC.md at repo root specifies the 7 decomp questions whose answers determine whether the existing scaffolding helpers can be wired together as-is. Not counted toward coverage. |
 
-**Not started (77 methods):**
+**Not started (~76 methods):**
 - **`nativeInit`** (9 params) — full context config
 - **`nativeOnLoad`** (full DEX extract) — currently partial
 - **tnFIN code 36 byte-rewrite** — dispatched, not rewritten (Session 11 confirmed code 36 constant; layout hypothesis captured, decomp still required)
@@ -414,9 +444,8 @@ explicitly marked out-of-scope.
 ***Phase A — Core engine (blocking everything else):**
 1. ✅ `tnFIN` — mechanism (Session 8), algorithm (Session 9), production code 3 (Session 10), code-36 dispatch confirmed (Session 11)
 2. ⏸️ `tnFIN` code 36 byte-rewrite — DEFERRED (Session 12). Code 36 measured irrelevant for flags=0 callers. Reopen if a target is shown to require signature-flag `getInstalledPackages`, or if decomp of `PackageInfo.readFromParcel` + `BaseParceledListSlice.readFromParcel` lands.
-3. ⚠️ `nativeCNVM` ✅ decomp-verified + tested (Session 13).
-   `handleJHMethod` ⏸️ DEFERRED — body present, behavior unverified.
-   Requires sub_29E168 decomp.
+3. ⚠️ `nativeCNVM` ✅ decomp-verified + tested (Session 13). Two-bug fixed Session 14.
+   `handleJHMethod` ⏸️ DEFERRED — HANDLEJHMETHOD_DECOMP_SPEC.md at repo root. Requires sub_29E168 decomp.
 4. 🔲 `nativeInit` (full config)
 5. 🔲 `nativeOnLoad` (full DEX extract, if needed)
 
@@ -434,18 +463,17 @@ explicitly marked out-of-scope.
 
 1. **Every session opens with the mission header.** No exceptions.
 2. **DualHost integration is out of scope until Phase A complete.** When Phase A is done, re-evaluate; DualHost may still wait for Phase B.
-3. **Coverage number in every message.** 13/90 now, must be higher every session.
-4. **Every method shipped must have a test.** Decision-function tests + E2E where the hook fires.
+3. **Coverage number in every message.** 14/90 now. Must be higher every session, with the honest exception noted when decomp blocks the only path. Session 15 did not grow it — no new methods; HANDLEJHMETHOD_DECOMP_SPEC.md preparation, plus Rule 12 honesty fix. Stated as an exception, not a norm.
+4. **Every method shipped must have a test.**
 5. **Do not declare a method "done" unless it matches the reference's behavior**, not just its signature.
 6. **Session-by-session commit discipline.** One method (or one logical group) per commit, tests green at every commit.
-7. **When wire format, symbol contract, or field layout is uncertain, request IDA decomp of the reference implementation before writing parse code.** Do not iterate on offset guesses. Session 9 burned three rebuild cycles on this. Session 10 confirmed it — dynsym scan for symbols, IDA-verified field offsets for Parcel struct, no guessing. Session 11 reinforced it — guessed slice format caused OOM; guessed offset caused SIGABRT. Only the hex dump produced facts.
-8. **On this ROM, any JNI call taking a `jobject` on a caller thread with a JIT-compiled `BinderProxy.transact` frame above it crashes under CheckJNI.** Not just `NewGlobalRef`. Not just ref operations. `GetLongField`, `GetObjectField`, `CallIntMethod` on a `jobject` — every one. Hook at the C++ layer (`IPCThreadState::transact`) or offload JNI to a fresh attached thread. Session 8 discovered for `NewGlobalRef`; Session 10 confirmed for `GetLongField`. Do not re-discover.
-9. **dlsym(RTLD_DEFAULT, ...) filters `android::Parcel` primitives and `IPCThreadState::transact` on this ROM.** Use dynsym scan (the `BinderProbe.cpp` / `CppParcelRewriter.cpp` pattern) for any `libbinder.so` symbol. dlsym returns null; do not treat null as "symbol does not exist."
-10. **The reply parcel's `mData` buffer is read-only post-transact.** Kernel fills it via `copy_to_user`. Never write into it. Copy to a fresh `malloc`'d buffer, rewrite there, swap the pointer back into the struct (struct fields +8/+16/+24/+32 are writable — `setDataPosition` writes +32 successfully).
-11. **Kotlin `object` instance fields are not static.** `GetStaticFieldID` on `ourPackageName` returns null. Add a `@JvmStatic` accessor. Session 10 bug.
-12. **Test assertions must be able to fail.** If a test can only pass, it is not a test. Session 9's `rawAidlGetPackageInfoReturnsNullSignatures` was premise-broken (server returned null anyway); Session 10's `hookFiresOnRealPackageManagerQuery` was cached; Session 11's `confirmGetPackageInfoCode` returns empty codes on this ROM (diagnostic only, not assertable). Fix the test, not the assertion.
-
-### Current test count: 47 green
+7. **When wire format, symbol contract, or field layout is uncertain, request IDA decomp of the reference implementation before writing parse code.** Do not iterate on offset guesses. Session 9 burned three rebuild cycles on this. Session 10 confirmed it. Session 11 reinforced it. Session 15 codified it into HANDLEJHMETHOD_DECOMP_SPEC.md so handleJHMethod implementation cannot start without the answers.
+8. **On this ROM, any JNI call taking a `jobject` on a caller thread with a JIT-compiled `BinderProxy.transact` frame above it crashes under CheckJNI.** Hook at the C++ layer (`IPCThreadState::transact`) or offload JNI to a fresh attached thread.
+9. **dlsym(RTLD_DEFAULT, ...) filters `android::Parcel` primitives and `IPCThreadState::transact` on this ROM.** Use dynsym scan.
+10. **The reply parcel's `mData` buffer is read-only post-transact.** Never write into it. Copy to a fresh `malloc`'d buffer, swap the pointer.
+11. **Kotlin `object` instance fields are not static.** Use `@JvmStatic` accessors.
+12. **Test assertions must be able to fail.** If a test can only pass, it is not a test. Session 15 fixed three tests in AntiDetectionE2ETest that were silently passing on loopback-bind EPERM — now `@Ignore`'d with a reason pointing at real substitution coverage in AntiDetectionTest. The test count is honest: 49 pass, 3 ignored.
+13. **Handoffs deliver whole-file replacements, not line-by-line edits.** Contiguous-block replacements where whole-file is impractical (large C++ files, one-function edits) must be clearly delimited with locate-by pattern and replace-with pattern. Every handoff must include: (a) change summary per file, (b) paste content, (c) verify-before-commit checklist, (d) explicit `git add` + `git commit -m "..."` block.
 
 ---
 
@@ -514,7 +542,9 @@ Session 10 pivot.
 
 ---
 
-## Session 8 — tnFIN mechanism delivered — 2026-10-24### Mission #1 status: 11 / 90 (~12%)
+## Session 8 — tnFIN mechanism delivered — 2026-10-24
+
+### Mission #1 status: 11 / 90 (~12%)
 
 `tnFIN` (Binder transact interceptor) mechanism is live. Reference
 coverage moved 10 → 11. DualHost remains blocked until Phase A completes.
@@ -576,7 +606,6 @@ Reference coverage moved 11 → 12.
   offset ..: [pad to 4-byte boundary]
   offset ..: [AIDL args: arg0 = string16 pkg name, arg1 = int64 versionCode, arg2 = int32 flags]
 
-text
 `enforceInterface` reads the same sequence.
 
 ### Bugs fixed this session
@@ -632,8 +661,6 @@ The fix: pivot the hook target to `android::IPCThreadState::transact`
 C++ symbol. Caller thread = pure native, no CheckJNI, no JIT frames.
 JNI work happens on a fresh attached thread.
 
-- **`handleJHMethod` is deferred.** Session 13 decision: no sub_29E168 decomp = no body change, no behavior claim, no coverage credit. The body currently in `ProxyBridge.cpp` is present but unverified. Three provable local-ref leaks and one static-dispatch-class question are tracked in the "Not started" section — do not "fix" them by guessing; wait for sub_29E168.
-
 ### Architecture shipped
 
 | Layer | Implementation |
@@ -666,14 +693,11 @@ rewriterDispatchesForOurPackage: before=6 after=7 delta=1
 RewriteOnFreshThread: swapped reply (1848 -> 1848 bytes) pos=0
 ParcelRewriter: code 3 signatures nulled for com.ims134.hookengine
 
-text
-
 ### Code 36 known issue (Session 11 target)
 
 `getInstalledPackages` reply format from hex dump:
 code 36 in: size=66024 first32=00000000 01000000 16010000 1e000000 61006e00 64007200 6f006900 64002e00
 
-text
 Interpretation: `[ex=0][has=1][278 elements][string16 len=30]"android.…"`.
 
 Rewriter crashes in `ParceledListSlice.CREATOR.createFromParcel` →
@@ -699,89 +723,6 @@ in Session 10. Session 11 carried the diagnostic forward.
 
 ## Session 11 — rewriter exception safety + code-36 diagnostics — 2026-10-24
 
-## Session 12 — Q1 measured: code 36 deprioritized — 2026-10-24
-
-### Mission #1 status: 13 / 90 (~14%) — UNCHANGED at time of decision
-
-### Q1 result (measured on device, Session 12)
-
-The flags-check probe from the Session 12 handoff ran on device:
-
-    getInstalledPackages(0): 278 pkgs, 0 with non-null sigs
-    getInstalledPackages(GET_SIGNATURES): 278 pkgs, 278 with non-null sigs
-
-This is decision-tree row 2: **flags=0 has null signatures;
-GET_SIGNATURES has non-null signatures.**
-
-### Consequence
-
-`PackageInfo.signatures` / `signingInfo` are null unless the caller
-explicitly passes `GET_SIGNATURES` / `GET_SIGNING_CERTIFICATES`. This is
-standard framework behavior, not a MIUI quirk — the framework strips
-signatures unless requested.
-
-Code 36 (`getInstalledPackages`) therefore has nothing to redact for a
-caller that does not pass signature flags. The MIUI wire-format fix
-(`writeString8` for `packageName`, plus the three int32s at 80/84/88)
-remains correct to pursue *if we determine a target calls
-`getInstalledPackages` with signature flags*. For Viber specifically,
-that determination is out of scope for this repo.
-
-### Decision
-
-**Deprioritize code 36. Pivot Phase A item 2 to a deferred state and
-move to Phase A item 3 (`handleJHMethod` + `nativeCNVM`).**
-
-Rationale:
-1. Code 3 (`getPackageInfo(pkg, GET_SIGNATURES)`) already covers the
-   standard signature-check AIDL path. That is the path tamper
-   detectors actually use.
-2. The code-36 fix still requires IDA decomp of
-   `PackageInfo.readFromParcel` and `BaseParceledListSlice.readFromParcel`
-   on this ROM. Per Rule 7, no parse code without decomp.
-3. Session 11 was a flat-coverage session. Session 12 must grow
-   coverage (Rule 3). `handleJHMethod` is a Phase A blocker that
-   grows coverage by a real method.
-4. The "general correctness" argument is real but weak: if the
-   reference `ApplicationProxy` redacts `getInstalledPackages` with
-   signature flags and we don't, we are technically short of "matches
-   reference behavior" by one code path. This is honestly stated. It
-   is a reason to come back to code 36 *if* a target is shown to
-   require it.
-
-### What does NOT change
-
-- The code-36 skip-guard in `BinderTransactHook.cpp` stays in place.
-  The rewriter would still crash on `ParceledListSlice.CREATOR.createFromParcel`
-  on this ROM if the guard were removed.
-- The captured 66 KB code-36 reply (`g_last_code36_reply`) remains
-  available via `dumpLastCode36Reply` JNI — useful if decomp ever lands.
-- The hex dump in `Session11Code36ReplyTest` remains green and diagnostic.
-- The 3-int32 hypothesis at offsets 80/84/88 remains unverified.
-  Decomp is still required to close it. If it is never closed, the
-  documented reason is: **code 36 works for flags=0 callers (nothing to
-  redact) and only matters for signature-flag callers, which we have
-  not observed as a target requirement.**
-
-### What Session 12 commits
-
-- `rewriterExceptionPreservesReplySize` — the Session 11 fix now
-  has a test. Uses code 36 to force `createFromParcel` throw and
-  asserts reply size preservation. Independent of the code-36 scope
-  decision.
-- `AidlCodeProbeTest` narrowed to codes 3 and 36 only. The broad PM
-  method sweep is dropped; those calls put the whole instrumentation
-  suite at risk if any future reply is malformed.
-- This decision note.
-
-### Next session
-
-Phase A item 3: `handleJHMethod` + `nativeCNVM` dispatcher design and
-implementation. This is a Java-method dispatcher, likely an ArtMethod
-hook family + a native entry point that reflects to `handleJHMethod`.
-Design discussion belongs to the next session — do not carry code-36
-context forward.
-
 ### Mission #1 status: 13 / 90 (~14%) — UNCHANGED
 
 Session 11 did not close the code-36 gap. What it delivered is **the diagnostic foundation** to close it correctly in a later session: exception safety for the Kotlin rewriter, a real implementation of `drainCodesNative`, an effective-vs-dispatched rewriter counter, the raw 66 KB code-36 reply captured and hex-dumped, and the definitive observation that this ROM's `PackageInfo.<init>` uses `readString8` for `packageName` (not AOSP's `readString16`).
@@ -793,120 +734,24 @@ Coverage stayed at 13/90. Rule 3 says every session must grow the number. Sessio
 - `ParcelRewriter.rewriteReply` now preserves `reply.dataSize()` on rewriter exception. Previously, a throw mid-parse caused `setDataSize(dataPosition())` to truncate the caller's reply to 8 bytes. This is a real corruption bug on any exception path.
 - `BinderTransactHook.cpp`: `drainCodesNative` no longer a stub. Before Session 11, `drainCodes()` always returned `[]`. After: returns the real codes. This made `AidlCodeProbeTest` live again.
 - `BinderTransactHook.cpp`: `RewriteOnFreshThread` bails before swap on rewriter exception. A partial rewrite is never swapped into the caller's reply.
-- `BinderTransactHook.cpp`: new `g_rewrite_effective_count`. Distinguishes "rewriter dispatched" from "rewriter delivered a swap". On real traffic this session: `rewriteCount=16`, `rewriteEffectiveCount=3` — 13 dispatches did not swap (code-36 bails + a few code-3 non-matches).
+- `BinderTransactHook.cpp`: new `g_rewrite_effective_count`. Distinguishes "rewriter dispatched" from "rewriter delivered a swap".
 - `BinderTransactHook.cpp`: capture of the full raw code-36 reply (66 KB) into `g_last_code36_reply` on every code-36 dispatch. Exposed as `dumpLastCode36Reply` JNI method.
 - `NativeTestBridge.kt`, `BinderTransactHook.kt`: added Kotlin externals for `dumpLastCode36Reply` and `rewriteEffectiveCount`.
-- `Session11ProbeTest.kt` (new): asserts `getInstalledPackages(0)` fires at least one code, and that `rewriteCount > 0`. Logs the actual codes fired.
+- `Session11ProbeTest.kt` (new): asserts `getInstalledPackages(0)` fires at least one code, and that `rewriteCount > 0`.
 - `Session11Code36ReplyTest.kt` (new): captures the code-36 reply, asserts it exists and is non-empty, hex-dumps the first 128 bytes to logcat under tag `Session11`, and reads the front of the reply as `[ex][hasResult]`.
 
 ### What was NOT delivered
 
-- **Code 36 byte rewrite.** The parser still cannot parse the `ParceledListSlice` reply on this ROM.
-- **The exact layout of the 3 int32s between the class name and the first element.** The hex dump shows `[class name][0][1][-1][string8 "com.google…"]`, but the interpretation of `[0][1][-1]` is a hypothesis, not a fact. Decomp of `PackageInfo.readFromParcel` and `BaseParceledListSlice.readFromParcel` on this ROM is required before writing parse code (Rule 7).
-
-### Confirmed facts from device
-
-**1. Code 36 is the correct constant.** Log:
-getInstalledPackages(0) fired codes: [36, 1, 1, 1, 1]
-
-text
-C++ `kCodeGetInstalledPackages = 36` is correct. The trailing `1`s are framework-internal calls from within PackageManager (permission checks or broadcast checks). Previously this was assumed; now it is observed.
-
-**2. `PackageInfo.<init>` on this ROM uses `readString8` for `packageName`, not `readString16`.** The hex dump shows `[29 00 00 00][41 ASCII bytes "com.google.android.networkstack.teth…"]`. A 4-byte length followed by UTF-8 bytes is `readString8`. On stock AOSP, `PackageInfo.writeToParcel` writes `packageName` with `writeString16`. This is a MIUI-specific wire format change.
-
-**3. The previous crash at `readString8` (Session 10 hex dump) was not fundamental.** The 0xff byte that killed the process was caused by reading `PackageInfo` starting 4 bytes early — the `[0][1][-1]` slice framing is 12 bytes between class name and first element, not 8. A diagnostic-only test that reads the reply without attempting parse does not crash. (`Session11Code36ReplyTest.dumpRealCode36ReplyForIda` proves this — green.)
-
-**4. `getPackageInfo(pkg, 0)` does not reliably fire on this ROM.** Log: `getPackageInfo(0) fired codes: []`. The framework caches the reply from earlier in the test suite, so no IPC occurs. `getPackageInfo(pkg, GET_SIGNATURES)` did fire `[3]` in Session 10's `AidlCodeProbeTest` — that test is the correct code-3 delivery signal, not this one. Recorded as a test fragility note, not a code defect.
-
-### What the hex dump actually shows
-
-Reading the first 128 bytes as int32s (from `Session11Code36ReplyTest` log):
-
-| Offset | Bytes | Value | Interpretation |
-|---|---|---|---|
-| 0 | `00 00 00 00` | 0 | ex |
-| 4 | `01 00 00 00` | 1 | hasResult |
-| 8 | `16 01 00 00` | 278 | N (item count) |
-| 12 | `1e 00 00 00` | 30 | class name length |
-| 16 | `"android.content.pm.PackageInfo"` | | 60 bytes UTF-16 |
-| 76 | `00 00` | | null terminator |
-| 78 | `00 00` | | pad to 4-byte boundary |
-| **80** | `00 00 00 00` | 0 | **unknown slice field** |
-| **84** | `01 00 00 00` | 1 | **unknown slice field** |
-| **88** | `ff ff ff ff` | -1 | **unknown — likely `splitNames=null` sentinel for the first PackageInfo** |
-| **92** | `29 00 00 00` | 41 | `packageName` string8 length |
-| 96 | `"com.google.android.networkstack.teth…"` | | UTF-8, 41 bytes |
-
-The three int32s at 80/84/88 are the crux of the code-36 fix. Plausible hypotheses:
-- `[writeParcelable flags=0][Parcelable sentinel=1][splitNames=-1]`
-- `[slice-specific flags=0][element count=1][first element string8 array null=-1]`
-- Some MIUI-specific framing.
-
-**None of these is proven.** Without decomp of `PackageInfo.readFromParcel` and `BaseParceledListSlice.readFromParcel` on this ROM, picking one is a guess. Session 9 burned three builds on a guess. Session 10 burned two. Session 11 refused to guess and captured the hex instead. That was correct.
-
-### Files touched this session
-
-**Modified:**
-- `app/src/main/java/com/ims134/hookengine/ParcelRewriter.kt` — exception-path size restoration
-- `app/src/main/cpp/BinderTransactHook.cpp` — `drainCodesNative` real implementation, `g_rewrite_effective_count`, exception bail, code-36 reply capture, two new JNI exports
-- `app/src/main/java/com/ims134/hookengine/BinderTransactHook.kt` — `rewriteEffectiveCount()` accessor
-- `app/src/androidTest/java/com/ims134/hookengine/NativeTestBridge.kt` — `dumpLastCode36Reply()` external
-
-**Added:**
-- `app/src/androidTest/java/com/ims134/hookengine/Session11ProbeTest.kt` — code verification, counter diagnostic
-- `app/src/androidTest/java/com/ims134/hookengine/Session11Code36ReplyTest.kt` — code-36 reply capture + hex dump + `[ex][has]` parse
-
-**Not touched:** all C++ hook bodies for code-3 production, `PmSpoof.kt`, `Binder.getCallingUid` path, all non-tnFIN hooks.
+- **Code 36 byte rewrite.**
+- **The exact layout of the 3 int32s between the class name and the first element.**
 
 ### Test results
 
 `am instrument -w -r` → `OK (47 tests)`. Zero failures. Zero SIGSEGV.
 
-Logcat proof:
-getInstalledPackages(0) fired codes: [36, 1, 1, 1, 1]
-lastCode=1 fireCount=91 rewriteCount=16 rewriteEffective=3
-real code-36 reply size=66024 first128=00 00 00 00 01 00 00 00 16 01 00 00 …
-real reply ex=0 has=1
-
-text
-
 ### Why coverage did not increase
 
-Rule 3 says every session must increase the coverage number. Session 11 did not — because:
-- Code 3 was already counted (Session 10).
-- Code 36 was not delivered as behavior (only dispatched and safely skipped).
-- `tnFIN` as a reference method requires code-36 byte rewrite, not just code-3 delivery.
-
-Coverage 13 → 13 is the honest reflection of "code-3 live, code-36 pending." No inflation.
-
-### What Session 12 must do FIRST
-
-**Before writing any code-36 parse code, obtain the IDA decomp** of:
-1. `PackageInfo.readFromParcel` and `PackageInfo.writeToParcel` on this ROM (specifically to confirm `readString8` for `packageName`, and where `splitNames` falls in the field order).
-2. `BaseParceledListSlice.readFromParcel` and `BaseParceledListSlice.writeToParcel` on this ROM (to identify the three int32s at offsets 80/84/88).
-
-**Then two paths:**
-
-**Path A — Kotlin side.** Fix `ParcelRewriter.readParceledSlice` to feed the correct bytes and offset to `ParceledListSlice.CREATOR.createFromParcel`. Small change if the layout is confirmed. Half a session to diagnose, then a 20-line fix.
-
-**Path B — C++ walker.** Iterate the slice manually, null signatures using IDA-verified `PackageInfo` field offsets, re-emit the slice. Larger change; sidesteps the Kotlin parser entirely.
-
-**Recommendation: Path A first** if decomp confirms the layout. Path B only if the Kotlin parser cannot be made to work with the confirmed layout.
-
-**Do not touch the code-36 skip-guard** in `BinderTransactHook.cpp` until Path A or B is verified by an E2E test that `getInstalledPackages(GET_SIGNATURES)` returns null signatures. The guard is currently protecting the guest app from a process-killing abort.
-
-### Suggested Session 12 opening order
-
-Before any code:
-1. **Flags check (Claude's Point 1).** `PackageInfo.signatures`/`signingInfo` are null by framework design unless the caller passes `GET_SIGNATURES` / `GET_SIGNING_CERTIFICATES`. The probed call in Session 11 was `getInstalledPackages(0)` — flags=0. If Viber's actual tamper check only uses `getPackageInfo(pkg, GET_SIGNATURES)` (code 3, already working) and never calls `getInstalledPackages` with signature flags, code 36 may have nothing to redact for the real target. Cheap to check — dump whether any `PackageInfo` in the list has non-null `signatures`/`signingInfo` for `getInstalledPackages(0)` vs. `getInstalledPackages(GET_SIGNATURES)`.
-2. **If flags=0 has non-null signatures**, code 36 matters even at flags=0 — proceed to decomp.
-3. **If flags=0 has null signatures**, code 36 matters only for apps that specifically pass signature flags — proceed to decomp only if prioritizing a general fix, otherwise close the safe-guard and move to `handleJHMethod` / `nativeCNVM` for Phase A.
-
-### Not touching in Session 12 (recommendation)
-
-- DualHost (Phase A not complete)
-- Any new coverage method unrelated to code 36
-- The code-36 skip-guard until Path A or B is verified
+Rule 3 says every session must increase the coverage number. Session 11 did not — because code 3 was already counted (Session 10) and code 36 was not delivered as behavior. Coverage 13 → 13 is the honest reflection of "code-3 live, code-36 pending." No inflation.
 
 ---
 
@@ -916,101 +761,188 @@ Before any code:
 
 ### Q1 result (measured on device, Session 12)
 
-The flags-check probe from the Session 12 handoff ran on device:
-
     getInstalledPackages(0): 278 pkgs, 0 with non-null sigs
     getInstalledPackages(GET_SIGNATURES): 278 pkgs, 278 with non-null sigs
 
-This is decision-tree row 2: flags=0 has null signatures;
-GET_SIGNATURES has non-null signatures.
-
-### Consequence
-
 `PackageInfo.signatures` / `signingInfo` are null unless the caller
-explicitly passes `GET_SIGNATURES` / `GET_SIGNING_CERTIFICATES`. This
-is standard framework behavior, not a MIUI quirk — the framework strips
-signatures unless requested.
-
-Code 36 (`getInstalledPackages`) therefore has nothing to redact for a
-caller that does not pass signature flags. The MIUI wire-format fix
-(`writeString8` for `packageName`, plus the three int32s at offsets
-80/84/88) remains correct to pursue *if* a target is shown to call
-`getInstalledPackages` with signature flags. For Viber specifically,
-that determination is out of scope for this repo.
+explicitly passes `GET_SIGNATURES` / `GET_SIGNING_CERTIFICATES`.
 
 ### Decision
 
 **Deprioritize code 36. Defer Phase A item 2 (code-36 byte-rewrite) and
 move to Phase A item 3 (`handleJHMethod` + `nativeCNVM`).**
 
-Rationale:
-1. Code 3 (`getPackageInfo(pkg, GET_SIGNATURES)`) already covers the
-   standard signature-check AIDL path. That is the path tamper
-   detectors actually use.
-2. The code-36 byte-rewrite still requires IDA decomp of
-   `PackageInfo.readFromParcel` and `BaseParceledListSlice.readFromParcel`
-   on this ROM. Per Rule 7, no parse code without decomp.
-3. Session 11 was a flat-coverage session. Session 12 must grow
-   coverage (Rule 3). `handleJHMethod` is a Phase A blocker and
-   closes a real reference method.
-4. The "general correctness" argument is real but weak: if the
-   reference `ApplicationProxy` redacts `getInstalledPackages` with
-   signature flags and we don't, we are technically short of "matches
-   reference behavior" by one code path. This is honestly stated. It
-   is a reason to come back to code 36 *if* a target is shown to
-   require it, or *if* decomp lands.
-
 ### What does NOT change
 
 - The code-36 skip-guard in `BinderTransactHook.cpp` stays in place.
-  The Kotlin rewriter would still crash on
-  `ParceledListSlice.CREATOR.createFromParcel` on this ROM if the guard
-  were removed.
 - The captured 66 KB code-36 reply (`g_last_code36_reply`) remains
   available via `dumpLastCode36Reply` JNI.
 - `Session11Code36ReplyTest` remains green and diagnostic.
 - The 3-int32 hypothesis at offsets 80/84/88 remains unverified.
-  Decomp is still required to close it. If it is never closed, the
-  documented reason is: code 36 works for flags=0 callers (nothing to
-  redact) and only matters for signature-flag callers, which we have
-  not observed as a target requirement.
 
 ### Deliverables this session
 
 - `BinderTransactE2ETest.rewriterExceptionPreservesReplySize` — the
-  Session 11 exception-path fix now has a direct test. Uses code 36 to
-  force `createFromParcel` throw and asserts reply size preservation.
-  Verified on device: `before=12 after=12` (OOM at absurd N=0x7FFFFFF0
-  caught, startSize restored).
-- `AidlCodeProbeTest` narrowed from 15 probe calls to 4 (codes 3 and
-  36 only). Broad PM method sweep dropped.
+  Session 11 exception-path fix now has a direct test.
+- `AidlCodeProbeTest` narrowed from 15 probe calls to 4.
 - This decision note.
 
-### Test count: 48 green (up from 47). Coverage: 13/90 (unchanged).
+### Test count: 48 green. Coverage: 13/90 (unchanged).
+
+---
+
+## Session 13 — nativeCNVM decomp-verified — 2026-10-25
+
+### Mission #1 status: 13 / 90 (~14%) at time of close; 14/90 after Session 14 verification
+
+`nativeCNVM` decomp-verified against `sub_30BF7C` + `sub_30C238`.
+`ProxyBridgeSurfaceTest.kt` added with four tests. `ProxyBridge.cpp` with
+`nativeCNVM` and a stub `handleJHMethod` added. `ProxyBridge.kt` with
+`nativeCNVM` external only.
+
+### What Session 13 actually delivered
+
+- **`nativeCNVM`** decomp-verified vs `sub_30BF7C` (entry) + `sub_30C238` (cache init). 8 jmethodIDs cached in identical order. `Executable.artMethod` fieldID cached on API ≥ 30, guarded, not read by `nativeCNVM`. Tag → slot mapping identical for all 9 tags. `DeleteLocalRef(elem)` after every unwrap. `FromReflectedMethod(method)` → `GetObjectClass(obj)` → `CallNonvirtualVoidMethodA(obj, cls, mid, args)`. Three safe-strengthening divergences vs reference documented in `ProxyBridge.cpp` header.
+- **`ProxyBridgeSurfaceTest.kt`** with four tests (nativeCNVM*).
+- **`handleJHMethod`** — deferred. Body is a stub returning `nullptr`.
+- **`IntegrationTest.selftestReportIsComplete`** failed with `:remote process bad`.
+
+### Session 13's claims vs reality
+
+Session 13 claimed "52 tests, 51 pass, 1 fail". Session 14 measured the actual test count was 48 running (ProxyBridgeSurfaceTest was not in the -r output). The 52/51/1 claim was aspirational; Session 14 corrected it. Session 15 confirmed 49 pass + 3 ignored = 52 registered.
 
 ### Next session
 
-Phase A item 3: `handleJHMethod` + `nativeCNVM` dispatcher design and
-implementation. Design discussion belongs to the next session — do not
-carry code-36 context forward except as the deferral note above.
+Phase A item 3 continued: `handleJHMethod` needs `sub_29E168` decomp. Session 14 identified two real bugs in `nativeCNVM` from Claude code review — see Session 14 section.
 
-### Workflow convention (added this session)
+---
 
-When a handoff specifies whole-file replacements + verification
-checklist + explicit `git commit` block, the developer pastes the whole
-file (no line-by-line edits), runs the verify checklist, then runs the
-commit command. This convention applies to every future handoff —
-assume it without asking.
+## Session 14 — nativeCNVM two-bug fix + test measurement — 2026-10-25
 
+### Mission #1 status: 14 / 90 (~16%) — verified, not claimed
 
+Session 14's deliverable was two bug fixes to Session 13's `nativeCNVM` port (from Claude code review) and the first true measurement of the test suite including `ProxyBridgeSurfaceTest`.
+
+### Bugs fixed
+
+| # | Bug | Root cause | Fix |
+|---|---|---|---|
+| 27 | `nativeCNVM` use-after-release of `sig` | Arity guard called `strlen(sig)` AFTER `ReleaseStringUTFChars`, with `FromReflectedMethod` and `GetObjectClass` (both GC safepoints) in between. UB on every call; latent UAF | Capture `sigLen = strlen(sig)` BEFORE release; use `sigLen` in guard |
+| 28 | `g_rewrite_effective_count` incremented unconditionally | After the swap block closed, so rewriter throws and zero-length results were counted as "effective". The "swapped reply" log had the same bug | Introduced local `bool swapped` set only inside the swap branch; gated both `fetch_add` and `LOGD` on `swapped`. Added explicit "no swap (...)" diagnostic log |
+
+### Measurement (what Session 13 claimed but did not verify)
+
+- `run finished: 52 tests, 0 failed, 0 ignored` — first run in which `ProxyBridgeSurfaceTest` class appears in `-r` output.
+- `nativeCNVMMatchesReferenceSignature`, `nativeCNVMNullArgsIsNoOp`, `nativeCNVMInvokesVoidMethodWithCorrectArgs`, `nativeCNVMCoercesBoxedIntegersToJvalueInt` — all four `finished:`, no `[FAIL]`.
+- `ProxyBridge.nativeCNVM: arity mismatch n=0 paramCount=2 — refusing dispatch` — arity guard fires correctly with the fixed length source. `paramCount=2` for `"VIL"` with 2 params.
+- `IntegrationTest.selftestReportIsComplete` PASSED. `:remote` process started cleanly, all hooks installed, `Service started. (v29)`, full item1-5 suite ran, `selftest.txt written: 23 pass`. Session 13's `process is bad` failure NOT reproduced.
+- `rewriteEffective=3` matches the three "swapped reply" log lines exactly (two from `AidlCodeProbeTest` code-3 GET_SIGNATURES and GET_SIGNING_CERTIFICATES, one from `BinderTransactHookTest.hookFiresAndPassesThrough` code-3). The Session 13 "16 dispatch / 3 effective" reading was coincidental (counter over-counted but happened to match). The counter is now semantically correct.
+
+### AntiDetectionE2ETest observation (fixed in Session 15)
+
+Three connect tests (`connectToFridaPortBlockedEvenWithListener`, `connectToIdaPortBlockedEvenWithListener`, `connectToNonBlockedPortSucceeds`) returned early on `SocketException: EPERM` from `bind(127.0.0.1)` and were reported as PASSED by JUnit. Rule 12 violation — tests that cannot fail. Fixed in Session 15.
+
+### Files touched
+
+**Modified:**
+- `app/src/main/cpp/ProxyBridge.cpp` — UAF fix; arity guard now reads `sigLen` after release. `handleJHMethod` unchanged (stub).
+- `app/src/main/cpp/BinderTransactHook.cpp` — `g_rewrite_effective_count` gate on `swapped` local; added "no swap (...)" log.
+
+### Coverage: 14/90 verified
+
+`nativeCNVM` is now a measured 14, not a claimed 14. The four `ProxyBridgeSurfaceTest` tests ran green in `am instrument -r`.
+
+### Next session
+
+Session 15: no decomp available for `sub_29E168`. Deliver prep work: decomp spec + loose-end cleanup (AntiDetectionE2ETest honesty fix, bug4 log noise). Coverage stays 14/90 (honest no-growth session).
+
+---
+
+## Session 15 — handleJHMethod decomp spec + loose-end cleanup — 2026-10-25
+
+### Mission #1 status: 14 / 90 (~16%) — unchanged, honest no-growth session
+
+Session 15's deliverable was preparation: HANDLEJHMETHOD_DECOMP_SPEC.md at repo root, plus two loose-end cleanups (AntiDetectionE2ETest Rule-12 honesty, bug4 log noise suppression). No new methods shipped, so coverage did not grow. That is honestly stated per Rule 3.
+
+### Deliverables
+
+**15.1 — `HANDLEJHMETHOD_DECOMP_SPEC.md` (new file at repo root)**
+
+Enumerates 7 decomp questions with decision trees that determine whether the existing scaffolding helpers (`ReflectIds`, `BoxResult`, `IsStaticMethod`, `BuildDescriptor`, `UnwrapArgs`) can be wired into `handleJHMethod` as-is or need modification:
+
+- Q1 Dispatch path (`CallNonvirtualObjectMethodA` vs `CallObjectMethodA` vs static variant)
+- Q2 `obj2` semantic (unused, declaring class, fallback receiver, or config key)
+- Q3 Return-value boxing (matches current `BoxResult`? FindClass per call? raw primitive cast?)
+- Q4 Exception semantics (check-and-clear, fallback, do-nothing)
+- Q5 `Cache(env)` invocation (entry vs conditional vs never)
+- Q6 Descriptor derivation (`BuildDescriptor` reflective iteration vs `ArtMethod::GetSignature()` vs caller-passed)
+- Q7 `methodArr` arity / element use (single target method vs super-chain vs declaring-class-plus-params)
+
+Plus §3 exit criteria: the 10 evidence points the decomp artifact must contain before Session 16 can land `handleJHMethod`. If absent from the artifact, Session 16 escalates for a re-dump.
+
+`ProxyBridge.cpp` header comment updated to point at `HANDLEJHMETHOD_DECOMP_SPEC.md`.
+
+**15.2 — `AntiDetectionE2ETest.kt` Rule-12 honesty fix**
+
+Three connect tests were passing-by-skip on loopback-bind EPERM (Android 15+ unprivileged loopback bind restriction on API 37). Marked `@Ignore` with a reason string that points at real substitution coverage: `AntiDetectionTest.allAntiDetectionTestsPass` asserts the exact `Fake_connect` decision for ports 27042/27043/23946 and the allow cases 8080 and 8.8.8.8:27042, plus `connect_hook_installed == 1`. `javaFileHidingFiresHook` (no socket requirement) remains live.
+
+Test count moved from 52 pass + 0 ignored to 49 pass + 3 ignored. Honest, visible in `-r` output.
+
+**15.3 — bug4 log noise suppression**
+
+`InlineHooker.cpp` gained `extern "C" int g_iihe_quiet = 0;` and `#define IIHE_LOG(...)` guarding the verbose `IIHE(...)` LOGD calls inside `InstallInlineHookEx`. `LOGE` calls unchanged. `test_regression.cpp::RunRegressionBug4` sets `g_iihe_quiet = 1` around its 1000-cycle stress loop, `= 0` after. `bug5` (single cycle) is untouched.
+
+Eliminates ~15,000 lines of `IIHE(bug4):` noise per test run. All three bug4 [PASS] assertions preserved:
+- `bug4_no_relay_leak: cycles=1000 bad=0 alloc=1000 free=1000`
+- `bug4_target_bytes_restored: before=0x11000400 after=0x11000400`
+- `bug4_inline_count_zero: registry=0`
+
+### Measurement
+
+`run finished: 49 tests, 0 failed, 3 ignored`
+
+- `ignored: connectToFridaPortBlockedEvenWithListener(com.ims134.hookengine.AntiDetectionE2ETest)`
+- `ignored: connectToNonBlockedPortSucceeds(com.ims134.hookengine.AntiDetectionE2ETest)`
+- `ignored: connectToIdaPortBlockedEvenWithListener(com.ims134.hookengine.AntiDetectionE2ETest)`
+
+Live tests still green: `finished: javaFileHidingFiresHook(...)`, all four `ProxyBridgeSurfaceTest`, all `AntiDetectionTest` decision-function assertions.
+
+`IIHE(bug4):` count in run log: **0** (was ~15,000 in Session 14).
+
+`IntegrationTest.selftestReportIsComplete` PASSED again — 2/2 since Session 13's `:remote` failure. One more green run in Session 16 closes the item as flake.
+
+### Files touched
+
+**Added:**
+- `HANDLEJHMETHOD_DECOMP_SPEC.md` (repo root)
+
+**Modified:**
+- `app/src/main/cpp/ProxyBridge.cpp` — header comment expanded, now points at `HANDLEJHMETHOD_DECOMP_SPEC.md`. Body unchanged (handleJHMethod still stub).
+- `app/src/main/cpp/InlineHooker.cpp` — `g_iihe_quiet` flag; 15 `LOGD("IIHE(` → `IIHE_LOG("IIHE(` sites inside `InstallInlineHookEx`. All `LOGE` sites unchanged.
+- `app/src/main/cpp/test_regression.cpp` — `extern "C" int g_iihe_quiet;` declaration; `RunRegressionBug4` sets `g_iihe_quiet = 1` before the 1000-cycle loop, `= 0` after.
+- `app/src/androidTest/java/com/ims134/hookengine/AntiDetectionE2ETest.kt` — three `@Ignore` annotations; class-level comment explaining the ROM restriction and pointing at substitution coverage.
+
+### Coverage: 14/90 (unchanged)
+
+Session 15 is a "no growth" session because no new method shipped. Rule 3 is not satisfied; that is stated as an honest exception, not a norm. The next growth path is blocked on `sub_29E168` decomp. HANDLEJHMETHOD_DECOMP_SPEC.md removes that block from the critical path — when decomp lands, implementation is mechanical.
+
+### Next session
+
+Session 16: either
+- **16A** — third `IntegrationTest.selftestReportIsComplete` green run (3/3) → mark resolved. Session is a sub-session.
+- **16B** — `sub_29E168` decomp lands → implement `handleJHMethod` using HANDLEJHMETHOD_DECOMP_SPEC.md's decision tree. Coverage 14 → 15.
+
+No other work is genuine Phase A progress. `nativeInit` also needs decomp.
+
+---
 
 ## Hard-won facts (canonical reference)
 
-- **Under `am instrument`, ALL `jobject`-touching JNI calls crash on a caller thread with a JIT `BinderProxy.transact` frame above it.** Not just `NewGlobalRef`. `GetLongField` dies the same way. Any future Java-layer hook needing `jobject` access must offload to a fresh attached thread or pivot to a native hook target. (Rule 8)
+- **Under `am instrument`, ALL `jobject`-touching JNI calls crash on a caller thread with a JIT `BinderProxy.transact` frame above it.** Not just `NewGlobalRef`. `GetLongField` dies the same way. (Rule 8)
 
-- **`android::IPCThreadState::transact` is the correct hook for AIDL interception on this ROM.** Symbol `_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j`, in `libbinder.so` dynsym. Hooking it makes the caller thread a pure-native path — no CheckJNI, no JIT frames, no crash.
+- **`android::IPCThreadState::transact` is the correct hook for AIDL interception on this ROM.** Symbol `_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j`, in `libbinder.so` dynsym.
 
-- **dlsym filters android::Parcel primitives on this ROM.** Session 7's `BinderProbe` found them via dynsym walk; Session 10 confirmed dlsym returns null. Use dynsym scan for any `libbinder.so` symbol. (Rule 9)
+- **dlsym filters android::Parcel primitives on this ROM.** Use dynsym scan for any `libbinder.so` symbol. (Rule 9)
 
 - **`android::Parcel` field offsets (IDA-verified, API 37, arm64):**
     - `+0` mError (int32)
@@ -1022,11 +954,11 @@ assume it without asking.
     - `+81` mParseHeader (byte), `+82` mParseHeaderPadding (byte)
     - `+88` mType (int32)
 
-- **Reply parcel's `mData` buffer is read-only post-transact.** Kernel fills it via `copy_to_user`. Struct fields (+8/+16/+24/+32) are writable because `setDataPosition` writes to +32 successfully. Rule: never write into `mData` directly; always swap the pointer to a fresh `malloc`'d copy. (Rule 10)
+- **Reply parcel's `mData` buffer is read-only post-transact.** Never write into `mData` directly; always swap the pointer to a fresh `malloc`'d copy. (Rule 10)
 
-- **The fresh-thread rewriter pattern:** `Parcel.obtain()` → `SetLongField(mNativePtr, targetPtr)` → run rewriter → `SetLongField(mNativePtr, originalPtr)` → `recycle()`. No `NewGlobalRef`. No refs cross threads. Only `jlong` pointer values.
+- **The fresh-thread rewriter pattern:** `Parcel.obtain()` → `SetLongField(mNativePtr, targetPtr)` → run rewriter → `SetLongField(mNativePtr, originalPtr)` → `recycle()`.
 
-- **Kotlin `object` instance fields are not static.** `GetStaticFieldID` on `ourPackageName` returns null. Add a `@JvmStatic` accessor. (Rule 11)
+- **Kotlin `object` instance fields are not static.** Use `@JvmStatic` accessors. (Rule 11)
 
 - **API 37 writeInterfaceToken wire format** (Session 9, IDA-verified):
   offset 0: [int32 strictModePolicy | STRICT_MODE_PENALTY_GATHER (0x80000000)]
@@ -1038,30 +970,23 @@ assume it without asking.
   offset ..: [pad to 4-byte boundary]
   offset ..: [AIDL args]
 
-text
-`readString()` returns null on any negative leading int32 — this is why wrong-offset attempts return null rather than garbage: the strict mode int32 0x80000000 reads as a negative string16 length.
-
-- **`dataSize` of `getPackageInfo(self, 0, GET_SIGNATURES)` request on device: 148 bytes.** Arithmetic: 12 (three-int32 prelude) + string16(iface "android.content.pm.IPackageManager", 35 chars) + string16(pkg "com.ims134.hookengine", 22 chars) + int64 versionCode + int32 flags.
-
 - **Code-36 reply on this ROM — observed layout (Session 11, 128 bytes):**
-  [int32 ex=0]
-  [int32 hasResult=1]
-  [int32 N=278]
-  [int32 class_name_len=30][60 bytes UTF-16 "android.content.pm.PackageInfo"][int16 null][pad to 4]
-  [int32 unknown=0] ← offset 80
-  [int32 unknown=1] ← offset 84
-  [int32 unknown=-1] ← offset 88 (likely splitNames null sentinel of first element)
-  [int32 packageName_len=41] ← offset 92
-  [41 bytes ASCII "com.google.android.networkstack.teth…"]
+  [int32 ex=0][int32 hasResult=1][int32 N=278][int32 class_name_len=30][60 bytes UTF-16 "android.content.pm.PackageInfo"][int16 null][pad to 4][int32 unknown=0 at +80][int32 unknown=1 at +84][int32 unknown=-1 at +88][int32 packageName_len=41][41 bytes ASCII …]
+  `packageName` uses `writeString8` on this ROM (MIUI change). The three int32s at 80/84/88 remain unverified without decomp.
 
-text
-**`packageName` on this ROM uses `writeString8` (4-byte length + UTF-8 bytes), not AOSP's `writeString16`.** This is a MIUI change. Confirms the previous crash was at `readString8` and was NOT a misalignment — it was a MIUI wire-format difference that our read tried to interpret as `writeString16`.
+- **`g_rewrite_effective_count` vs `g_rewrite_count`:** "dispatched" vs "delivered a swap." Session 14 fix: counter now gates on local `swapped` bool — previously incremented unconditionally, counting rewriter throws and zero-length results as effective. Session 14 verified: `rewriteEffective=3` matches three "swapped reply" log lines.
 
-**The three int32s at 80/84/88 remain unverified.** Decomp of `PackageInfo.readFromParcel` and `BaseParceledListSlice.readFromParcel` on this ROM is required before writing parse code. (Rule 7)
+- **`getPackageInfo(pkg, 0)` does not reliably fire on this ROM** due to framework caching. Only `getPackageInfo(pkg, GET_SIGNATURES)` reliably issues IPC. Use `getInstalledPackages(...)` for code-36 dispatch tests.
 
-- **`g_rewrite_effective_count` vs `g_rewrite_count`:** "dispatched" vs "delivered a swap." Session 11 on real traffic: `rewriteCount=16`, `rewriteEffectiveCount=3`. The 13 ineffective dispatches are code-36 bails (skipped by guard) + a few code-3 prelude matches that did not null any signatures. This distinction is the correct semantic — a dispatch alone does not mean the caller saw a modified reply.
+- **`nativeCNVM` arity guard reads `sigLen` captured BEFORE `ReleaseStringUTFChars`.** Session 14 fix. Post-release `strlen(sig)` is UB — the buffer is unpinned, and `FromReflectedMethod`/`GetObjectClass` in between are GC safepoints. Do not move the `strlen` back after the release.
 
-- **`getPackageInfo(pkg, 0)` does not reliably fire on this ROM** due to framework caching. Only `getPackageInfo(pkg, GET_SIGNATURES)` (or `GET_SIGNING_CERTIFICATES`) reliably issues IPC on this ROM when called in isolation. Use `getInstalledPackages(...)` for any code-36 dispatch test.
+- **`handleJHMethod`'s scaffolding helpers exist but are unreachable from the stub body.** Session 15 made this deliberate via HANDLEJHMETHOD_DECOMP_SPEC.md. Do not modify any helper's behavior or add tests pinning their current behavior until the decomp spec's exit criteria are met. The helpers are compiled but not called — this is not a defect, it is the plan.
+
+- **`g_iihe_quiet` in `InlineHooker.cpp`** gates the 15 verbose `IIHE(...)` LOGD lines inside `InstallInlineHookEx`. Errors (LOGE) always print. `test_regression.cpp::RunRegressionBug4` sets it around its 1000-cycle stress loop. Session 15 verified: 0 `IIHE(bug4):` lines in the run log (was ~15,000).
+
+- **Loopback bind on API 37 / HyperOS fails with `SocketException: EPERM`** in the instrumentation process. Android 15+ restricts unprivileged `bind()` on `127.0.0.1`. This makes any test requiring a real loopback listener impossible on this device in the instrumentation process. `AntiDetectionE2ETest` three connect tests are `@Ignore`'d for this reason (Session 15). The decision-function coverage in `AntiDetectionTest` still asserts the exact `Fake_connect` behavior.
+
+- **`run finished: N tests, X failed, Y ignored`** is the trustworthy parsing target from `am instrument -w -r`. The `ignored` count was added to the output in Session 15 to make `@Ignore` visible. Do not trust `INSTRUMENTATION_CODE` (always -1) or `OK (N tests)` alone (three-way unreliable per "Device test signal is triple-unreliable").
 
 ---
 
@@ -1071,7 +996,11 @@ text
 - Session 8: 32 tests
 - Session 9: 39 tests
 - Session 10: 43 tests
-- Session 11: **47 tests**
+- Session 11: 47 tests
+- Session 12: 48 tests
+- Session 13: 52 tests (claim — unverified; actual -r showed 48 running, ProxyBridgeSurfaceTest not in output)
+- Session 14: **52 tests** (verified — first run in which ProxyBridgeSurfaceTest appears in -r; 52 pass, 0 fail)
+- Session 15: **52 registered = 49 pass + 3 ignored** (AntiDetectionE2ETest three connect tests @Ignore'd on loopback EPERM)
 
 Coverage history:
 - Session 7: 10 / 90 (~11%)
@@ -1079,69 +1008,62 @@ Coverage history:
 - Session 9: 12 / 90 (~13%)
 - Session 10: 13 / 90 (~14%)
 - Session 11: 13 / 90 (~14%) — unchanged, honestly reported
-- Session 12: 48
-- Session 13: **52** (52 pass)
+- Session 12: 13 / 90 — unchanged, honestly reported
+- Session 13: 14 / 90 — claimed; Session 14 verified
+- Session 14: **14 / 90 (~16%)** — verified via `am instrument -r`
+- Session 15: 14 / 90 — unchanged, honest no-growth (prep + cleanup, no new methods)
 
 ---
 
-## What Session 14 must do FIRST
+## What Session 16 must do FIRST
 
-1. **Determine whether `ProxyBridgeSurfaceTest` is actually in the androidTest
-   source set and being compiled into the test APK.** The Session 13 baseline
-   (`OK (48 tests)`) contains no `ProxyBridge` class in the `-r` output, even
-   though `ProxyBridgeSurfaceTest.kt` has been provided. Either the file is
-   not at `app/src/androidTest/java/com/ims134/hookengine/ProxyBridgeSurfaceTest.kt`,
-   or it is `@Ignore`d, or it was added after the last test build. This is a
-   build-configuration question, not a code question. Do not write `ProxyBridge.kt`
-   again — it exists — first confirm the test that would exercise it is in the
-   APK.
+1. **Determine whether `sub_29E168` decomp is available.**
+    - If yes: implement `handleJHMethod` using HANDLEJHMETHOD_DECOMP_SPEC.md's decision tree. Per Q1–Q7. Coverage 14 → 15. Do not skip any question. If a decision-tree branch requires escalation (e.g. Q1 shows direct `ArtMethod::Invoke`), stop and report.
+    - If no: Session 16 is either (a) a sub-session: third `IntegrationTest.selftestReportIsComplete` green run → mark the `:remote` item resolved (3/3 required), or (b) escalation: `sub_29E168` and `nativeInit` decomp are now the only Phase A blockers; without either, Phase A cannot progress.
 
-2. **Obtain sub_29E168 decomp before touching `handleJHMethod`'s body.**
-   Until then, `handleJHMethod` is DEFERRED: no body change, no behavior claim,
-   no coverage credit. The three open issues (BoxResult FindClass leak,
-   static GetObjectClass, IsStaticMethod FindClass) are all fixed together
-   in the session that lands sub_29E168, not before.
+2. **If `handleJHMethod` lands:** add Kotlin external in `ProxyBridge.kt`, add `handleJHMethod*` tests, coverage moves 14 → 15 in the same session. Test count 52 → 52+N.
 
-3. **After (1) resolves,** re-run the suite. If `numtests` grows by 6 and
-   `ProxyBridgeSurfaceTest` runs green, `nativeCNVM` can be moved from
-   "surface delivered, decomp-verified, not counted" to "delivered, counted"
-   and coverage moves 13 → 14. If `numtests` stays 48, coverage stays 13/90
-   and the build-configuration issue is the deliverable.
+3. **If `IntegrationTest` closes 3/3:** update the known-issue note from "2/3" to "resolved (3/3 across Sessions 14, 15, 16; Session 13 failure was a flake, not reproduced)".
+
+4. **Do not** invent other work. `nativeInit` needs decomp. `tnFIN` code 36 needs a target or decomp. Every other Phase A path is decomp-gated. If neither `sub_29E168` nor `nativeInit` decomp is available by Session 16, the honest report is "Phase A blocked on decomp; Session 16 is a stability-confirmation session."
+
+---
 
 ## Rules of engagement (restated, for the record)
 
 1. Every session opens with the mission header.
 2. DualHost integration is out of scope until Phase A complete.
-3. Coverage number in every message. 13/90 now. Must be higher every session. Session 11 did not grow it and states so — the exception proves the rule is enforced, not that it can be skipped.
+3. Coverage number in every message. 14/90 now. Must be higher every session, with the exception stated openly when decomp blocks all growth. Session 11, 12, and 15 all failed this rule honestly; that is the enforcement, not a habit.
 4. Every method shipped must have a test.
 5. Do not declare a method "done" unless it matches the reference's behavior.
 6. Session-by-session commit discipline. Green or the session is not done. Commit after every green milestone.
-7. IDA-first when wire format, symbol contract, or field layout is uncertain. Session 11 reinforced: guessed synthetic format → OOM; guessed real offset → SIGABRT. Only the hex dump produced facts.
+7. IDA-first when wire format, symbol contract, or field layout is uncertain. Session 11: guessed synthetic format → OOM; guessed real offset → SIGABRT. Session 15: formalized this into HANDLEJHMETHOD_DECOMP_SPEC.md so `handleJHMethod` implementation cannot start on guesswork.
 8. Any `jobject`-touching JNI call on a caller thread with a JIT `BinderProxy.transact` frame above it crashes on this ROM. Hook at C++ layer or offload to fresh attached thread.
 9. dlsym filters `android::Parcel` primitives and `IPCThreadState::transact` on this ROM. Use dynsym scan.
 10. Reply parcel's `mData` is read-only post-transact. Never write into it. Swap the pointer.
 11. Kotlin `object` instance fields are not static. Use `@JvmStatic` accessors.
-12. Test assertions must be able to fail. If a test can only pass, it's not a test. Session 11's `confirmGetPackageInfoCode` returns empty codes — diagnostic only, not a regression check.
-13. Handoffs deliver whole-file replacements, not line-by-line edits. Every handoff must include: (a) change summary per file, (b) full file content to paste, (c) verify-before-commit checklist, (d) explicit `git add` + `git commit -m "..."` block. The developer does not want to be asked "how would you like to receive this" — assume whole-file format every time.
+12. Test assertions must be able to fail. Session 15's AntiDetectionE2ETest fix: three tests were silently passing on `bind()` EPERM — marked `@Ignore` with reason pointing at real substitution coverage. The visible ignored count in `run finished` output is the mechanism that keeps this honest.
+13. Handoffs deliver whole-file replacements or well-delimited contiguous-block replacements with locate-by/replace-with patterns. Every handoff must include: (a) change summary per file, (b) paste content, (c) verify-before-commit checklist, (d) explicit `git add` + `git commit -m "..."` block.
 
-Header updated: Session 11 closed, 47 tests, coverage 13/90.
+Header updated: Session 15 closed, 49 pass + 3 ignored, coverage 14/90.
 
-Mission #1 coverage table: tnFIN row reworded to note Session 11 confirmed code 36 constant and captured reply.
+Mission #1 coverage table: nativeCNVM noted as Session 14 two-bug fixed; handleJHMethod noted as blocked on HANDLEJHMETHOD_DECOMP_SPEC.md exit criteria.
 
-"Order of attack" item 2 status updated to reflect Session 11 outcome.
+"Order of attack" item 3 status updated to reflect Session 15 spec delivery.
 
-Rule 7 strengthened with Session 11 evidence.
+Rule 3 evidence updated with Session 15 exception.
 
-Rule 12 evidence extended with Session 11 observation.
+Rule 12 evidence extended with Session 15 AntiDetectionE2ETest observation.
 
-"Current test count" 43 → 47.
+Rule 13 refined — contiguous-block replacements allowed where whole-file is impractical.
 
-New full section: "Session 11 — rewriter exception safety + code-36 diagnostics."
+"Current test count" 52 → 49 pass + 3 ignored = 52 registered.
 
-"Hard-won facts" extended with the code-36 reply observed layout and the g_rewrite_effective_count 
-distinction.
+New full section: "Session 14 — nativeCNVM two-bug fix + test measurement."
+New full section: "Session 15 — handleJHMethod decomp spec + loose-end cleanup."
+
+"Hard-won facts" extended with: nativeCNVM UAF fix, g_rewrite_effective_count gate, handleJHMethod helper freeze, g_iihe_quiet, loopback EPERM.
 
 "Test count history" and "Coverage history" appended.
 
-"What Session 12 must do FIRST" is stated twice (once at the end of Session 11 section, 
-once in the "Not touching" note) — both read the same, both point to decomp + flags check.
+"What Session 16 must do FIRST" replaces old "What Session 14 must do FIRST."
