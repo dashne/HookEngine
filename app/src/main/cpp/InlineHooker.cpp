@@ -12,6 +12,13 @@
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+// Session 15 — per-install quiet flag. When non-zero, the verbose
+// IIHE(...) debug lines in InstallInlineHookEx are suppressed. Used by
+// test_regression.cpp::RunRegressionBug4 to avoid ~15,000 lines of noise
+// across 1000 install/uninstall cycles. Errors (LOGE) always print.
+extern "C" int g_iihe_quiet = 0;
+#define IIHE_LOG(...) do { if (!g_iihe_quiet) LOGD(__VA_ARGS__); } while (0)
+
 #define ARM64_LDR_X17_8 0x58000051
 #define ARM64_BR_X17    0xD61F0220
 
@@ -112,10 +119,10 @@ extern "C" HookResult InstallInlineHookEx(void* targetFunc, void* fakeFunc,
                                           void** originalTrampoline,
                                           const char* name) {
     if (!targetFunc || !fakeFunc) return HOOK_INTERNAL_ERROR;
-    LOGD("IIHE(%s): enter target=%p", name ? name : "?", targetFunc);
+    IIHE_LOG("IIHE(%s): enter target=%p", name ? name : "?", targetFunc);
 
     std::lock_guard<std::mutex> lock(g_hook_mutex);
-    LOGD("IIHE(%s): mutex acquired", name ? name : "?");
+    IIHE_LOG("IIHE(%s): mutex acquired", name ? name : "?");
     HookHandle* existing = FindHandle(targetFunc);
     if (existing) {
         if (existing->replacement != fakeFunc) {
@@ -125,7 +132,7 @@ extern "C" HookResult InstallInlineHookEx(void* targetFunc, void* fakeFunc,
         }
         return HOOK_ALREADY_HOOKED;
     }
-    LOGD("IIHE(%s): not already hooked", name ? name : "?");
+    IIHE_LOG("IIHE(%s): not already hooked", name ? name : "?");
 
     long pageSize = sysconf(_SC_PAGESIZE);
     if (pageSize <= 0) return HOOK_INTERNAL_ERROR;
@@ -133,14 +140,14 @@ extern "C" HookResult InstallInlineHookEx(void* targetFunc, void* fakeFunc,
 
     int origProt = PROT_READ | PROT_EXEC;
     if (!ReadPageProt(pageStart, &origProt)) return HOOK_INTERNAL_ERROR;
-    LOGD("IIHE(%s): origProt=0x%x", name ? name : "?", origProt);
+    IIHE_LOG("IIHE(%s): origProt=0x%x", name ? name : "?", origProt);
 
     void* relay = AllocateMemoryNear(targetFunc, pageSize);
     if (!relay) {
         LOGE("IIHE(%s): no relay page", name ? name : "?");
         return HOOK_ALLOC_FAILED;
     }
-    LOGD("IIHE(%s): relay=%p", name ? name : "?", relay);
+    IIHE_LOG("IIHE(%s): relay=%p", name ? name : "?", relay);
     uint32_t* rp = (uint32_t*)relay;
     rp[0] = ARM64_LDR_X17_8;
     rp[1] = ARM64_BR_X17;
@@ -153,11 +160,11 @@ extern "C" HookResult InstallInlineHookEx(void* targetFunc, void* fakeFunc,
         munmap(relay, pageSize);
         return HOOK_ALLOC_FAILED;
     }
-    LOGD("IIHE(%s): tramp=%p", name ? name : "?", tramp);
+    IIHE_LOG("IIHE(%s): tramp=%p", name ? name : "?", tramp);
 
-    LOGD("IIHE(%s): calling BuildTrampoline", name ? name : "?");
+    IIHE_LOG("IIHE(%s): calling BuildTrampoline", name ? name : "?");
     HookResult r = BuildTrampoline(targetFunc, tramp, pageSize);
-    LOGD("IIHE(%s): BuildTrampoline r=%d", name ? name : "?", (int)r);
+    IIHE_LOG("IIHE(%s): BuildTrampoline r=%d", name ? name : "?", (int)r);
     if (r != HOOK_OK) {
         munmap(tramp, pageSize);
         munmap(relay, pageSize);
@@ -169,7 +176,7 @@ extern "C" HookResult InstallInlineHookEx(void* targetFunc, void* fakeFunc,
         munmap(relay, pageSize);
         return HOOK_MPROTECT_FAILED;
     }
-    LOGD("IIHE(%s): tramp RX OK", name ? name : "?");
+    IIHE_LOG("IIHE(%s): tramp RX OK", name ? name : "?");
 
     uint32_t branch;
     if (!EncodeBranch(&branch, (uint64_t)targetFunc, (uint64_t)relay, false)) {
@@ -178,7 +185,7 @@ extern "C" HookResult InstallInlineHookEx(void* targetFunc, void* fakeFunc,
         munmap(relay, pageSize);
         return HOOK_ALLOC_FAILED;
     }
-    LOGD("IIHE(%s): target branch=0x%08x", name ? name : "?", branch);
+    IIHE_LOG("IIHE(%s): target branch=0x%08x", name ? name : "?", branch);
 
     if (mprotect((void*)pageStart, pageSize, origProt | PROT_WRITE) != 0) {
         LOGE("IIHE(%s): target RW failed errno=%d", name ? name : "?", errno);
@@ -186,7 +193,7 @@ extern "C" HookResult InstallInlineHookEx(void* targetFunc, void* fakeFunc,
         munmap(relay, pageSize);
         return HOOK_MPROTECT_FAILED;
     }
-    LOGD("IIHE(%s): target RW OK", name ? name : "?");
+    IIHE_LOG("IIHE(%s): target RW OK", name ? name : "?");
 
     uint32_t saved = *(volatile uint32_t*)targetFunc;
     *(volatile uint32_t*)targetFunc = branch;
@@ -201,7 +208,7 @@ extern "C" HookResult InstallInlineHookEx(void* targetFunc, void* fakeFunc,
         munmap(relay, pageSize);
         return HOOK_INTERNAL_ERROR;
     }
-    LOGD("IIHE(%s): patch verified", name ? name : "?");
+    IIHE_LOG("IIHE(%s): patch verified", name ? name : "?");
 
     if (mprotect((void*)pageStart, pageSize, origProt) != 0) {
         LOGE("IIHE(%s): target restore failed errno=%d", name ? name : "?", errno);
@@ -213,9 +220,9 @@ extern "C" HookResult InstallInlineHookEx(void* targetFunc, void* fakeFunc,
         munmap(relay, pageSize);
         return HOOK_MPROTECT_FAILED;
     }
-    LOGD("IIHE(%s): target restored to 0x%x", name ? name : "?", origProt);
+    IIHE_LOG("IIHE(%s): target restored to 0x%x", name ? name : "?", origProt);
 
-    LOGD("IIHE(%s): RegistryAlloc", name ? name : "?");
+    IIHE_LOG("IIHE(%s): RegistryAlloc", name ? name : "?");
     HookHandle* h = RegistryAlloc();
     if (!h) {
         LOGE("IIHE(%s): no registry slot", name ? name : "?");
@@ -243,7 +250,7 @@ extern "C" HookResult InstallInlineHookEx(void* targetFunc, void* fakeFunc,
     if (originalTrampoline) *originalTrampoline = tramp;
 
     g_relay_alloc_count++;
-    LOGD("IIHE(%s): DONE relay=%p tramp=%p", name ? name : "?", relay, tramp);
+    IIHE_LOG("IIHE(%s): DONE relay=%p tramp=%p", name ? name : "?", relay, tramp);
     return HOOK_OK;
 }
 

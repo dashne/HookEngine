@@ -29,6 +29,8 @@ extern "C" long GetUninstallGraceMs();
 extern "C" int UninstallAllHooks();
 extern "C" bool ShouldHookDlopenForTest(const char*);
 
+
+extern "C" int g_iihe_quiet;
 extern "C" int g_relay_alloc_count;
 extern "C" int g_relay_free_count;
 
@@ -89,6 +91,10 @@ extern "C" int RunRegressionBug4() {
 
     int bad = 0;
     int completed = 0;
+    // Session 15 — suppress verbose IIHE(...) debug output across the
+    // 1000-cycle stress loop. ~15,000 lines of log noise otherwise, which
+    // drowns out other tests' output in the run log. LOGE still prints.
+    g_iihe_quiet = 1;
     for (int i = 0; i < 1000; i++) {
         HookResult r = InstallInlineHookEx((void*)&fn_bug4_target,
                                            (void*)&fake_bug4, nullptr, "bug4");
@@ -97,6 +103,7 @@ extern "C" int RunRegressionBug4() {
         if (u != HOOK_OK) { bad++; break; }
         completed++;
     }
+    g_iihe_quiet = 0;
 
     int allocs_after = g_relay_alloc_count;
     int frees_after  = g_relay_free_count;
