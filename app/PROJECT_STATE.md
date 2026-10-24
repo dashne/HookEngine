@@ -1,6 +1,6 @@
 Last verified build: v29, verified on device 2026-10-23, items 1–5 all green (23 tests), Item 7 §7.1–§7.5 green on device.
 
-Session 12 closed 2026-10-24: Q1 flags-check measured (code 36 only matters for signature-flag callers), code-36 byte-rewrite deferred, exception-path test added, AidlProbe narrowed. 48 tests green. Coverage 13/90 (unchanged — no new reference method shipped this session; pivot to handleJHMethod next).
+Session 13 closed 2026-10-25: baseline confirmed at 48 tests green. handleJHMethod DEFERRED — no sub_29E168 decomp, body unchanged, surface wired but behavior unverified. nativeCNVM decomp-verified against sub_30BF7C + sub_30C238. Coverage 13/90 (unchanged — handleJHMethod deferred, nativeCNVM surface present but not counted as reference-behavior-match until ProxyBridgeSurfaceTest is confirmed running in the suite).
 
 Session 12 closed 2026-10-24: Q1 flags-check measured (code 36 only matters for signature-flag callers), code-36 byte-rewrite deferred, exception-path test added, AidlProbe narrowed. 48 tests green. Coverage 13/90 (unchanged — pivot to handleJHMethod next).
 
@@ -394,7 +394,8 @@ explicitly marked out-of-scope.
 | `nativeAMRHook` | Path hide list | ⚠️ Partial — no mount spoof |
 
 **Not started (77 methods):**
-- **`handleJHMethod`** + `nativeCNVM` — Java method dispatcher
+- **`nativeCNVM`** — JNI dispatcher. Surface wired (`ProxyBridge.nativeCNVM` + `ProxyBridge.cpp`); body decomp-verified against sub_30BF7C + sub_30C238 (Session 13). Not yet counted as reference-behavior-match until `ProxyBridgeSurfaceTest` is confirmed present in the suite.
+- **`handleJHMethod`** — **DEFERRED**. No decomp of sub_29E168. Body in `ProxyBridge.cpp` present but not claimed as behavior-verified per Rule 5. Known open issues that will be fixed together with sub_29E168: (1) `BoxResult` FindClass-per-call local ref leak; (2) static dispatch uses `GetObjectClass(obj)` — declaring class unverified; (3) `IsStaticMethod` FindClass-per-call leak.
 - **`nativeInit`** (9 params) — full context config
 - **`nativeOnLoad`** (full DEX extract) — currently partial
 - **tnFIN code 36 byte-rewrite** — dispatched, not rewritten (Session 11 confirmed code 36 constant; layout hypothesis captured, decomp still required)
@@ -413,7 +414,9 @@ explicitly marked out-of-scope.
 ***Phase A — Core engine (blocking everything else):**
 1. ✅ `tnFIN` — mechanism (Session 8), algorithm (Session 9), production code 3 (Session 10), code-36 dispatch confirmed (Session 11)
 2. ⏸️ `tnFIN` code 36 byte-rewrite — DEFERRED (Session 12). Code 36 measured irrelevant for flags=0 callers. Reopen if a target is shown to require signature-flag `getInstalledPackages`, or if decomp of `PackageInfo.readFromParcel` + `BaseParceledListSlice.readFromParcel` lands.
-3. 🔲 `handleJHMethod` + `nativeCNVM` (Java dispatcher) — **NEXT**
+3. ⚠️ `handleJHMethod` + `nativeCNVM` (Java dispatcher)
+    - `nativeCNVM` — surface delivered; decomp-verified vs sub_30BF7C + sub_30C238 (Session 13). Coverage credit pending ProxyBridgeSurfaceTest in suite.
+    - `handleJHMethod` — **DEFERRED** (no sub_29E168 decomp; body unchanged; three open issues listed in the "Not started" section).
 4. 🔲 `nativeInit` (full config)
 5. 🔲 `nativeOnLoad` (full DEX extract, if needed)
 
@@ -628,6 +631,8 @@ The fix: pivot the hook target to `android::IPCThreadState::transact`
 (`_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j`), a pure
 C++ symbol. Caller thread = pure native, no CheckJNI, no JIT frames.
 JNI work happens on a fresh attached thread.
+
+- **`handleJHMethod` is deferred.** Session 13 decision: no sub_29E168 decomp = no body change, no behavior claim, no coverage credit. The body currently in `ProxyBridge.cpp` is present but unverified. Three provable local-ref leaks and one static-dispatch-class question are tracked in the "Not started" section — do not "fix" them by guessing; wait for sub_29E168.
 
 ### Architecture shipped
 
@@ -1074,8 +1079,33 @@ Coverage history:
 - Session 9: 12 / 90 (~13%)
 - Session 10: 13 / 90 (~14%)
 - Session 11: 13 / 90 (~14%) — unchanged, honestly reported
+- - Session 13: 13 / 90 (~14%) — unchanged. handleJHMethod deferred; nativeCNVM surface present but not counted.
 
 ---
+
+## What Session 14 must do FIRST
+
+1. **Determine whether `ProxyBridgeSurfaceTest` is actually in the androidTest
+   source set and being compiled into the test APK.** The Session 13 baseline
+   (`OK (48 tests)`) contains no `ProxyBridge` class in the `-r` output, even
+   though `ProxyBridgeSurfaceTest.kt` has been provided. Either the file is
+   not at `app/src/androidTest/java/com/ims134/hookengine/ProxyBridgeSurfaceTest.kt`,
+   or it is `@Ignore`d, or it was added after the last test build. This is a
+   build-configuration question, not a code question. Do not write `ProxyBridge.kt`
+   again — it exists — first confirm the test that would exercise it is in the
+   APK.
+
+2. **Obtain sub_29E168 decomp before touching `handleJHMethod`'s body.**
+   Until then, `handleJHMethod` is DEFERRED: no body change, no behavior claim,
+   no coverage credit. The three open issues (BoxResult FindClass leak,
+   static GetObjectClass, IsStaticMethod FindClass) are all fixed together
+   in the session that lands sub_29E168, not before.
+
+3. **After (1) resolves,** re-run the suite. If `numtests` grows by 6 and
+   `ProxyBridgeSurfaceTest` runs green, `nativeCNVM` can be moved from
+   "surface delivered, decomp-verified, not counted" to "delivered, counted"
+   and coverage moves 13 → 14. If `numtests` stays 48, coverage stays 13/90
+   and the build-configuration issue is the deliverable.
 
 ## Rules of engagement (restated, for the record)
 
