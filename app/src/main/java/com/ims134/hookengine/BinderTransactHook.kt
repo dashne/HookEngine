@@ -16,6 +16,8 @@ import android.util.Log
 object BinderTransactHook {
     init { System.loadLibrary("hookengine") }
 
+    private external fun drainCodesNative(): IntArray
+
     @Volatile var installed = false
         private set
 
@@ -78,4 +80,10 @@ object BinderTransactHook {
     fun isInstalled(): Boolean = installed
     fun fireCount(): Int = fireCountNative()
     fun lastCode(): Int = lastCodeNative()
+
+    /**
+     * Returns the transaction codes observed since the last drain, then
+     * resets the buffer. Diagnostic only — used by AidlCodeProbeTest.
+     */
+    fun drainCodes(): IntArray = drainCodesNative()
 }

@@ -25,8 +25,8 @@ object PmSpoof {
 
     init { System.loadLibrary("hookengine") }
 
-    private external fun getSliceListNative(slice: Any): List<Any>?
-    private external fun replaceSliceListNative(slice: Any, list: List<Any>): Any?
+    internal external fun getSliceListNative(slice: Any): List<Any>?
+    internal external fun replaceSliceListNative(slice: Any, list: List<Any>): Any?
 
     /**
      * Idempotent install. Every part retries on every call.
@@ -203,7 +203,7 @@ object PmSpoof {
         }
     }
 
-    private fun nullOutSignatures(pi: PackageInfo) {
+    internal fun nullOutSignatures(pi: PackageInfo) {
         try {
             val sigCls = Class.forName("android.content.pm.Signature")
             val empty = java.lang.reflect.Array.newInstance(sigCls, 0)

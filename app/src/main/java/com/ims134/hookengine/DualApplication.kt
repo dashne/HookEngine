@@ -73,6 +73,8 @@ class DualApplication : Application() {
         try { PmSpoof.install(this) } catch (t: Throwable) {
             Log.e(TAG, "PmSpoof.install (onCreate) failed: $t", t)
         }
+        // tnFIN payload needs to know which package's signatures to null
+        ParcelRewriter.ourPackageName = packageName
 
         try {
             nativeOnCreate()

@@ -719,4 +719,86 @@ confirmation)
 5. `extern "C"` verification table in every message that touches C++ linkage.
 6. Probe before write, when the target is uncertain.
 
+---
+
+## Session 8 — tnFIN mechanism delivered — 2026-10-24
+
+### Mission #1 status: 11 / 90 (~12%)
+
+`tnFIN` (Binder transact interceptor) mechanism is live. Reference
+coverage moved 10 → 11. DualHost remains blocked until Phase A completes.
+
+### What "mechanism" means vs "full tnFIN"
+
+Delivered this session:
+- `BinderProxy.transactNative` hooked via `JavaHookInstall`
+- `FakeBinderTransact` fires on real PackageManager calls (count > 0)
+- Pass-through preserves behavior (no observable change to callers)
+- Install / uninstall round-trip clean
+
+Not yet delivered (Session 9):
+- Parcel rewriting: for codes matching `GET_PACKAGE_INFO` /
+  `GET_PACKAGE_SIGNATURES` etc., rewrite `reply` parcel to null out
+  signatures. This is the actual spoofing payload.
+- Code dispatch table: map AIDL transaction codes to handler functions
+- Recursion guard: skip our own transacts (PmSpoof's reflection path
+  uses Binder too)
+
+The mechanism is proven. The payload is Session 9.
+
+### Key technical findings
+
+**1. `BinderProxy.transact` is NOT native on API 37.** It's a Java wrapper.
+Probe confirmed: `public` (not `native`), calls `transactNative`.
+
+**2. `BinderProxy.transactNative` IS native.** Method ID real
+(`FromReflectedMethod = 0x71ac6130`, not fast-JNI token).
+
+**3. `transactNative`'s `data_` (offset 24) is a JIT stub, not a libart pointer.**
+- `data_ = 0x48166ef0`
+- `dladdr` fails (anon exec memory)
+- Page is `r-xp` (executable)
+- Reason: API 34+ ART JIT-compiles JNI stubs via `art::jit::JniCompiler`.
+  Hot native methods get per-method JIT stubs instead of direct libart
+  dispatch entries.
+
+**4. `FindEntrySlot` was over-strict.** Required `dladdr` to succeed and
+name a known lib (libart/libandroid_runtime/libc). This rejected JIT stubs.
+Fix: accept any `data_ >= 0x1000` that is executable (`/proc/self/maps`
+shows `x` perm). Keep the fast-JNI token guard (`< 0x1000`) as the true
+safety check.
+
+**5. Regression clean.** `Binder.getCallingUid` (`data_ = 0x6d70c63310`, in
+`libart.so`) still hooks via the old `dladdr` path. Both paths coexist.
+
+### Session 9 scope (next)
+
+1. **Parcel rewriting for tnFIN**
+    - Read `int code` from `data` Parcel via JNI `CallIntMethod(data, readInt)`
+    - Dispatch table: known AIDL transaction codes for IPackageManager
+    - For matching codes: parse the reply parcel, null out signatures via
+      `PackageInfo.signatures` + `SigningInfo.mSigningDetails.signatures`
+      (reuse `PmSpoof.nullOutSignatures` logic — expose it as internal)
+    - Recursion guard: `g_systemCallDepth` or per-thread flag; skip if
+      the call came from our own PmSpoof proxy path
+    - Test: verify a raw `IBinder.transact(GET_PACKAGE_INFO)` returns
+      nulled signatures even when bypassing `PmSpoof`
+
+2. **`handleJHMethod` + `nativeCNVM`** (Java dispatcher)
+    - Refactor `JavaHookInstall` so hook handlers are table entries,
+      not per-method native functions
+    - When a hooked method fires, dispatcher extracts `jobject this` +
+      `jobject[] args` from registers, looks up handler by method ID,
+      calls via `nativeCNVM`
+    - Enables 30+ hooks installed with one dispatcher, one handler table
+    - Reference equivalent: `nativeCNVM(Method, Object, String, Object[])`
+
+### Rules restated (still in force)
+
+1. Mission #1 header + coverage in every message.
+2. No DualHost until Phase A complete (tnFIN full + dispatcher + nativeInit).
+3. Probe before write when uncertain.
+4. `extern "C"` check in every C++-touching message.
+5. Every method shipped with tests.
+
 
