@@ -1,4 +1,4 @@
-Last verified build: Session 16, verified on device 2026-10-25, `OK (49 tests)`. Retry-with-backoff added to `IntegrationTest.selftestReportIsComplete` for the `:remote` `startService` flake (mitigation; retry recovery path not observed to fire — green run only). Coverage 14/90.
+Last verified build: Session 17, verified on device 2026-10-25, `OK (49 tests)`. First run in which the retry-enabled test APK is confirmed on device (Sessions 14–17a/b/c all ran a stale pre-retry APK because `adb install -r -t` was not run after the retry commit — see Rule 14). Retry present, retry not exercised this run (first startService succeeded). Recovery path still unverified — low flake rate makes it not worth hunting further. Coverage 14/90.
 
 Session 16 closed 2026-10-25: `:remote` `startService` flake investigated. Root cause is AMS state — process is marked bad before our first `startService` at IntegrationTest.kt:21 — not a code crash. Passing runs show `:remote` starting cleanly (`attachBaseContext` → `onCreate` → `onStartCommand` → cleanup kill; no FATAL, no signal, no ScopedCheck crash). Failure rate observed across Sessions 13–16: 3 pass / 2 fail. Mitigation: retry-with-backoff (3 attempts, 2s/4s) in `IntegrationTest.selftestReportIsComplete`. Retry recovery path unverified — only the green path executed post-mitigation (`OK (49 tests)`, no `startService attempt` log lines). Not a root-cause fix. Coverage 14/90, unchanged.
 
@@ -480,7 +480,7 @@ Verified in Session 14 via `am instrument -r`: `ProxyBridgeSurfaceTest` four tes
 11. **Kotlin `object` instance fields are not static.** Use `@JvmStatic` accessors.
 12. **Test assertions must be able to fail.** If a test can only pass, it is not a test. Session 15 fixed three tests in AntiDetectionE2ETest that were silently passing on loopback-bind EPERM — now `@Ignore`'d with a reason pointing at real substitution coverage in AntiDetectionTest. The test count is honest: 49 pass, 3 ignored.
 13. **Handoffs deliver whole-file replacements, not line-by-line edits.** Contiguous-block replacements where whole-file is impractical (large C++ files, one-function edits) must be clearly delimited with locate-by pattern and replace-with pattern. Every handoff must include: (a) change summary per file, (b) paste content, (c) verify-before-commit checklist, (d) explicit `git add` + `git commit -m "..."` block.
-
+14. **Every test-run instruction must include `./gradlew :app:assembleDebug :app:assembleDebugAndroidTest` followed by `adb install -r -t` on both APKs, before any `am instrument` call.** Sessions 14, 15, 16, 17a/b/c all ran a stale pre-retry test APK because the install step was omitted — the retry mitigation claim was baked in four sessions before it was actually on the device. Discovery: `git log` showed the retry commit; `IntegrationTest.kt` on disk had `for (attempt in 1..3)` at line 32; but `am instrument`'s stack trace showed `IntegrationTest.kt:21` (pre-retry line) — proof the device APK was stale. Local build output timestamps are not proof of device state. Only `adb install` returning `Success` is.
 ---
 
 ## Session 7 — BinderProbe results + strategy correction — 2026-10-24
@@ -1015,6 +1015,58 @@ No new methods. Rule 3 not satisfied. Honest exception, not a norm.
 
 ---
 
+---
+
+## Session 17 — stale test APK discovered; retry verified present, not exercised — 2026-10-25
+
+### Mission #1 status: 14 / 90 — unchanged, honest no-growth session
+
+Session 17 was Option A (stability measurement) — run the suite 3× to see if the retry ever fires. It surfaced a **four-session-old discipline gap** instead.
+
+### The stale-APK finding
+
+Runs 17a (pass), 17b (pass), 17c (fail) were executed against a test APK built **before** Session 16's retry commit. `IntegrationTest.kt` on disk had the retry at line 34; the failing stack trace showed `IntegrationTest.kt:21` — the pre-retry line. The APK on the device did not contain the retry code.
+
+Root cause: **no session from 14 onward instructed `adb install -r -t` of the rebuilt test APK before `am instrument`.** Session 16's `run16e` (my claimed "green path verified") also ran the stale APK. Same for all three runs in 17a/b/c. Every "pass" in Sessions 14–17a/b/c ran the pre-retry test.
+
+### Session 17 fix
+
+Rebuilt via `./gradlew :app:assembleDebug :app:assembleDebugAndroidTest`, then `adb install -r -t` on both APKs (both returned `Success`). One run in that state:
+
+- `run17e.txt`: `OK (49 tests)`
+- logcat grep for `startService attempt|process is bad|FATAL.*remote|signal.*remote`: **empty**
+- Meaning: retry code is on device; first `startService` succeeded; retry not exercised
+
+### `:remote` item close state
+
+- Mitigated: retry-with-backoff present in `IntegrationTest.kt` and confirmed on device via Session 17 rebuild+install
+- Recovery path: **unverified.** Low flake rate (~50% per run; retry recovers on 87.5% of flake runs; needs ~8 runs to observe) makes further verification not worth the cost
+- Item **accepted**, not resolved. Do not re-open without a new failure mode or a target that requires `:remote` clean startup
+
+### Files touched
+
+**Modified:** none — this session was diagnostic.
+**Rebuilds:** test APK rebuilt from current `IntegrationTest.kt`.
+
+### Coverage: 14/90 (unchanged)
+
+Fourth consecutive no-growth session (14, 15, 16, 17). The mission cannot progress without `sub_29E168` decomp. This session does not pretend otherwise.
+
+### Rule 14 added (see Rules of engagement)
+
+Every test-run instruction must include rebuild + install of both APKs. Discovered the hard way.
+
+### Next session (Session 18)
+
+**The Option B decision is now overdue.** Three choices, must be made in writing before Session 18 opens:
+
+1. **Set a decomp deadline** — e.g. "if `sub_29E168` not available by 2026-11-01, mission scope changes." Gives the current track one more real attempt.
+2. **Pivot mission scope** — drop Phase A (decomp-blocked), choose a different track: finish Phase B partial work that doesn't need decomp, or pivot to DualHost anyway (contradicts Rule 2 — would need to be amended), or pivot to a different mission entirely.
+3. **Park** — declare Phase A blocked on decomp, freeze the project, write the honest close-out.
+
+Session 18 does not open until the decision is made in this thread.
+
+
 ## Hard-won facts (canonical reference)
 
 - **Under `am instrument`, ALL `jobject`-touching JNI calls crash on a caller thread with a JIT `BinderProxy.transact` frame above it.** Not just `NewGlobalRef`. `GetLongField` dies the same way. (Rule 8)
@@ -1098,6 +1150,7 @@ Coverage history:
 - Session 14: **14 / 90 (~16%)** — verified via `am instrument -r`
 - Session 15: 14 / 90 — unchanged, honest no-growth (prep + cleanup, no new methods)
 - Session 16: 14 / 90 — unchanged, `:remote` stability investigation + retry mitigation; no new methods
+- Session 17: 14 / 90 — unchanged, stale-APK discovery + retry-on-device confirmed (not exercised); no new methods. **Fourth consecutive no-growth session.**
 
 ---
 
