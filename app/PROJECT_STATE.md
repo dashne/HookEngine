@@ -1,4 +1,4 @@
-Last verified build: Session 17, verified on device 2026-10-25, `OK (49 tests)`. First run in which the retry-enabled test APK is confirmed on device (Sessions 14–17a/b/c all ran a stale pre-retry APK because `adb install -r -t` was not run after the retry commit — see Rule 14). Retry present, retry not exercised this run (first startService succeeded). Recovery path still unverified — low flake rate makes it not worth hunting further. Coverage 14/90.
+Last verified build: Session 17, verified on device 2026-10-25, OK (49 tests). Session 18 opened 2026-10-25 with Rule 2 amended: DualHost integration unblocked; reference reproduction is now best-effort per method (decomp on real failure, not before). handleJHMethod parked indefinitely per operator; stub, spec (HANDLEJHMETHOD_DECOMP_SPEC.md), and scaffolding helpers all stay on disk untouched. Coverage 14/90.
 
 Session 16 closed 2026-10-25: `:remote` `startService` flake investigated. Root cause is AMS state — process is marked bad before our first `startService` at IntegrationTest.kt:21 — not a code crash. Passing runs show `:remote` starting cleanly (`attachBaseContext` → `onCreate` → `onStartCommand` → cleanup kill; no FATAL, no signal, no ScopedCheck crash). Failure rate observed across Sessions 13–16: 3 pass / 2 fail. Mitigation: retry-with-backoff (3 attempts, 2s/4s) in `IntegrationTest.selftestReportIsComplete`. Retry recovery path unverified — only the green path executed post-mitigation (`OK (49 tests)`, no `startService attempt` log lines). Not a root-cause fix. Coverage 14/90, unchanged.
 
@@ -429,7 +429,7 @@ Verified in Session 14 via `am instrument -r`: `ProxyBridgeSurfaceTest` four tes
 | `nativeDNPO` | TracerPid filter | ⚠️ Partial — misses full ptrace detect |
 | `nativeAMRHook` | Path hide list | ⚠️ Partial — no mount spoof |
 | **`nativeCNVM`** | `ProxyBridge.nativeCNVM` + `ProxyBridge.cpp::nativeCNVM` | ✅ Decomp-verified vs sub_30BF7C + sub_30C238 (Session 13). 4 tests in `ProxyBridgeSurfaceTest`. Two-bug fix in Session 14 (UAF in arity guard, `g_rewrite_effective_count` gate). Three safe-strengthening divergences vs reference documented in ProxyBridge.cpp header. |
-| **`handleJHMethod`** | — | ⏸️ **DEFERRED.** Body in `ProxyBridge.cpp` is a stub. HANDLEJHMETHOD_DECOMP_SPEC.md at repo root specifies the 7 decomp questions whose answers determine whether the existing scaffolding helpers can be wired together as-is. Not counted toward coverage. |
+| **`handleJHMethod`** | — | ⏸️ PARKED INDEFINITELY per operator (Session 18). Body in ProxyBridge.cpp remains a stub. HANDLEJHMETHOD_DECOMP_SPEC.md and the scaffolding helpers stay on disk, untouched. Reactivated only when the operator says so, or when DualHost integration produces a real failure pointing at it — and even then, only on operator approval.
 
 **Not started (~76 methods):**
 - **`nativeInit`** (9 params) — full context config
@@ -1066,6 +1066,8 @@ Every test-run instruction must include rebuild + install of both APKs. Discover
 
 Session 18 does not open until the decision is made in this thread.
 
+## Session 18 — DualHost pivot, Viber load harness — 2026-10-25
+
 
 ## Hard-won facts (canonical reference)
 
@@ -1154,24 +1156,15 @@ Coverage history:
 
 ---
 
-## What Session 17 must do FIRST
+## What Session 19 must do FIRST
 
-1. **Determine whether `sub_29E168` decomp is available.**
-    - If yes: implement `handleJHMethod` using HANDLEJHMETHOD_DECOMP_SPEC.md's decision tree. Per Q1–Q7. Coverage 14 → 15. Do not skip any question. If a decision-tree branch requires escalation (e.g. Q1 shows direct `ArtMethod::Invoke`), stop and report.
-    - If no: Session 17 is either (a) a stability measurement: 2–3 additional full-suite runs to observe whether the retry mitigation ever fires on a flake (log line `startService attempt N failed`), or (b) escalation: `sub_29E168` and `nativeInit` decomp are now the only Phase A blockers; without either, Phase A cannot progress.
-
-2. **If `handleJHMethod` lands:** add Kotlin external in `ProxyBridge.kt`, add `handleJHMethod*` tests, coverage moves 14 → 15 in the same session. Test count 52 → 52+N.
-
-3. **If `IntegrationTest.selftestReportIsComplete` retry fires** during a future run and the test ends green, record that as retry-recovery verification. Do not update the `:remote` known-issue note from "mitigated, unverified" to "resolved" until (a) retry recovery is observed, and (b) the underlying flake rate drops or is explained. The retry alone does not close the item; it merely makes the test robust.
-
-4. **Do not** invent other work. `nativeInit` needs decomp. `tnFIN` code 36 needs a target or decomp. Every other Phase A path is decomp-gated. If neither `sub_29E168` nor `nativeInit` decomp is available by Session 17, the honest report is "Phase A blocked on decomp; Session 17 is either stability measurement or diagnostic."
 
 ---
 
 ## Rules of engagement (restated, for the record)
 
 1. Every session opens with the mission header.
-2. DualHost integration is out of scope until Phase A complete.
+2. DualHost integration may proceed at any coverage level. Reference reproduction is best-effort per method: a specific reference method is decomp'd and ported when a logged integration failure names it, not before. Rule 5 (match behavior, not signature) and Rule 7 (no speculative decomp) both stand. Integration drives coverage; coverage no longer gates integration.
 3. Coverage number in every message. 14/90 now. Must be higher every session, with the exception stated openly when decomp blocks all growth. Sessions 11, 12, 15, 16 all failed this rule honestly; that is the enforcement, not a habit.
 4. Every method shipped must have a test.
 5. Do not declare a method "done" unless it matches the reference's behavior.
@@ -1197,6 +1190,8 @@ Rule 12 evidence extended with Session 16 retry design (fail-on-three still fail
 "Current test count" 49 pass + 3 ignored = 52 registered, `OK (49 tests)`.
 
 New full section: "Session 16 — :remote flake investigated, retry mitigated, retry path unverified."
+
+
 
 "Hard-won facts" extended with: `OK (N tests)` as valid pass signal (Session 15 claim corrected), `:remote` AMS state not code crash.
 
