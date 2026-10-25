@@ -65,6 +65,20 @@ class GuestLoadTest {
             spoof.sigError?.let { appendLine("sigError=$it") }
             appendLine("archiveSigCount=${spoof.archiveSigCount}")
             spoof.archiveError?.let { appendLine("archiveError=$it") }
+            // (stale spoof.error line removed — SpoofProbe since 18c exposes
+            // installedError/info0Error/sigError/archiveError individually,
+            // all already written above)
+
+            appendLine("--- providers ---")
+            appendLine("providersDeclared=${result.providersDeclared}")
+            appendLine("providersAttempted=${result.providersAttempted}")
+            appendLine("providersSucceeded=${result.providersSucceeded}")
+            appendLine("providersFailed=${result.providersFailed}")
+            result.firstProviderError?.let { appendLine("firstProviderError=$it") }
+            result.firstProviderStack?.let {
+                appendLine("--- first provider stack ---")
+                appendLine(it)
+            }
             result.error?.let {
                 appendLine("--- error ---")
                 appendLine(it)

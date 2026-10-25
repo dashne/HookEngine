@@ -188,6 +188,25 @@ object GuestHost {
                 return result.finish()
             }
 
+            // 8. ContentProviders (Session 19a). Runs AFTER onCreate, not
+            //    before as Android does — deliberate so a provider throw
+            //    doesn't mask the Application boot result.
+            try {
+                val prov = installGuestProviders(hostContext, guestLoader, guestPkg, apkPath)
+                result.providersDeclared = prov.declaredCount
+                result.providersAttempted = prov.attempted
+                result.providersSucceeded = prov.succeeded
+                result.providersFailed = prov.failed
+                result.firstProviderError = prov.errors.firstOrNull()
+                result.firstProviderStack = prov.firstErrorStack
+                Log.d(TAG, "providers: declared=${prov.declaredCount} " +
+                        "attempted=${prov.attempted} " +
+                        "ok=${prov.succeeded} fail=${prov.failed}")
+            } catch (t: Throwable) {
+                Log.e(TAG, "provider install threw: $t")
+                result.firstProviderError = "installGuestProviders threw: $t"
+            }
+
             installed = true
             result.guestApp = guestApp
 
@@ -303,6 +322,118 @@ object GuestHost {
         var archiveError: String? = null
     }
 
+    /**
+     * Session 19a — install guest ContentProviders and run their onCreate.
+     *
+     * Normal Android: ActivityThread.installContentProviders runs BEFORE
+     * Application.onCreate. Ours runs AFTER, deliberately, so a provider
+     * throwing doesn't prevent Application.onCreate from being observed.
+     * Divergence documented; reorder if a provider fails specifically
+     * because Application state was missing.
+     *
+     * ProviderInfo comes from getPackageArchiveInfo(GET_PROVIDERS). Each
+     * provider is instantiated via the guest ClassLoader, given our
+     * GuestContext via ContentProvider.attachInfo(Context, ProviderInfo),
+     * then its onCreate() is called. Failures are captured per-provider,
+     * not thrown — Rule 12, the probe reports, not asserts.
+     */
+    fun installGuestProviders(
+        hostContext: Context,
+        guestLoader: ClassLoader,
+        guestPkg: String,
+        apkPath: String
+    ): ProviderResult {
+        val result = ProviderResult()
+        val pm = hostContext.packageManager
+
+        val info = try {
+            pm.getPackageArchiveInfo(apkPath, PackageManager.GET_PROVIDERS)
+        } catch (t: Throwable) {
+            result.error = "getPackageArchiveInfo threw: $t"
+            Log.e(TAG, "installGuestProviders: archive read failed: $t")
+            return result
+        }
+        val providers = info?.providers
+        if (providers.isNullOrEmpty()) {
+            result.error = if (providers == null) "providers null" else "zero providers declared"
+            Log.d(TAG, "installGuestProviders: ${result.error}")
+            return result
+        }
+        result.declaredCount = providers.size
+        Log.d(TAG, "installGuestProviders: ${providers.size} providers declared")
+
+        val guestInfo = info.applicationInfo ?: ApplicationInfo().apply {
+            packageName = guestPkg
+            sourceDir = apkPath
+            publicSourceDir = apkPath
+        }
+        guestInfo.sourceDir = apkPath
+        guestInfo.publicSourceDir = apkPath
+        if (guestInfo.packageName.isNullOrEmpty()) guestInfo.packageName = guestPkg
+
+        val guestCtx = GuestContext(hostContext, guestLoader, guestPkg, guestInfo)
+
+        for (pin in providers) {
+            if (pin == null) continue
+            result.attempted++
+            val rawName = pin.name ?: ""
+            if (rawName.isEmpty()) {
+                result.failed++
+                result.errors += "<unnamed-provider>: ProviderInfo.name was null"
+                continue
+            }
+            val fqName = when {
+                rawName.startsWith(".") -> guestPkg + rawName
+                !rawName.contains(".") -> "$guestPkg.$rawName"
+                else -> rawName
+            }
+            try {
+                // Normalize archive-derived fields the provider may read.
+                if (pin.applicationInfo == null) pin.applicationInfo = guestInfo
+                pin.applicationInfo?.let { ai ->
+                    ai.sourceDir = apkPath
+                    ai.publicSourceDir = apkPath
+                    if (ai.packageName.isNullOrEmpty()) ai.packageName = guestPkg
+                }
+                if (pin.packageName.isNullOrEmpty()) pin.packageName = guestPkg
+
+                Log.d(TAG, "provider[$fqName] pkg=${pin.packageName} " +
+                        "exported=${pin.exported}")
+
+                val cls = Class.forName(fqName, true, guestLoader)
+                val ctor = cls.getDeclaredConstructor().apply { isAccessible = true }
+                val provider = ctor.newInstance() as android.content.ContentProvider
+
+                provider.attachInfo(guestCtx, pin)
+                provider.onCreate()
+
+                result.succeeded++
+                result.installed += fqName
+                Log.d(TAG, "provider OK: $fqName")
+            } catch (t: Throwable) {
+                val inner = (t as? java.lang.reflect.InvocationTargetException)
+                    ?.targetException ?: t
+                result.failed++
+                val msg = "${inner.javaClass.simpleName}: ${inner.message}"
+                result.errors += "$fqName: $msg"
+                if (result.firstErrorStack == null) result.firstErrorStack = stackOf(inner)
+                Log.e(TAG, "provider FAIL[$fqName]: $msg")
+            }
+        }
+        return result
+    }
+
+    class ProviderResult {
+        var declaredCount: Int = 0
+        var attempted: Int = 0
+        var succeeded: Int = 0
+        var failed: Int = 0
+        val installed = mutableListOf<String>()
+        val errors = mutableListOf<String>()
+        var firstErrorStack: String? = null
+        var error: String? = null
+    }
+
     private fun stackOf(t: Throwable): String {
         val sw = StringWriter()
         t.printStackTrace(PrintWriter(sw))
@@ -323,6 +454,14 @@ object GuestHost {
         var onCreated: Boolean = false
         var elapsedMs: Long = 0
         var guestApp: Application? = null
+
+        // Session 19a
+        var providersDeclared: Int = 0
+        var providersAttempted: Int = 0
+        var providersSucceeded: Int = 0
+        var providersFailed: Int = 0
+        var firstProviderError: String? = null
+        var firstProviderStack: String? = null
         private var t0: Long = System.currentTimeMillis()
 
         fun finish(): Result {
@@ -333,6 +472,9 @@ object GuestHost {
             Log.d(TAG, "  pkg=$guestPackage appClass=$guestAppClass")
             Log.d(TAG, "  loader=$guestLoaderClass chained=$loaderInstalled")
             Log.d(TAG, "  instantiated=$instantiated attached=$attached onCreated=$onCreated")
+            Log.d(TAG, "  providers: declared=$providersDeclared attempted=$providersAttempted " +
+                    "ok=$providersSucceeded fail=$providersFailed")
+            firstProviderError?.let { Log.e(TAG, "  first provider error: $it") }
             error?.let { Log.e(TAG, "  error:\n$it") }
             return this
         }

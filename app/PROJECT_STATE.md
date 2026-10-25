@@ -1076,6 +1076,38 @@ Session 18 does not open until the decision is made in this thread.
 
 ## Session 18 — DualHost pivot, Viber load harness — 2026-10-25
 
+### Session 19 — ContentProvider installation probe — 2026-10-25
+
+19a — `GuestHost.installGuestProviders` added. Reads providers from
+`getPackageArchiveInfo(GET_PROVIDERS)`, instantiates each via guest
+ClassLoader, calls `ContentProvider.attachInfo(GuestContext, ProviderInfo)`
+then `onCreate()`. Per-provider errors are captured and reported, not
+thrown (Rule 12 — the probe reports, doesn't assert).
+
+First run against Viber 29.0.1.0: **15 providers declared, 7 succeeded,
+8 failed.**
+
+- **Root cause of all 7 real failures (8th is test-env noise):**
+  `GuestContext.getResources()` inherits from host — returns our resource
+  table, not Viber's. Viber's `androidx.startup.InitializationProvider`
+  calls `context.getString(0x7f140312)` → `NotFoundException`. All six
+  Viber-authored providers cascade into NPEs on obfuscated `bb2.*`
+  interface methods (`bb2.X4`, `bb2.D5`, `bb2.K5`, `bb2.c5`, `bb2.W5`),
+  because the DI implementation `androidx.startup` was supposed to
+  register never got registered.
+- **No anti-tamper check observed.** No provider threw a signature /
+  integrity / tamper error. Viber's provider layer doesn't verify.
+  Positive signal for the current PmSpoof + ParcelRewriter null-out path.
+- `MlKitInitProvider` fails with "already initialized" — test-env
+  artifact (our process already inits MLKit elsewhere). Not a Viber
+  signal; do not add `com.google.mlkit.` to GUEST_PRIORITY_PREFIXES yet.
+
+**Next (19b):** fix `GuestContext.getResources()` to return
+`pm.getResourcesForApplication(guestAppInfo)`. Rerun. If the `bb2.*`
+NPEs persist after resources are fixed, `bb2` is the first named decomp
+target under Rule 2's pull-driven model — five methods on one obfuscated
+interface, all registered by the same `androidx.startup` path.
+
 
 ## Hard-won facts (canonical reference)
 
