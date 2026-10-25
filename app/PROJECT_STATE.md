@@ -1056,6 +1056,14 @@ Fourth consecutive no-growth session (14, 15, 16, 17). The mission cannot progre
 
 Every test-run instruction must include rebuild + install of both APKs. Discovered the hard way.
 
+### Session 18b/18c/18d — guest visibility + signature null-out
+
+- **18b** — `GuestHost.probeGuestSignatureSpoof` added. First run: `NameNotFoundException: com.viber.voip`. Misdiagnosed at first as a PmSpoof-only-our-package issue; the real cause was AMS package visibility (Android 11+), not the proxy.
+- **18c** — `<queries><package android:name="com.viber.voip" /></queries>` added to the manifest. Diagnostic matrix expanded to four rows: `getInstalledPackages` visibility, `getPackageInfo(name, 0)`, `getPackageInfo(name, GET_SIGNATURES)`, `getPackageArchiveInfo(apk, GET_SIGNATURES)`. Result: visibility wall gone, all four rows succeeded, `realSigCount=1` (PmSpoof didn't null cross-package).
+- **18d** — `PmSpoof.signatureNullOutPackages` set added; `rewrite()` extended to null when `requested in signatureNullOutPackages`; `GuestHost.load` registers the guest package on successful boot. **First pivot-driven behavior extension** — no decomp prediction possible; surfaced only by loading a real guest.
+
+**`ParcelRewriter` / `tnFIN` code-3 scope** — still nulls only `ParcelRewriter.ourPackageName` (single package). Extending to a set is a backlog item, warranted when a failure proves the proxy path is bypassed. Not blocking; not guessed at.
+
 ### Next session (Session 18)
 
 **The Option B decision is now overdue.** Three choices, must be made in writing before Session 18 opens:

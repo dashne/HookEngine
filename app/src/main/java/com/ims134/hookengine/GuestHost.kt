@@ -190,6 +190,22 @@ object GuestHost {
 
             installed = true
             result.guestApp = guestApp
+
+            // Session 18d — register guest package for signature null-out.
+            // The host proxy already nulls its own package's signatures.
+            // Registering the guest makes the proxy also null the guest's,
+            // so guest code that reads its own PackageInfo.signatures sees
+            // the same empty result a real multi-tenant install would
+            // produce. Requirement surfaced by Session 18c probe; no
+            // reference decomp needed (Rule 5 behavior match).
+            try {
+                PmSpoof.signatureNullOutPackages =
+                    PmSpoof.signatureNullOutPackages + guestPkg
+                Log.d(TAG, "registered guest package for sig null-out: $guestPkg")
+            } catch (t: Throwable) {
+                Log.w(TAG, "sig null-out registration failed: $t")
+            }
+
             result.outcome = "booted"
             return result.finish()
         } catch (t: Throwable) {
@@ -197,6 +213,94 @@ object GuestHost {
             result.error = stackOf(t)
             return result.finish()
         }
+    }
+
+    /**
+     * Session 18c diagnostic matrix. One run yields answers to all the
+     * "why can't we see Viber from AMS" questions:
+     *   1. Is Viber in getInstalledPackages? (visibility, not uninstall)
+     *   2. Does getPackageInfo(name, 0) work? (visibility vs flag-specific)
+     *   3. Does getPackageInfo(name, GET_SIGNATURES) work? (the probe case)
+     *   4. Does getPackageArchiveInfo(apk, GET_SIGNATURES) work? (fallback path)
+     * Each row is reported honestly whether it passed or threw.
+     */
+    fun probeGuestSignatureSpoof(hostContext: Context, guestPackage: String): SpoofProbe {
+        val result = SpoofProbe()
+        result.guestPackage = guestPackage
+        val pm = hostContext.packageManager
+
+        // 1. getInstalledPackages(0) — is Viber in the visible set?
+        try {
+            val installed = pm.getInstalledPackages(0)
+            result.installedTotal = installed.size
+            result.installedHasGuest = installed.any { it.packageName == guestPackage }
+            Log.d(TAG, "probe: getInstalledPackages total=${installed.size} " +
+                    "hasGuest=${result.installedHasGuest}")
+        } catch (t: Throwable) {
+            result.installedError = t.toString()
+            Log.e(TAG, "probe: getInstalledPackages threw $t")
+        }
+
+        // 2. getPackageInfo(name, 0)
+        try {
+            val pi0 = pm.getPackageInfo(guestPackage, 0)
+            result.info0Ok = true
+            result.info0Version = pi0.versionName ?: "?"
+            Log.d(TAG, "probe: getPackageInfo(name,0) OK v=${result.info0Version}")
+        } catch (t: Throwable) {
+            result.info0Error = t.toString()
+            Log.e(TAG, "probe: getPackageInfo(name,0) threw $t")
+        }
+
+        // 3. getPackageInfo(name, GET_SIGNATURES)
+        try {
+            @Suppress("DEPRECATION")
+            val piSig = pm.getPackageInfo(guestPackage, PackageManager.GET_SIGNATURES)
+            @Suppress("DEPRECATION")
+            val sigs = piSig.signatures
+            result.realSigCount = sigs?.size ?: 0
+            result.realSigNulled = (sigs == null || sigs.isEmpty())
+            if (sigs != null && sigs.isNotEmpty()) result.firstSigHash = sigs[0].hashCode()
+            Log.d(TAG, "probe: getPackageInfo(name,SIG) OK sigCount=${sigs?.size ?: 0}")
+        } catch (t: Throwable) {
+            result.sigError = t.toString()
+            Log.e(TAG, "probe: getPackageInfo(name,SIG) threw $t")
+        }
+
+        // 4. getPackageArchiveInfo(apk, GET_SIGNATURES)
+        try {
+            val apk = File(hostContext.filesDir, "viber.apk").absolutePath
+            @Suppress("DEPRECATION")
+            val api = pm.getPackageArchiveInfo(apk, PackageManager.GET_SIGNATURES)
+            if (api != null) {
+                @Suppress("DEPRECATION")
+                val sigs = api.signatures
+                result.archiveSigCount = sigs?.size ?: 0
+                Log.d(TAG, "probe: getPackageArchiveInfo OK sigCount=${sigs?.size ?: 0}")
+            } else {
+                result.archiveError = "null"
+            }
+        } catch (t: Throwable) {
+            result.archiveError = t.toString()
+            Log.e(TAG, "probe: getPackageArchiveInfo threw $t")
+        }
+        return result
+    }
+
+    class SpoofProbe {
+        var guestPackage: String = ""
+        var installedTotal: Int = 0
+        var installedHasGuest: Boolean = false
+        var installedError: String? = null
+        var info0Ok: Boolean = false
+        var info0Version: String = ""
+        var info0Error: String? = null
+        var realSigCount: Int = 0
+        var realSigNulled: Boolean = false
+        var firstSigHash: Int = 0
+        var sigError: String? = null
+        var archiveSigCount: Int = 0
+        var archiveError: String? = null
     }
 
     private fun stackOf(t: Throwable): String {

@@ -14,6 +14,15 @@ object PmSpoof {
     private const val TAG = "DualCore"
 
     @Volatile var hiddenPackages: Set<String> = emptySet()
+    /**
+     * Session 18d — packages whose signatures should be nulled out on
+     * getPackageInfo. Superset of `ownPkg` because DualHost may load a
+     * guest whose own signature check must pass under our process.
+     * Populated by GuestHost.load on success; read by rewrite() at call
+     * time via volatile, so post-install registrations take effect
+     * without a re-install.
+     */
+    @Volatile var signatureNullOutPackages: Set<String> = emptySet()
 
     /** True only if proxy + list field are both in place. */
     fun isInstalled(): Boolean = storedProxy != null && listFieldResolved
@@ -153,7 +162,11 @@ object PmSpoof {
         when {
             name == "getPackageInfo" || name == "getPackageInfoAsUser" -> {
                 if (result is PackageInfo && args != null && args.isNotEmpty()) {
-                    if ((args[0] as? String) == ownPkg) nullOutSignatures(result)
+                    val requested = args[0] as? String
+                    if (requested != null &&
+                        (requested == ownPkg || requested in signatureNullOutPackages)) {
+                        nullOutSignatures(result)
+                    }
                 }
                 return result
             }

@@ -32,6 +32,12 @@ class GuestLoadTest {
         Log.d("DualCore.Guest",
             "GuestLoadTest: outcome=${result.outcome} elapsed=${result.elapsedMs}ms")
 
+        // Session 18b probe — signature spoof against the guest package.
+        // Expected pre-fix: realSigNulled=false (PmSpoof nulls only our own
+        // package). Expected post-fix: realSigNulled=true.
+        val spoof = GuestHost.probeGuestSignatureSpoof(
+            ctx, result.guestPackage ?: "com.viber.voip")
+
         File(ctx.filesDir, "guest-boot.txt").writeText(buildString {
             appendLine("outcome=${result.outcome}")
             appendLine("elapsedMs=${result.elapsedMs}")
@@ -45,6 +51,20 @@ class GuestLoadTest {
             appendLine("instantiated=${result.instantiated}")
             appendLine("attached=${result.attached}")
             appendLine("onCreated=${result.onCreated}")
+            appendLine("--- pm-visibility probe ---")
+            appendLine("guestPackage=${spoof.guestPackage}")
+            appendLine("installedTotal=${spoof.installedTotal}")
+            appendLine("installedHasGuest=${spoof.installedHasGuest}")
+            spoof.installedError?.let { appendLine("installedError=$it") }
+            appendLine("info0Ok=${spoof.info0Ok}")
+            appendLine("info0Version=${spoof.info0Version}")
+            spoof.info0Error?.let { appendLine("info0Error=$it") }
+            appendLine("realSigCount=${spoof.realSigCount}")
+            appendLine("realSigNulled=${spoof.realSigNulled}")
+            appendLine("firstSigHash=${spoof.firstSigHash}")
+            spoof.sigError?.let { appendLine("sigError=$it") }
+            appendLine("archiveSigCount=${spoof.archiveSigCount}")
+            spoof.archiveError?.let { appendLine("archiveError=$it") }
             result.error?.let {
                 appendLine("--- error ---")
                 appendLine(it)
