@@ -17,24 +17,19 @@ class GuestLoadTest {
     fun loadViberReportsOutcome() {
         val apk = File(ctx.filesDir, "viber.apk")
         assertTrue(
-            "stage Viber APK at ${apk.absolutePath} before running " +
-                    "(see Session 18 setup commands)",
+            "stage Viber APK at ${apk.absolutePath} before running",
             apk.exists()
         )
 
         val result = GuestHost.load(ctx, apk.absolutePath)
 
-        // Rule 12 — the honest assertion is that the harness ran and
-        // produced a named outcome. Whether the guest booted is reported
-        // in the outcome value and in guest-boot.txt, not asserted here.
+        // Rule 12 — assert only that the harness produced a named outcome.
+        // Whether the guest booted is data, not a gate.
         assertTrue("result.outcome must be set", result.outcome != "?")
 
         Log.d("DualCore.Guest",
             "GuestLoadTest: outcome=${result.outcome} elapsed=${result.elapsedMs}ms")
 
-        // Session 18b probe — signature spoof against the guest package.
-        // Expected pre-fix: realSigNulled=false (PmSpoof nulls only our own
-        // package). Expected post-fix: realSigNulled=true.
         val spoof = GuestHost.probeGuestSignatureSpoof(
             ctx, result.guestPackage ?: "com.viber.voip")
 
@@ -47,10 +42,17 @@ class GuestLoadTest {
             appendLine("guestPackage=${result.guestPackage}")
             appendLine("guestAppClass=${result.guestAppClass}")
             appendLine("guestLoaderClass=${result.guestLoaderClass}")
-            appendLine("classLoaderChained=${result.loaderInstalled}")
+            appendLine("loaderInstalled=${result.loaderInstalled}")
             appendLine("instantiated=${result.instantiated}")
             appendLine("attached=${result.attached}")
             appendLine("onCreated=${result.onCreated}")
+            // (native diag now emitted directly to DualCore.Native logcat,
+            // not captured in Result — see GuestBoot.cpp LOGD/LOGE)
+            result.error?.let {
+                appendLine("--- error ---")
+                appendLine(it)
+            }
+
             appendLine("--- pm-visibility probe ---")
             appendLine("guestPackage=${spoof.guestPackage}")
             appendLine("installedTotal=${spoof.installedTotal}")
@@ -65,9 +67,6 @@ class GuestLoadTest {
             spoof.sigError?.let { appendLine("sigError=$it") }
             appendLine("archiveSigCount=${spoof.archiveSigCount}")
             spoof.archiveError?.let { appendLine("archiveError=$it") }
-            // (stale spoof.error line removed — SpoofProbe since 18c exposes
-            // installedError/info0Error/sigError/archiveError individually,
-            // all already written above)
 
             appendLine("--- providers ---")
             appendLine("providersDeclared=${result.providersDeclared}")
@@ -77,10 +76,6 @@ class GuestLoadTest {
             result.firstProviderError?.let { appendLine("firstProviderError=$it") }
             result.firstProviderStack?.let {
                 appendLine("--- first provider stack ---")
-                appendLine(it)
-            }
-            result.error?.let {
-                appendLine("--- error ---")
                 appendLine(it)
             }
         })

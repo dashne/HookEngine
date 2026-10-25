@@ -1108,6 +1108,65 @@ NPEs persist after resources are fixed, `bb2` is the first named decomp
 target under Rule 2's pull-driven model — five methods on one obfuscated
 interface, all registered by the same `androidx.startup` path.
 
+## Session 19+20 — native boot via ApplicationProxy; provider wall named — 2026-10-26
+
+### Mission #1 status: 14/37 coverage (denominator corrected — reference registers 37 natives, not 90)
+
+Reference decomp across `JNI_OnLoad`, `nativeInit`/`nativeOnLoad`, `sub_335FC`, `sub_29F08`, `ApplicationProxy`, `KXQPApplication`, `VmApplication` confirmed the reference architecture:
+
+KXQPApplication (manifest app, extends MultiDexApplication)
+→ VmApplication (process-strategy selector)
+→ ApplicationProxy (engine Application, native lifecycle)
+→ guest Application boot at ApplicationProxy.onCreate
+
+
+**ApplicationProxy is not in the manifest.** It's constructed programmatically via `getInstance()`, driven by the container's lifecycle — exactly as `KXQPApplication` drives `VmApplication` in the reference. `mLoadedApk` is null because the framework never assigned one; all context-derived methods route through `getBaseContext()` (the guestCtx the container passed). This confirms Session 19e's `LoadedApk.makeApplication` detour was our invention — the reference never takes that path.
+
+### Deliverables
+
+- **`ApplicationProxy.kt`** — Kotlin `Application` subclass. Non-external overrides (`onCreate`, `onTerminate`, `onConfigurationChanged`) forward into `external fun nativeOnCreate` / `nativeOnTerminate` / `nativeOnConfigurationChanged` (Kotlin forbids `external override`). Static `getInstance()`, static native `getGuestApplication()`. **Not in manifest.**
+- **`ApplicationProxy.cpp`** — native lifecycle. `nativeOnCreate` reads `getBaseContext()`, calls `BootGuestFromContext(guestCtx)` → loads guest APK's Application class via `guestCtx.getClassLoader()`, instantiates, calls `attachBaseContext(guestCtx)` and `onCreate()` on the guest. Other natives forward.
+- **`DualApplication.kt`** — reference-shape container. `attachBaseContext` wires `ApplicationProxy.setBaseContext(guestCtx)` if APK staged before process start; `onCreate` drives `ApplicationProxy.onCreate()`; `onTerminate`/`onConfigurationChanged` forward. Matches `KXQPApplication`'s role.
+- **`GuestHost.kt`** — test fallback when APK staged after process start. Early-returns `"booted-at-startup"` if `ApplicationProxy.getGuestApplication()` is non-null. Otherwise drives `proxy.setBaseContext + proxy.onCreate()`.
+- **`GuestClassLoader.kt`** — guest-first delegation for bundled-dep prefixes (`kotlin.`, `androidx.`, `okhttp3.`, `com.facebook.`, etc.). Solves `NoSuchMethodError: StringsKt.i0` when `PathClassLoader` parent-first shadows Viber's own Kotlin stdlib.
+- **`GuestLoadTest.kt`** — observes result; does not drive boot when ApplicationProxy already booted.
+- **`AndroidManifest.xml`** — `<queries><package android:name="com.viber.voip" /></queries>`.
+- **`PmSpoof.kt`** — `signatureNullOutPackages` set; `rewrite` nulls cross-package sigs (Session 18d).
+
+**Dead files left on disk, not compiled:** `GuestContext.cpp` (Session 19c LoadedApk attempt — wrong mechanism), `GuestBoot.cpp` (Session 20a direct native boot, superseded by `ApplicationProxy.cpp`). Committed for reference; remove from `CMakeLists.txt` and delete in a later session if confirmed unused.
+
+### Verified on device
+
+DualCore.Native: ApplicationProxy.onCreate: entry
+DualCore.Native: BootGuest: guestApplication=com.viber.voip.ManifestViberApplication
+DualCore.Native: ApplicationProxy.onCreate: guest boot complete
+
+
+`guest-boot.txt`: `outcome=booted-at-startup`, `instantiated=true attached=true onCreated=true`. Framework-driven, native-backed. Rule 15 compliant — ApplicationProxy shape matches reference.
+
+### The wall: `getProviderInfo`
+androidx.startup.InitializationProvider.onCreate
+→ AppInitializer.discoverAndInitialize
+→ PackageManager.getProviderInfo("com.viber.voip", "androidx.startup.InitializationProvider")
+→ ApplicationPackageManager.getProviderInfo
+→ AMS: NameNotFoundException: ComponentInfo{com.viber.voip/androidx.startup.InitializationProvider}
+
+AMS doesn't know Viber's providers because Viber isn't installed as a package. 7/15 providers succeed (those not requiring AMS acknowledgment); 8/15 cascade from `androidx.startup` failing.
+
+**Not implemented, not touched:** `BinderTransactHook` needs to intercept the `IPackageManager.getProviderInfo` AIDL code, synthesize a reply from `getPackageArchiveInfo(apk, GET_PROVIDERS)`, same pattern as existing code-3 handling.
+
+### Corrections to prior notes
+
+- `nativeInit` is **3 params** `(Ljava/lang/String;Ljava/lang/String;I)`, not 9.
+- `nativeInit` (arm64 `sub_2A998`) == `nativeOnLoad` (x86 `sub_D420`) — same function across builds.
+- Reference registers **37** natives on ApplicationProxy, not 90. `JNI_OnLoad` shows `RegisterNatives(proxy, table, 0x25)`.
+- ApplicationProxy is **not** in the manifest; `KXQPApplication` is.
+- Session 19e's `LoadedApk.makeApplication` path was our invention; reference never takes it (`canAccessDataDir` → `NETWORK_STACK` wall was self-inflicted).
+
+### Rule 15 status
+
+Engine behavior is in native. Kotlin's role is (a) Application subclass surface — unavoidable because Kotlin forbids `external override`; (b) the container driver `DualApplication` — mirrors `KXQPApplication`; (c) test harness `GuestLoadTest`. All boot logic in `ApplicationProxy.cpp`. `GuestClassLoader` is JVM classloader policy (delegation inversion), not engine behavior; eventual `nativeFNLN` decomp replaces it.
+
 
 ## Hard-won facts (canonical reference)
 
@@ -1216,6 +1275,7 @@ Coverage history:
 11. Kotlin `object` instance fields are not static. Use `@JvmStatic` accessors.
 12. Test assertions must be able to fail. Session 15's AntiDetectionE2ETest fix: three tests were silently passing on `bind()` EPERM — marked `@Ignore` with reason pointing at real substitution coverage. Session 16's retry in `IntegrationTest` preserves fail-on-three-attempts (throws `AssertionError` with the original `SecurityException` as cause). Retry only masks transient AMS state; it does not hide real failures.
 13. Handoffs deliver whole-file replacements or well-delimited contiguous-block replacements with locate-by/replace-with patterns. Every handoff must include: (a) change summary per file, (b) paste content, (c) verify-before-commit checklist, (d) explicit `git add` + `git commit -m "..."` block.
+15. Engine behavior is implemented in native code. Kotlin/Java in app/src/main is limited to: JNI surface declarations, DualApplication (Android-mandated entry class), and Kotlin proxies that already predate the port (PmSpoof, ParcelRewriter, BinderTransactHook, ClassLoaderBridge, GuestHost harness). Integration failures that map to a reference native method (nativeInit, nativeFNLN, per-signature hook family, nativeOnLoad, handleJHMethod) must be ported natively — not patched in Kotlin. Kotlin workarounds for missing native methods are forbidden even when they "work."
 
 Header updated: Session 16 closed, `OK (49 tests)`, coverage 14/90.
 

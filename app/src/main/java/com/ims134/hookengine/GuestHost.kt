@@ -1,6 +1,7 @@
 package com.ims134.hookengine
 
 import android.app.Application
+import android.content.ContentProvider
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.pm.ApplicationInfo
@@ -12,34 +13,66 @@ import java.io.StringWriter
 import java.util.zip.ZipFile
 
 /**
- * Session 18 — minimal ApplicationProxy-style guest loader.
+ * Session 20 — DualHost guest loader.
  *
- * Loads a guest APK's Application into this process, calls its
- * attachBaseContext + onCreate with a Context that reports the guest's
- * identity, and captures the first failure with full stack trace.
+ * Rule 15: engine behavior in native. The guest Application boot
+ * (instantiate + attachBaseContext + onCreate) is a native call into
+ * GuestBoot.cpp, matching the reference's ApplicationProxy.onCreate
+ * being a native method that constructs the guest Application.
  *
- * The purpose is NOT to make the guest boot. It is to surface the
- * first real integration wall — the point at which the 14/90 already
- * shipped is not enough, or the guest's assumptions about Context /
- * ClassLoader / native libs diverge from ours. The failure is the data.
- *
- * Rule 12: this harness reports its own outcome honestly. Success =
- * "harness ran, produced an outcome". Failure of the guest to boot is
- * a Result.outcome value, not an exception thrown at the caller.
+ * Kotlin's role is scaffolding: stage the APK, read manifest for
+ * reporting, call native boot, drive provider installation, register
+ * guest package for sig null-out.
  */
 object GuestHost {
     private const val TAG = "DualCore.Guest"
     @Volatile private var installed = false
 
+    private external fun nativeBootGuest(
+        apkPath: String,
+        guestContext: Context,
+        guestLoader: ClassLoader
+    ): Application?
+
     @Synchronized
     fun load(hostContext: Context, apkPath: String): Result {
         val result = Result(apkPath)
+
+        // Session 20b — if DualApplication already booted the guest at
+        // process start (APK was staged before launch), report that.
+        // ApplicationProxy is the single source of truth for guest boot.
+        val alreadyBooted = try { ApplicationProxy.getGuestApplication() } catch (_: Throwable) { null }
+        if (alreadyBooted != null) {
+            result.outcome = "booted-at-startup"
+            result.instantiated = true
+            result.attached = true
+            result.onCreated = true
+            result.guestApp = alreadyBooted
+            result.guestPackage = alreadyBooted.packageName
+            result.guestAppClass = alreadyBooted.javaClass.name
+            result.guestLoaderClass = alreadyBooted.classLoader?.javaClass?.name
+            result.loaderInstalled = true
+            // Attempt providers for reporting
+            try {
+                val prov = installGuestProviders(alreadyBooted, apkPath)
+                result.providersDeclared = prov.declaredCount
+                result.providersAttempted = prov.attempted
+                result.providersSucceeded = prov.succeeded
+                result.providersFailed = prov.failed
+                result.firstProviderError = prov.errors.firstOrNull()
+                result.firstProviderStack = prov.firstErrorStack
+            } catch (t: Throwable) {
+                result.firstProviderError = "installGuestProviders threw: $t"
+            }
+            return result.finish()
+        }
+
         if (installed) {
             result.outcome = "already-loaded"
             return result.finish()
         }
-        val t0 = System.currentTimeMillis()
         try {
+            // 0. APK existence + chmod read-only
             val apk = File(apkPath)
             if (!apk.exists()) {
                 result.outcome = "apk-missing"
@@ -47,24 +80,13 @@ object GuestHost {
                 return result.finish()
             }
             result.apkSize = apk.length()
-
-            // Session 18 fix #1 — ART on API 34+ refuses DexFile loading
-            // of any dex file that is writable by its owner. The check is
-            // (st_mode & S_IWUSR) != 0 in DexFile.openDexFileNative. The
-            // staged APK is user-writable because `run-as cp` preserves
-            // mode; clear the write bits before PathClassLoader runs.
             if (apk.canWrite() && !apk.setReadOnly()) {
                 result.outcome = "apk-readonly-failed"
-                result.error = "cannot chmod ${apk.path} to read-only " +
-                        "(required for ART 34+ dex loading)"
+                result.error = "chmod failed on ${apk.path}"
                 return result.finish()
             }
-            Log.d(TAG, "loading guest apk=$apkPath size=${result.apkSize} " +
-                    "writable=${apk.canWrite()}")
 
-            // 1. Extract guest arm64-v8a native libs to a readable private dir.
-            //    PathClassLoader's librarySearchPath must point at the dir
-            //    containing the .so files directly (not a per-abi subdir).
+            // 1. Extract arm64-v8a native libs
             val libDir = File(hostContext.filesDir, "guest-libs").apply { mkdirs() }
             var extracted = 0
             try {
@@ -86,25 +108,7 @@ object GuestHost {
             }
             result.libsExtracted = extracted
 
-            // 2. GuestClassLoader over the guest APK, parented to our loader.
-            //    Guest-first lookup for bundled-dependency prefixes (kotlin.*,
-            //    androidx.*, okhttp3.*, etc.) so Viber's own versions win over
-            //    host's; parent-first for everything else so host engine
-            //    classes stay reachable from guest code.
-            //
-            //    NO ClassLoaderBridge.installFor call. Prepending host dex
-            //    elements to guest dexElements shadows the guest's own bundled
-            //    dependencies and produces NoSuchMethodError on guest calls
-            //    into its own stdlib (observed: StringsKt.i0 from
-            //    ViberApplication.attachBaseContext). Parent delegation is
-            //    sufficient and non-shadowing.
-            val hostLoader = GuestHost::class.java.classLoader!!
-            val guestLoader = GuestClassLoader(apkPath, libDir.absolutePath, hostLoader)
-            result.guestLoaderClass = guestLoader.javaClass.name
-            result.loaderInstalled = true
-            Log.d(TAG, "guest loader: GuestClassLoader (parent-delegation, no dex merge)")
-
-            // 3. Read guest Application class from its manifest.
+            // 2. Read manifest for reporting
             val pm = hostContext.packageManager
             val flags = PackageManager.GET_META_DATA or
                     PackageManager.GET_ACTIVITIES or
@@ -113,118 +117,77 @@ object GuestHost {
                     PackageManager.GET_PROVIDERS
             val guestInfo = pm.getPackageArchiveInfo(apkPath, flags) ?: run {
                 result.outcome = "no-archive-info"
-                result.error = "getPackageArchiveInfo returned null for $apkPath"
+                result.error = "getPackageArchiveInfo null"
                 return result.finish()
             }
             val guestPkg = guestInfo.packageName ?: ""
             result.guestPackage = guestPkg
-
             val guestAppInfo = guestInfo.applicationInfo ?: run {
                 result.outcome = "no-app-info"
-                result.error = "PackageInfo has no applicationInfo"
+                result.error = "no applicationInfo"
                 return result.finish()
             }
             guestAppInfo.sourceDir = apkPath
             guestAppInfo.publicSourceDir = apkPath
+            result.guestAppClass = guestAppInfo.className
 
-            val guestAppClassName = guestAppInfo.className
-            result.guestAppClass = guestAppClassName
-            if (guestAppClassName.isNullOrEmpty()) {
-                result.outcome = "no-app-class-name"
-                result.error = "<application> has no android:name in guest manifest"
+            // 3. Native boot — Application construction + attach + onCreate
+            // 3. Native boot — Application construction + attach + onCreate.
+            // We construct one PathClassLoader in Kotlin, pass it to both:
+            //  - GuestContext (so guest code's getClassLoader() returns it)
+            //  - nativeBootGuest (so guest Application is instantiated via it)
+            // This guarantees class identity: the loader Viber's code sees
+            // via getClassLoader() is exactly the one its Application was
+            // instantiated through. Session 18's fix preserved this; Session
+            // 20's refactor lost it (attachBaseContext → StringsKt.i0).
+            val guestLoader: ClassLoader = try {
+                GuestClassLoader(apkPath, libDir.absolutePath, hostContext.classLoader)
+            } catch (t: Throwable) {
+                Log.e(TAG, "guest PathClassLoader ctor failed: $t", t)
+                result.outcome = "loader-ctor-failed"
+                result.error = t.toString()
                 return result.finish()
             }
+            result.guestLoaderClass = guestLoader.javaClass.name
+            result.loaderInstalled = true
 
-            // 4. Instantiate guest Application via the guest loader.
-            val guestAppCls = Class.forName(guestAppClassName, true, guestLoader)
-            val guestApp = guestAppCls.getDeclaredConstructor()
-                .apply { isAccessible = true }
-                .newInstance() as Application
+            val guestCtx = GuestContext(hostContext, guestPkg, guestAppInfo, guestLoader)
+            val guestApp = nativeBootGuest(apkPath, guestCtx, guestLoader)
+            if (guestApp == null) {
+                result.outcome = "native-boot-failed"
+                result.error = "nativeBootGuest returned null; see DualCore.Native log"
+                return result.finish()
+            }
             result.instantiated = true
+            result.attached = true
+            result.onCreated = true
+            result.guestApp = guestApp
+            Log.d(TAG, "native boot OK for $guestPkg")
 
-            // 5. Guest context that reports the guest's package identity.
-            val guestCtx = GuestContext(hostContext, guestLoader, guestPkg, guestAppInfo)
-
-            // 6. attachBaseContext (protected on ContextWrapper — reflection).
-            // Application does NOT declare attachBaseContext; it is inherited
-            // from ContextWrapper. getDeclaredMethod only searches the exact
-            // class, so walk the hierarchy to find the actual declaration.
-            var attachOwner: Class<*>? = Application::class.java
-            var attachM: java.lang.reflect.Method? = null
-            while (attachOwner != null) {
-                try {
-                    attachM = attachOwner.getDeclaredMethod(
-                        "attachBaseContext", Context::class.java)
-                    break
-                } catch (_: NoSuchMethodException) {
-                    attachOwner = attachOwner.superclass
-                }
-            }
-            if (attachM == null) {
-                result.outcome = "attach-method-missing"
-                result.error =
-                    "attachBaseContext(Context) not found in Application hierarchy"
-                return result.finish()
-            }
-            attachM.isAccessible = true
+            // 4. ContentProviders (Session 19 instrumentation)
             try {
-                attachM.invoke(guestApp, guestCtx)
-                result.attached = true
-            } catch (t: Throwable) {
-                val inner = (t as? java.lang.reflect.InvocationTargetException)
-                    ?.targetException ?: t
-                result.outcome = "attach-failed"
-                result.error = stackOf(inner)
-                return result.finish()
-            }
-
-            // 7. onCreate (public on Application).
-            try {
-                guestApp.onCreate()
-                result.onCreated = true
-            } catch (t: Throwable) {
-                result.outcome = "oncreate-failed"
-                result.error = stackOf(t)
-                return result.finish()
-            }
-
-            // 8. ContentProviders (Session 19a). Runs AFTER onCreate, not
-            //    before as Android does — deliberate so a provider throw
-            //    doesn't mask the Application boot result.
-            try {
-                val prov = installGuestProviders(hostContext, guestLoader, guestPkg, apkPath)
+                val prov = installGuestProviders(guestApp, apkPath)
                 result.providersDeclared = prov.declaredCount
                 result.providersAttempted = prov.attempted
                 result.providersSucceeded = prov.succeeded
                 result.providersFailed = prov.failed
                 result.firstProviderError = prov.errors.firstOrNull()
                 result.firstProviderStack = prov.firstErrorStack
-                Log.d(TAG, "providers: declared=${prov.declaredCount} " +
-                        "attempted=${prov.attempted} " +
-                        "ok=${prov.succeeded} fail=${prov.failed}")
             } catch (t: Throwable) {
                 Log.e(TAG, "provider install threw: $t")
                 result.firstProviderError = "installGuestProviders threw: $t"
             }
 
-            installed = true
-            result.guestApp = guestApp
-
-            // Session 18d — register guest package for signature null-out.
-            // The host proxy already nulls its own package's signatures.
-            // Registering the guest makes the proxy also null the guest's,
-            // so guest code that reads its own PackageInfo.signatures sees
-            // the same empty result a real multi-tenant install would
-            // produce. Requirement surfaced by Session 18c probe; no
-            // reference decomp needed (Rule 5 behavior match).
+            // 5. Register guest for sig null-out
             try {
                 PmSpoof.signatureNullOutPackages =
                     PmSpoof.signatureNullOutPackages + guestPkg
-                Log.d(TAG, "registered guest package for sig null-out: $guestPkg")
+                Log.d(TAG, "registered guest sig null-out: $guestPkg")
             } catch (t: Throwable) {
-                Log.w(TAG, "sig null-out registration failed: $t")
+                Log.w(TAG, "sig null-out registration: $t")
             }
 
+            installed = true
             result.outcome = "booted"
             return result.finish()
         } catch (t: Throwable) {
@@ -234,44 +197,86 @@ object GuestHost {
         }
     }
 
-    /**
-     * Session 18c diagnostic matrix. One run yields answers to all the
-     * "why can't we see Viber from AMS" questions:
-     *   1. Is Viber in getInstalledPackages? (visibility, not uninstall)
-     *   2. Does getPackageInfo(name, 0) work? (visibility vs flag-specific)
-     *   3. Does getPackageInfo(name, GET_SIGNATURES) work? (the probe case)
-     *   4. Does getPackageArchiveInfo(apk, GET_SIGNATURES) work? (fallback path)
-     * Each row is reported honestly whether it passed or threw.
-     */
+    fun installGuestProviders(guestApp: Application, apkPath: String): ProviderResult {
+        val result = ProviderResult()
+        val pm = guestApp.packageManager
+
+        val info = try {
+            pm.getPackageArchiveInfo(apkPath, PackageManager.GET_PROVIDERS)
+        } catch (t: Throwable) {
+            result.error = "getPackageArchiveInfo threw: $t"
+            return result
+        }
+        val providers = info?.providers
+        if (providers.isNullOrEmpty()) {
+            result.error = if (providers == null) "providers null" else "zero providers"
+            return result
+        }
+        result.declaredCount = providers.size
+
+        val guestInfo = guestApp.applicationInfo ?: info.applicationInfo ?: ApplicationInfo().apply {
+            packageName = guestApp.packageName
+            sourceDir = apkPath
+            publicSourceDir = apkPath
+        }
+        guestInfo.sourceDir = apkPath
+        guestInfo.publicSourceDir = apkPath
+        if (guestInfo.packageName.isNullOrEmpty()) guestInfo.packageName = guestApp.packageName
+
+        for (pin in providers) {
+            if (pin == null) continue
+            result.attempted++
+            val rawName = pin.name ?: ""
+            if (rawName.isEmpty()) {
+                result.failed++
+                result.errors += "<unnamed>: ProviderInfo.name null"
+                continue
+            }
+            val fqName = when {
+                rawName.startsWith(".") -> guestApp.packageName + rawName
+                !rawName.contains(".") -> "${guestApp.packageName}.$rawName"
+                else -> rawName
+            }
+            try {
+                pin.applicationInfo = guestInfo
+                if (pin.packageName.isNullOrEmpty()) pin.packageName = guestApp.packageName
+                if (pin.processName.isNullOrEmpty()) pin.processName = guestApp.packageName
+
+                val cls = Class.forName(fqName, true, guestApp.classLoader)
+                val ctor = cls.getDeclaredConstructor().apply { isAccessible = true }
+                val provider = ctor.newInstance() as ContentProvider
+                provider.attachInfo(guestApp, pin)
+                provider.onCreate()
+                result.succeeded++
+                result.installed += fqName
+            } catch (t: Throwable) {
+                val inner = (t as? java.lang.reflect.InvocationTargetException)
+                    ?.targetException ?: t
+                result.failed++
+                result.errors += "$fqName: ${inner.javaClass.simpleName}: ${inner.message}"
+                if (result.firstErrorStack == null) result.firstErrorStack = stackOf(inner)
+            }
+        }
+        return result
+    }
+
     fun probeGuestSignatureSpoof(hostContext: Context, guestPackage: String): SpoofProbe {
         val result = SpoofProbe()
         result.guestPackage = guestPackage
         val pm = hostContext.packageManager
 
-        // 1. getInstalledPackages(0) — is Viber in the visible set?
         try {
             val installed = pm.getInstalledPackages(0)
             result.installedTotal = installed.size
             result.installedHasGuest = installed.any { it.packageName == guestPackage }
-            Log.d(TAG, "probe: getInstalledPackages total=${installed.size} " +
-                    "hasGuest=${result.installedHasGuest}")
-        } catch (t: Throwable) {
-            result.installedError = t.toString()
-            Log.e(TAG, "probe: getInstalledPackages threw $t")
-        }
+        } catch (t: Throwable) { result.installedError = t.toString() }
 
-        // 2. getPackageInfo(name, 0)
         try {
             val pi0 = pm.getPackageInfo(guestPackage, 0)
             result.info0Ok = true
             result.info0Version = pi0.versionName ?: "?"
-            Log.d(TAG, "probe: getPackageInfo(name,0) OK v=${result.info0Version}")
-        } catch (t: Throwable) {
-            result.info0Error = t.toString()
-            Log.e(TAG, "probe: getPackageInfo(name,0) threw $t")
-        }
+        } catch (t: Throwable) { result.info0Error = t.toString() }
 
-        // 3. getPackageInfo(name, GET_SIGNATURES)
         try {
             @Suppress("DEPRECATION")
             val piSig = pm.getPackageInfo(guestPackage, PackageManager.GET_SIGNATURES)
@@ -280,13 +285,8 @@ object GuestHost {
             result.realSigCount = sigs?.size ?: 0
             result.realSigNulled = (sigs == null || sigs.isEmpty())
             if (sigs != null && sigs.isNotEmpty()) result.firstSigHash = sigs[0].hashCode()
-            Log.d(TAG, "probe: getPackageInfo(name,SIG) OK sigCount=${sigs?.size ?: 0}")
-        } catch (t: Throwable) {
-            result.sigError = t.toString()
-            Log.e(TAG, "probe: getPackageInfo(name,SIG) threw $t")
-        }
+        } catch (t: Throwable) { result.sigError = t.toString() }
 
-        // 4. getPackageArchiveInfo(apk, GET_SIGNATURES)
         try {
             val apk = File(hostContext.filesDir, "viber.apk").absolutePath
             @Suppress("DEPRECATION")
@@ -295,149 +295,27 @@ object GuestHost {
                 @Suppress("DEPRECATION")
                 val sigs = api.signatures
                 result.archiveSigCount = sigs?.size ?: 0
-                Log.d(TAG, "probe: getPackageArchiveInfo OK sigCount=${sigs?.size ?: 0}")
-            } else {
-                result.archiveError = "null"
-            }
-        } catch (t: Throwable) {
-            result.archiveError = t.toString()
-            Log.e(TAG, "probe: getPackageArchiveInfo threw $t")
-        }
+            } else result.archiveError = "null"
+        } catch (t: Throwable) { result.archiveError = t.toString() }
         return result
-    }
-
-    class SpoofProbe {
-        var guestPackage: String = ""
-        var installedTotal: Int = 0
-        var installedHasGuest: Boolean = false
-        var installedError: String? = null
-        var info0Ok: Boolean = false
-        var info0Version: String = ""
-        var info0Error: String? = null
-        var realSigCount: Int = 0
-        var realSigNulled: Boolean = false
-        var firstSigHash: Int = 0
-        var sigError: String? = null
-        var archiveSigCount: Int = 0
-        var archiveError: String? = null
-    }
-
-    /**
-     * Session 19a — install guest ContentProviders and run their onCreate.
-     *
-     * Normal Android: ActivityThread.installContentProviders runs BEFORE
-     * Application.onCreate. Ours runs AFTER, deliberately, so a provider
-     * throwing doesn't prevent Application.onCreate from being observed.
-     * Divergence documented; reorder if a provider fails specifically
-     * because Application state was missing.
-     *
-     * ProviderInfo comes from getPackageArchiveInfo(GET_PROVIDERS). Each
-     * provider is instantiated via the guest ClassLoader, given our
-     * GuestContext via ContentProvider.attachInfo(Context, ProviderInfo),
-     * then its onCreate() is called. Failures are captured per-provider,
-     * not thrown — Rule 12, the probe reports, not asserts.
-     */
-    fun installGuestProviders(
-        hostContext: Context,
-        guestLoader: ClassLoader,
-        guestPkg: String,
-        apkPath: String
-    ): ProviderResult {
-        val result = ProviderResult()
-        val pm = hostContext.packageManager
-
-        val info = try {
-            pm.getPackageArchiveInfo(apkPath, PackageManager.GET_PROVIDERS)
-        } catch (t: Throwable) {
-            result.error = "getPackageArchiveInfo threw: $t"
-            Log.e(TAG, "installGuestProviders: archive read failed: $t")
-            return result
-        }
-        val providers = info?.providers
-        if (providers.isNullOrEmpty()) {
-            result.error = if (providers == null) "providers null" else "zero providers declared"
-            Log.d(TAG, "installGuestProviders: ${result.error}")
-            return result
-        }
-        result.declaredCount = providers.size
-        Log.d(TAG, "installGuestProviders: ${providers.size} providers declared")
-
-        val guestInfo = info.applicationInfo ?: ApplicationInfo().apply {
-            packageName = guestPkg
-            sourceDir = apkPath
-            publicSourceDir = apkPath
-        }
-        guestInfo.sourceDir = apkPath
-        guestInfo.publicSourceDir = apkPath
-        if (guestInfo.packageName.isNullOrEmpty()) guestInfo.packageName = guestPkg
-
-        val guestCtx = GuestContext(hostContext, guestLoader, guestPkg, guestInfo)
-
-        for (pin in providers) {
-            if (pin == null) continue
-            result.attempted++
-            val rawName = pin.name ?: ""
-            if (rawName.isEmpty()) {
-                result.failed++
-                result.errors += "<unnamed-provider>: ProviderInfo.name was null"
-                continue
-            }
-            val fqName = when {
-                rawName.startsWith(".") -> guestPkg + rawName
-                !rawName.contains(".") -> "$guestPkg.$rawName"
-                else -> rawName
-            }
-            try {
-                // Normalize archive-derived fields the provider may read.
-                if (pin.applicationInfo == null) pin.applicationInfo = guestInfo
-                pin.applicationInfo?.let { ai ->
-                    ai.sourceDir = apkPath
-                    ai.publicSourceDir = apkPath
-                    if (ai.packageName.isNullOrEmpty()) ai.packageName = guestPkg
-                }
-                if (pin.packageName.isNullOrEmpty()) pin.packageName = guestPkg
-
-                Log.d(TAG, "provider[$fqName] pkg=${pin.packageName} " +
-                        "exported=${pin.exported}")
-
-                val cls = Class.forName(fqName, true, guestLoader)
-                val ctor = cls.getDeclaredConstructor().apply { isAccessible = true }
-                val provider = ctor.newInstance() as android.content.ContentProvider
-
-                provider.attachInfo(guestCtx, pin)
-                provider.onCreate()
-
-                result.succeeded++
-                result.installed += fqName
-                Log.d(TAG, "provider OK: $fqName")
-            } catch (t: Throwable) {
-                val inner = (t as? java.lang.reflect.InvocationTargetException)
-                    ?.targetException ?: t
-                result.failed++
-                val msg = "${inner.javaClass.simpleName}: ${inner.message}"
-                result.errors += "$fqName: $msg"
-                if (result.firstErrorStack == null) result.firstErrorStack = stackOf(inner)
-                Log.e(TAG, "provider FAIL[$fqName]: $msg")
-            }
-        }
-        return result
-    }
-
-    class ProviderResult {
-        var declaredCount: Int = 0
-        var attempted: Int = 0
-        var succeeded: Int = 0
-        var failed: Int = 0
-        val installed = mutableListOf<String>()
-        val errors = mutableListOf<String>()
-        var firstErrorStack: String? = null
-        var error: String? = null
     }
 
     private fun stackOf(t: Throwable): String {
         val sw = StringWriter()
         t.printStackTrace(PrintWriter(sw))
         return sw.toString()
+    }
+
+    class GuestContext(
+        private val hostBase: Context,
+        private val guestPackage: String,
+        private val guestAppInfo: ApplicationInfo,
+        private val guestLoader: ClassLoader
+    ) : ContextWrapper(hostBase) {
+        override fun getPackageName(): String = guestPackage
+        override fun getApplicationInfo(): ApplicationInfo = guestAppInfo
+        override fun getApplicationContext(): Context = this
+        override fun getClassLoader(): ClassLoader = guestLoader
     }
 
     class Result(val apkPath: String) {
@@ -454,8 +332,6 @@ object GuestHost {
         var onCreated: Boolean = false
         var elapsedMs: Long = 0
         var guestApp: Application? = null
-
-        // Session 19a
         var providersDeclared: Int = 0
         var providersAttempted: Int = 0
         var providersSucceeded: Int = 0
@@ -468,26 +344,40 @@ object GuestHost {
             elapsedMs = System.currentTimeMillis() - t0
             Log.d(TAG, "== guest-load ==")
             Log.d(TAG, "  outcome=$outcome elapsed=${elapsedMs}ms")
-            Log.d(TAG, "  apk=$apkPath size=$apkSize libsExtracted=$libsExtracted")
             Log.d(TAG, "  pkg=$guestPackage appClass=$guestAppClass")
-            Log.d(TAG, "  loader=$guestLoaderClass chained=$loaderInstalled")
+            Log.d(TAG, "  loader=$guestLoaderClass installed=$loaderInstalled")
             Log.d(TAG, "  instantiated=$instantiated attached=$attached onCreated=$onCreated")
-            Log.d(TAG, "  providers: declared=$providersDeclared attempted=$providersAttempted " +
-                    "ok=$providersSucceeded fail=$providersFailed")
+            Log.d(TAG, "  providers: declared=$providersDeclared attempted=$providersAttempted ok=$providersSucceeded fail=$providersFailed")
             firstProviderError?.let { Log.e(TAG, "  first provider error: $it") }
             error?.let { Log.e(TAG, "  error:\n$it") }
             return this
         }
     }
 
-    class GuestContext(
-        base: Context,
-        private val guestLoader: ClassLoader,
-        private val guestPackage: String,
-        private val guestAppInfo: ApplicationInfo
-    ) : ContextWrapper(base) {
-        override fun getPackageName(): String = guestPackage
-        override fun getApplicationInfo(): ApplicationInfo = guestAppInfo
-        override fun getClassLoader(): ClassLoader = guestLoader
+    class ProviderResult {
+        var declaredCount: Int = 0
+        var attempted: Int = 0
+        var succeeded: Int = 0
+        var failed: Int = 0
+        val installed = mutableListOf<String>()
+        val errors = mutableListOf<String>()
+        var firstErrorStack: String? = null
+        var error: String? = null
+    }
+
+    class SpoofProbe {
+        var guestPackage: String = ""
+        var installedTotal: Int = 0
+        var installedHasGuest: Boolean = false
+        var installedError: String? = null
+        var info0Ok: Boolean = false
+        var info0Version: String = ""
+        var info0Error: String? = null
+        var realSigCount: Int = 0
+        var realSigNulled: Boolean = false
+        var firstSigHash: Int = 0
+        var sigError: String? = null
+        var archiveSigCount: Int = 0
+        var archiveError: String? = null
     }
 }
