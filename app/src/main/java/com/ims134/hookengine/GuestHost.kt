@@ -6,7 +6,6 @@ import android.content.ContextWrapper
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.util.Log
-import dalvik.system.PathClassLoader
 import java.io.File
 import java.io.PrintWriter
 import java.io.StringWriter
@@ -48,7 +47,20 @@ object GuestHost {
                 return result.finish()
             }
             result.apkSize = apk.length()
-            Log.d(TAG, "loading guest apk=$apkPath size=${result.apkSize}")
+
+            // Session 18 fix #1 — ART on API 34+ refuses DexFile loading
+            // of any dex file that is writable by its owner. The check is
+            // (st_mode & S_IWUSR) != 0 in DexFile.openDexFileNative. The
+            // staged APK is user-writable because `run-as cp` preserves
+            // mode; clear the write bits before PathClassLoader runs.
+            if (apk.canWrite() && !apk.setReadOnly()) {
+                result.outcome = "apk-readonly-failed"
+                result.error = "cannot chmod ${apk.path} to read-only " +
+                        "(required for ART 34+ dex loading)"
+                return result.finish()
+            }
+            Log.d(TAG, "loading guest apk=$apkPath size=${result.apkSize} " +
+                    "writable=${apk.canWrite()}")
 
             // 1. Extract guest arm64-v8a native libs to a readable private dir.
             //    PathClassLoader's librarySearchPath must point at the dir
@@ -74,20 +86,23 @@ object GuestHost {
             }
             result.libsExtracted = extracted
 
-            // 2. PathClassLoader over the guest APK, parented to our loader,
-            //    with the extracted lib dir as native search path.
+            // 2. GuestClassLoader over the guest APK, parented to our loader.
+            //    Guest-first lookup for bundled-dependency prefixes (kotlin.*,
+            //    androidx.*, okhttp3.*, etc.) so Viber's own versions win over
+            //    host's; parent-first for everything else so host engine
+            //    classes stay reachable from guest code.
+            //
+            //    NO ClassLoaderBridge.installFor call. Prepending host dex
+            //    elements to guest dexElements shadows the guest's own bundled
+            //    dependencies and produces NoSuchMethodError on guest calls
+            //    into its own stdlib (observed: StringsKt.i0 from
+            //    ViberApplication.attachBaseContext). Parent delegation is
+            //    sufficient and non-shadowing.
             val hostLoader = GuestHost::class.java.classLoader!!
-            val guestLoader = PathClassLoader(apkPath, libDir.absolutePath, hostLoader)
+            val guestLoader = GuestClassLoader(apkPath, libDir.absolutePath, hostLoader)
             result.guestLoaderClass = guestLoader.javaClass.name
-
-            // Chain host dex elements into guest so guest can see our classes
-            // (Fake_connect, ParcelRewriter, PmSpoof, etc.).
-            try {
-                result.classLoaderChained = ClassLoaderBridge.installFor(guestLoader, hostLoader)
-            } catch (t: Throwable) {
-                result.classLoaderChained = false
-                Log.w(TAG, "ClassLoaderBridge.installFor failed: $t")
-            }
+            result.loaderInstalled = true
+            Log.d(TAG, "guest loader: GuestClassLoader (parent-delegation, no dex merge)")
 
             // 3. Read guest Application class from its manifest.
             val pm = hostContext.packageManager
@@ -131,8 +146,26 @@ object GuestHost {
             val guestCtx = GuestContext(hostContext, guestLoader, guestPkg, guestAppInfo)
 
             // 6. attachBaseContext (protected on ContextWrapper — reflection).
-            val attachM = Application::class.java
-                .getDeclaredMethod("attachBaseContext", Context::class.java)
+            // Application does NOT declare attachBaseContext; it is inherited
+            // from ContextWrapper. getDeclaredMethod only searches the exact
+            // class, so walk the hierarchy to find the actual declaration.
+            var attachOwner: Class<*>? = Application::class.java
+            var attachM: java.lang.reflect.Method? = null
+            while (attachOwner != null) {
+                try {
+                    attachM = attachOwner.getDeclaredMethod(
+                        "attachBaseContext", Context::class.java)
+                    break
+                } catch (_: NoSuchMethodException) {
+                    attachOwner = attachOwner.superclass
+                }
+            }
+            if (attachM == null) {
+                result.outcome = "attach-method-missing"
+                result.error =
+                    "attachBaseContext(Context) not found in Application hierarchy"
+                return result.finish()
+            }
             attachM.isAccessible = true
             try {
                 attachM.invoke(guestApp, guestCtx)
@@ -180,7 +213,7 @@ object GuestHost {
         var guestPackage: String? = null
         var guestAppClass: String? = null
         var guestLoaderClass: String? = null
-        var classLoaderChained: Boolean = false
+        var loaderInstalled: Boolean = false
         var instantiated: Boolean = false
         var attached: Boolean = false
         var onCreated: Boolean = false
@@ -194,7 +227,7 @@ object GuestHost {
             Log.d(TAG, "  outcome=$outcome elapsed=${elapsedMs}ms")
             Log.d(TAG, "  apk=$apkPath size=$apkSize libsExtracted=$libsExtracted")
             Log.d(TAG, "  pkg=$guestPackage appClass=$guestAppClass")
-            Log.d(TAG, "  loader=$guestLoaderClass chained=$classLoaderChained")
+            Log.d(TAG, "  loader=$guestLoaderClass chained=$loaderInstalled")
             Log.d(TAG, "  instantiated=$instantiated attached=$attached onCreated=$onCreated")
             error?.let { Log.e(TAG, "  error:\n$it") }
             return this

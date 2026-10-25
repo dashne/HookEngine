@@ -1,4 +1,4 @@
-Last verified build: Session 17, verified on device 2026-10-25, OK (49 tests). Session 18 opened 2026-10-25 with Rule 2 amended: DualHost integration unblocked; reference reproduction is now best-effort per method (decomp on real failure, not before). handleJHMethod parked indefinitely per operator; stub, spec (HANDLEJHMETHOD_DECOMP_SPEC.md), and scaffolding helpers all stay on disk untouched. Coverage 14/90.
+Last verified build: Session 18, verified on device 2026-10-25, OK (1 test) on GuestLoadTest. outcome=booted: Viber's Application lifecycle (instantiate → attachBaseContext → onCreate) executes inside our process under our hooks. Rule 2 amended this session: DualHost integration unblocked at any coverage level; reference reproduction is best-effort per method (decomp on real failure). handleJHMethod parked indefinitely per operator. Coverage 14/90.
 
 Session 16 closed 2026-10-25: `:remote` `startService` flake investigated. Root cause is AMS state — process is marked bad before our first `startService` at IntegrationTest.kt:21 — not a code crash. Passing runs show `:remote` starting cleanly (`attachBaseContext` → `onCreate` → `onStartCommand` → cleanup kill; no FATAL, no signal, no ScopedCheck crash). Failure rate observed across Sessions 13–16: 3 pass / 2 fail. Mitigation: retry-with-backoff (3 attempts, 2s/4s) in `IntegrationTest.selftestReportIsComplete`. Retry recovery path unverified — only the green path executed post-mitigation (`OK (49 tests)`, no `startService attempt` log lines). Not a root-cause fix. Coverage 14/90, unchanged.
 
@@ -1198,3 +1198,37 @@ New full section: "Session 16 — :remote flake investigated, retry mitigated, r
 "Test count history" and "Coverage history" appended with Session 16.
 
 "What Session 17 must do FIRST" replaces old "What Session 16 must do FIRST."
+
+
+## Session 18 — DualHost pivot, Viber Application boots — 2026-10-25
+
+### Mission #1 status: 14/90 — coverage unchanged, pivot validated
+
+Session 18 opened with Rule 2 amended: DualHost integration unblocked, reference reproduction becomes pull-driven (decomp a method when a real integration failure names it, not before). `handleJHMethod` parked indefinitely per operator; stub, spec, scaffolding all stay on disk untouched.
+
+### Deliverables
+
+- **`GuestHost.kt`** — ApplicationProxy-style guest loader. Stages a guest APK in private storage, extracts arm64-v8a native libs, builds a `GuestClassLoader` over the APK, chains to host via parent-delegation, reads guest's `<application android:name>` from the manifest, instantiates the class, attaches a `GuestContext` (spoofed `getPackageName` / `getApplicationInfo` / `getClassLoader`), calls `attachBaseContext` and `onCreate`. Reports a single named outcome per run; writes `files/guest-boot.txt` for offline inspection.
+- **`GuestClassLoader.kt`** — `BaseDexClassLoader` subclass with guest-first lookup for a known list of bundled-dependency prefixes (`kotlin.`, `androidx.`, `okhttp3.`, `io.reactivex.`, `com.facebook.`, `com.google.gson.`, etc.). Parent-first for everything else. Solves the class-shadowing wall documented in the run history below.
+- **`GuestLoadTest.kt`** — instrumentation harness for `GuestHost.load(ctx, apkPath)`. Rule 12 compliance: asserts only that `result.outcome` is set; whether Viber boots is reported as data, not asserted.
+
+### Run history (three walls, three fixes)
+
+| Run | Wall | Fix |
+|---|---|---|
+| 1 | `SecurityException: Writable dex file '.../viber.apk' is not allowed` — ART 34+ refuses to load dex from a writable file | `File.setReadOnly()` before `PathClassLoader` construction |
+| 2 | `NoSuchMethodException: android.app.Application.attachBaseContext [class android.content.Context]` — `Application` inherits from `ContextWrapper`; `getDeclaredMethod` searches only the exact class | Walk `Application` superclass hierarchy to find the declaration |
+| 3 | `NoSuchMethodError: No static method i0(String,String)Z in kotlin.text.StringsKt` — `PathClassLoader(parent=hostLoader)` is parent-first, so `kotlin.text.StringsKt` resolved from the host APK (our engine's bundled stdlib, no `i0`), not Viber's dex | `GuestClassLoader` inverts delegation for bundled-dependency prefixes; `ClassLoaderBridge.installFor` removed (its dexElements merge had made it worse by prepending host elements into guest) |
+| 4 | ✅ `outcome=booted` — Viber's `Application.attachBaseContext` → `onCreate` completed | — |
+
+### What "booted" does not mean
+
+The `Application` lifecycle ran. No Activity, no ContentProvider, no network, no Binder IPC from guest code. `tnFIN` code 3 was not exercised against a real caller (no `ParcelRewriter: code 3 signatures nulled` line in the run log). `PmSpoof`'s `getPackageInfo` handler only nulls signatures for `ctx.packageName = com.ims134.hookengine`; a Viber-side request for its own signatures would return real values. These are the next integration targets.
+
+### Rule 12 note
+
+`GuestLoadTest.loadViberReportsOutcome` asserts only that `result.outcome != "?"`. Every layer of the harness (loader construction, manifest read, instantiate, attach, onCreate) is reported in `guest-boot.txt` and `logcat -s DualCore.Guest`; the test does not assert "booted" because boot success is a fact to observe, not a gate to pass. When integration fails, the failure surfaces in the outcome file, not as a test failure — this is by design, so guest regressions don't disguise loader regressions.
+
+### Coverage: 14/90 (unchanged)
+
+No new reference methods ported. Rule 3 exception stated openly: the pivot is a strategic realignment, not coverage growth. First coverage growth under the pivot will occur when a real integration failure names a specific reference method (or when a specific integration behavior requires extending an existing port — see `PmSpoof` guest-package null-out on the follow-up probe).

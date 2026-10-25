@@ -41,7 +41,7 @@ class GuestLoadTest {
             appendLine("guestPackage=${result.guestPackage}")
             appendLine("guestAppClass=${result.guestAppClass}")
             appendLine("guestLoaderClass=${result.guestLoaderClass}")
-            appendLine("classLoaderChained=${result.classLoaderChained}")
+            appendLine("classLoaderChained=${result.loaderInstalled}")
             appendLine("instantiated=${result.instantiated}")
             appendLine("attached=${result.attached}")
             appendLine("onCreated=${result.onCreated}")
