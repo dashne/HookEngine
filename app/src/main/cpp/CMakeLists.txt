@@ -19,6 +19,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         BinderTransactHook.cpp
         CppParcelRewriter.cpp
         ProxyBridge.cpp
+        ChainHook.cpp
         ApplicationProxy.cpp
         GuestBoot.cpp
         test_item1.cpp

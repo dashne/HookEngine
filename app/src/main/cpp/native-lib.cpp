@@ -347,11 +347,6 @@ Java_com_ims134_hookengine_RemoteService_diagRawZip(JNIEnv* env, jobject, jstrin
 
 // ─────────────────────────────────────────────────────────────────────────
 // Test harness JNI bridge (§7.3)
-//
-// Kotlin NativeTestBridge.runSuite(name) returns an array of strings, one
-// per test case, format "PASS|name|detail" or "FAIL|name|detail".
-// Return value of RunTestSuite (pass count) is intentionally discarded —
-// the array is the source of truth for assertions.
 // ─────────────────────────────────────────────────────────────────────────
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_runSuite(JNIEnv* env, jobject, jstring jsuite) {
@@ -379,9 +374,12 @@ Java_com_ims134_hookengine_NativeTestBridge_runSuite(JNIEnv* env, jobject, jstri
     return arr;
 }
 
+extern "C" void ChainResetAll();
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_uninstallAll(JNIEnv*, jobject) {
     UninstallAllHooks();
+    ChainResetAll();
 }
 
 extern "C" void SetItem4Paths(const char* realDir, const char* fakeDir);
@@ -479,10 +477,7 @@ extern "C" int RunRegressionBug1(JNIEnv* env) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// §7.7 — selftest.txt file channel. Called once per onStartCommand, after
-// all 5 item suites have run (sink holds 23 lines). Writes each as
-// "PASS|name|detail" or "FAIL|name|detail", then "END <pass> <fail>",
-// then resets the sink for the next run.
+// §7.7 — selftest.txt file channel.
 // ─────────────────────────────────────────────────────────────────────────
 extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_RemoteService_writeSelftestFile(
@@ -551,11 +546,8 @@ Java_com_ims134_hookengine_HiddenApiBridge_probe(JNIEnv*, jobject) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
-// PmSpoof JNI bridge — bypasses hiddenapi (JNI GetMethodID/NewObject do not
-// consult hiddenapi; only Java-level reflection does).
+// PmSpoof JNI bridge — bypasses hiddenapi
 // ─────────────────────────────────────────────────────────────────────────
-
-
 
 static jobject ReadMListFrom(JNIEnv* env, jclass c, jobject slice, const char* label) {
     if (!c) return nullptr;
@@ -571,12 +563,10 @@ extern "C" JNIEXPORT jobject JNICALL
 Java_com_ims134_hookengine_PmSpoof_getSliceListNative(JNIEnv* env, jobject, jobject slice) {
     if (!slice) return nullptr;
 
-    // 1. GetFieldID on leaf — walks superclasses (this is the key line).
     jclass leaf = env->GetObjectClass(slice);
     if (jobject v = ReadMListFrom(env, leaf, slice, "leaf")) { env->DeleteLocalRef(leaf); return v; }
     env->DeleteLocalRef(leaf);
 
-    // 2. Explicit walk through known names.
     const char* names[] = {
             "android/content/pm/BaseParceledListSlice",
             "android/content/pm/ParceledListSlice",
@@ -589,7 +579,6 @@ Java_com_ims134_hookengine_PmSpoof_getSliceListNative(JNIEnv* env, jobject, jobj
         env->DeleteLocalRef(c);
     }
 
-    // 3. Fallback method names (in case ROM renamed getList).
     const char* methodNames[] = { "getList", "getElements", "elements", "asList", "toList", nullptr };
     jclass sliceCls = env->FindClass("android/content/pm/ParceledListSlice");
     if (sliceCls) {
@@ -603,7 +592,6 @@ Java_com_ims134_hookengine_PmSpoof_getSliceListNative(JNIEnv* env, jobject, jobj
         env->DeleteLocalRef(sliceCls);
     }
 
-    // 4. Definitive dump — shows every field & method via JNI (bypasses hidden API).
     jclass cls = env->GetObjectClass(slice);
     jclass classCls = env->FindClass("java/lang/Class");
     jmethodID getName = env->GetMethodID(classCls, "getName", "()Ljava/lang/String;");
@@ -717,15 +705,10 @@ Java_com_ims134_hookengine_PmSpoof_replaceSliceListNative(JNIEnv* env, jobject, 
     return nullptr;
 }
 
-#include <future>   // add to the top if not already present
+#include <future>
 
 // ─────────────────────────────────────────────────────────────────────────
 // Hidden API bypass via native-attached-thread reflection.
-// Modeled on org.chickenhook.restrictionbypass.NativeReflectionBypass:
-// the filtered Java methods (Class.getDeclaredField/Method) skip the
-// hidden-API caller check when invoked from a thread with no app
-// classloader above the JNI boundary. AttachCurrentThread gives us
-// exactly that context.
 // ─────────────────────────────────────────────────────────────────────────
 
 extern "C" JNIEXPORT jobject JNICALL
@@ -826,7 +809,7 @@ extern "C" int InstallAntiDetection(JNIEnv*);
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_installFileHooks(JNIEnv*, jobject) {
-    return (jint)InstallHooks();   // 0 = HOOK_OK, idempotent on repeat
+    return (jint)InstallHooks();
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -834,9 +817,6 @@ Java_com_ims134_hookengine_NativeTestBridge_installAntiDetection(JNIEnv* env, jo
     return (jint)InstallAntiDetection(env);
 }
 
-// Raw file write via syscall — bypasses our own hooks (libhookengine is
-// not GOT-patched). Lets the test create a file that ShouldHidePath will
-// then hide from Java-side File.exists().
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_writeFileRaw(
         JNIEnv* env, jobject, jstring jpath, jstring jcontent) {
@@ -906,9 +886,6 @@ extern "C" JNIEXPORT jboolean JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_parcelRewriterReady(
         JNIEnv* env, jobject);
 
-// ─── tnFIN probe bridge ───────────────────────────────────────────────
-// Returns FromReflectedMethod(method) as a long. 0 on failure.
-// Kotlin side checks: < 0x1000 = fast-JNI token, >= 0x1000 = real ArtMethod*.
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_probeFromReflectedMethod(
         JNIEnv* env, jobject, jobject methodObj) {
@@ -922,14 +899,6 @@ Java_com_ims134_hookengine_NativeTestBridge_probeFromReflectedMethod(
 }
 
 // ─── Feature 1.5 — DynamicAttachTest fixtures + JNI bridges ──────────
-//
-// fn_attach_target is a plain C++ function in libhookengine.so. Its
-// address is NOT resolvable via the linker from Kotlin — the only way
-// to reach it is `getFnAttachTargetAddr()`, which returns it as a jlong.
-// That makes it the canonical "computed address" for Feature 1.5,
-// distinguishing it from the ordinary symbol path (item1 installs on
-// &fn_normal directly via linker).
-
 extern "C" HookResult AttachRuntime(uint64_t addr, void* replacement, void** outOrig);
 extern "C" HookResult DetachRuntime(uint64_t addr);
 
@@ -941,8 +910,6 @@ int fn_attach_target(int x) {
 extern "C" __attribute__((noinline, used))
 int fake_attach(int x) { (void)x; return 0xDA77; }
 
-// Static data — lands in .data / .bss (rw-, no exec). Proves the
-// executable-page guard fires on a real, mapped, non-exec address.
 extern "C" int g_test_data_var = 0x42;
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -982,3 +949,89 @@ Java_com_ims134_hookengine_NativeTestBridge_detachRuntime(JNIEnv*, jobject, jlon
     return (jint)DetachRuntime((uint64_t)addr);
 }
 
+// ─── Feature 1.7 — ChainHook fixtures + JNI bridges ─────────────────
+//
+// JNI name-mangling note: '_' in a Java method name maps to "_1" in the
+// C symbol. chainLastX0_1  →  Java_..._chainLastX0_11
+//                     chainLastX0_2  →  Java_..._chainLastX0_12
+// chainCalls1/chainCalls2 have no underscore, so their symbols are direct.
+extern "C" HookResult ChainAttach(void* target, void (*handler)(const uint64_t*), void** outTramp);
+extern "C" HookResult ChainDetach(void* target, void (*handler)(const uint64_t*));
+extern "C" int        ChainCount();
+extern "C" int        ChainHandlerCount(void* target);
+
+static std::atomic<int> g_chain_calls_1{0};
+static std::atomic<int> g_chain_calls_2{0};
+static std::atomic<int> g_chain_last_x0_1{0};
+static std::atomic<int> g_chain_last_x0_2{0};
+static std::atomic<int> g_chain_order_first{-1};
+
+extern "C" void chain_handler_1(const uint64_t* xregs) {
+    g_chain_calls_1.fetch_add(1);
+    g_chain_last_x0_1.store((int)(int32_t)xregs[0]);
+    int expected = -1;
+    g_chain_order_first.compare_exchange_strong(expected, 1);
+}
+extern "C" void chain_handler_2(const uint64_t* xregs) {
+    g_chain_calls_2.fetch_add(1);
+    g_chain_last_x0_2.store((int)(int32_t)xregs[0]);
+    int expected = -1;
+    g_chain_order_first.compare_exchange_strong(expected, 2);
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getChainHandler1Addr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&chain_handler_1;
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getChainHandler2Addr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&chain_handler_2;
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_chainAttach(
+        JNIEnv*, jobject, jlong target, jlong handler) {
+    return (jint)ChainAttach((void*)(uintptr_t)target,
+                             (void (*)(const uint64_t*))(uintptr_t)handler, nullptr);
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_chainDetach(
+        JNIEnv*, jobject, jlong target, jlong handler) {
+    return (jint)ChainDetach((void*)(uintptr_t)target,
+                             (void (*)(const uint64_t*))(uintptr_t)handler);
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_chainCount(JNIEnv*, jobject) {
+    return ChainCount();
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_chainHandlerCount(JNIEnv*, jobject, jlong target) {
+    return ChainHandlerCount((void*)(uintptr_t)target);
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_chainCalls1(JNIEnv*, jobject) {
+    return g_chain_calls_1.load();
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_chainCalls2(JNIEnv*, jobject) {
+    return g_chain_calls_2.load();
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_chainLastX0_11(JNIEnv*, jobject) {
+    return g_chain_last_x0_1.load();
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_chainLastX0_12(JNIEnv*, jobject) {
+    return g_chain_last_x0_2.load();
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_chainOrderFirst(JNIEnv*, jobject) {
+    return g_chain_order_first.load();
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_chainReset(JNIEnv*, jobject) {
+    g_chain_calls_1.store(0);
+    g_chain_calls_2.store(0);
+    g_chain_last_x0_1.store(0);
+    g_chain_last_x0_2.store(0);
+    g_chain_order_first.store(-1);
+}

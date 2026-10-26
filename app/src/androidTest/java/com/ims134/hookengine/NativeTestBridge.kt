@@ -31,4 +31,18 @@ object NativeTestBridge {
     external fun getTestDataVarAddr(): Long
     external fun callFnAttachTarget(x: Int): Int
     external fun readU32At(addr: Long): Long
+
+    // ─── Feature 1.7 — hook chaining ────────────────────────────────
+    external fun chainAttach(target: Long, handler: Long): Int
+    external fun chainDetach(target: Long, handler: Long): Int
+    external fun chainCount(): Int
+    external fun chainHandlerCount(target: Long): Int
+    external fun getChainHandler1Addr(): Long
+    external fun getChainHandler2Addr(): Long
+    external fun chainCalls1(): Int
+    external fun chainCalls2(): Int
+    external fun chainLastX0_1(): Int
+    external fun chainLastX0_2(): Int
+    external fun chainOrderFirst(): Int
+    external fun chainReset()
 }
