@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstddef>
+#include <cstdlib>
 
 #define TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
@@ -235,6 +236,130 @@ extern "C" bool ParcelRewriter_MatchesRequest(int code, jlong dataPtr) {
 
     SafeSetPos(parcel, saved);
     return ok;
+}
+
+// ─── Session 23 — Wall B: storage callingPackage rewrite ─────────────
+//
+// AMS rejects IStorageManager.* transactions when the request's
+// callingPackage doesn't match the process's real uid. Viber's JNI Engine
+// threads call Environment.getExternalStorageDirectory(), which routes to
+// IStorageManager.getVolumeList(userId, "com.viber.voip", flags). Our real
+// uid is 10428 (com.ims134.hookengine); "com.viber.voip" doesn't own it →
+// SecurityException → IO_POOL-1 / TM:MESSAGES fatal.
+//
+// Fix: on any IStorageManager transact whose first post-userId string16 is
+// "com.viber.voip", rebuild the request with that string16 swapped to
+// "com.ims134.hookengine" (our real package), growing the buffer by 12
+// bytes. AMS accepts uid 10428 + "com.ims134.hookengine". The reply
+// (VolumeInfo[]) doesn't need rewriting — Viber only cares about the paths
+// which are identical for any app in /storage/emulated/0.
+//
+// Pure C++ — no JNI on the caller thread (Rule 8).
+extern "C" bool ParcelRewriter_TryRewriteStorageRequest(jlong dataPtr, int code) {
+    if (!g_ready || !g_data || !g_dataSize || !g_getPos) return false;
+    if (!dataPtr) return false;
+
+    void* parcel = (void*)dataPtr;
+    size_t saved = g_getPos(parcel);
+    SafeSetPos(parcel, 0);
+
+    bool rewritten = false;
+    do {
+        int32_t strict, worksource, magic;
+        if (!SafeReadInt32(parcel, &strict))     break;
+        if (!SafeReadInt32(parcel, &worksource)) break;
+        if (!SafeReadInt32(parcel, &magic))      break;
+        if (magic != kMagic) break;
+
+        size_t ifaceLen = 0;
+        const char16_t* iface = SafeReadString16(parcel, &ifaceLen);
+        if (!iface) break;
+
+        static const char16_t kStorageIface[] = u"android.os.storage.IStorageManager";
+        constexpr size_t kStorageIfaceLen = sizeof(kStorageIface)/sizeof(char16_t) - 1;
+        if (ifaceLen != kStorageIfaceLen ||
+            memcmp(iface, kStorageIface, kStorageIfaceLen * sizeof(char16_t)) != 0) break;
+
+        // IStorageManager method — read userId, then callingPackage string16.
+        int32_t userId = 0;
+        if (!SafeReadInt32(parcel, &userId)) break;
+
+        size_t cpLen = 0;
+        const char16_t* cp = SafeReadString16(parcel, &cpLen);
+        if (!cp) break;
+
+        static const char16_t kOld[] = u"com.viber.voip";
+        static const char16_t kNew[] = u"com.ims134.hookengine";
+        constexpr size_t kOldLen = sizeof(kOld)/sizeof(char16_t) - 1;  // 14
+        constexpr size_t kNewLen = sizeof(kNew)/sizeof(char16_t) - 1;  // 21
+
+        if (cpLen != kOldLen ||
+            memcmp(cp, kOld, kOldLen * sizeof(char16_t)) != 0) {
+            // Iface matched but callingPackage wasn't com.viber.voip. Log
+            // so we can see any unexpected package name in logcat.
+            char ascii[64] = {0};
+            size_t n = cpLen < 63 ? cpLen : 63;
+            for (size_t i = 0; i < n; i++) ascii[i] = (char)cp[i];
+            LOGD("STORAGE iface matched but callingPackage='%s' (code=%d)", ascii, code);
+            break;
+        }
+
+        // Rewrite. Layout:
+        //   old: [len=14][28b content][2b null][2b pad]  = 36 bytes
+        //   new: [len=21][42b content][2b null][0b pad]  = 48 bytes
+        //   delta = +12, everything after shifts.
+        const uint8_t* pData = g_data(parcel);
+        if (!pData) break;
+        ptrdiff_t cpOffset = (const uint8_t*)cp - pData;
+        if (cpOffset < 4) break;
+        size_t oldStringStart = (size_t)(cpOffset - 4);
+
+        constexpr size_t kOldTotal = 4 + 2*kOldLen + 2 + 2;  // 36
+        constexpr size_t kNewTotal = 4 + 2*kNewLen + 2 + 0;  // 48
+        constexpr size_t kDelta    = kNewTotal - kOldTotal;  // 12
+
+        size_t dataSize = g_dataSize(parcel);
+        if (dataSize < oldStringStart + kOldTotal) break;
+
+        size_t newSize = dataSize + kDelta;
+        uint8_t* newBuf = (uint8_t*)malloc(newSize);
+        if (!newBuf) break;
+
+        // prefix
+        memcpy(newBuf, pData, oldStringStart);
+        // new string16
+        *(int32_t*)(newBuf + oldStringStart) = (int32_t)kNewLen;
+        memcpy(newBuf + oldStringStart + 4, kNew, kNewLen * sizeof(char16_t));
+        *(char16_t*)(newBuf + oldStringStart + 4 + kNewLen * sizeof(char16_t)) = 0;
+        // suffix (no padding needed for kNew: 48 is 4-byte aligned)
+        memcpy(newBuf + oldStringStart + kNewTotal,
+               pData + oldStringStart + kOldTotal,
+               dataSize - oldStringStart - kOldTotal);
+
+        // Swap buffer in parcel. Parcel field offsets (IDA-verified):
+        //   +8  mData       void*
+        //   +16 mDataSize   size_t
+        //   +24 mDataCapacity size_t
+        void** dataField = (void**)((uint8_t*)parcel + 8);
+        uint8_t* oldBuf  = (uint8_t*)*dataField;
+        *dataField = newBuf;
+        *(size_t*)((uint8_t*)parcel + 16) = newSize;
+        *(size_t*)((uint8_t*)parcel + 24) = newSize;
+        if (oldBuf) free(oldBuf);
+
+        // Restore position (shift if past string).
+        size_t newPos = (saved > oldStringStart) ? (saved + kDelta) : saved;
+        SafeSetPos(parcel, newPos);
+
+        LOGD("STORAGE rewrite fired: code=%d userId=%d size=%zu->%zu delta=%zu",
+             code, userId, dataSize, newSize, kDelta);
+        rewritten = true;
+    } while (0);
+
+    if (!rewritten) {
+        SafeSetPos(parcel, saved);
+    }
+    return rewritten;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

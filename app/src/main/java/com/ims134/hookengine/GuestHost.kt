@@ -20,11 +20,29 @@ object GuestHost {
     fun load(hostContext: Context, apkPath: String): Result {
         val result = Result(apkPath)
 
+        // Session 23 — Wall B prep: install BinderTransactHook BEFORE guest
+        // boot so Viber's JNI Engine IO_POOL storage IPC (getVolumeList) can
+        // be intercepted. Currently the hook is only installed by tests and
+        // RemoteService; guest boot here runs without it, so AMS rejects
+        // "com.viber.voip" (our UID is 10428, not Viber's) → process kill.
+        // Code capture comes later; install alone is a no-op transact tail
+        // but it's the prerequisite.
+        try {
+            if (BinderTransactHook.install()) {
+                Log.d(TAG, "BinderTransactHook installed for guest boot")
+            } else {
+                Log.e(TAG, "BinderTransactHook.install failed: ${BinderTransactHook.lastError}")
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "BinderTransactHook.install threw: $t", t)
+        }
+
         val alreadyBooted = try {
             ApplicationProxy.getGuestApplication()
         } catch (_: Throwable) { null }
 
         if (alreadyBooted != null) {
+            val proxy = ApplicationProxy.getInstance()
             result.guestApp = alreadyBooted
             result.guestPackage = alreadyBooted.packageName
             result.guestAppClass = alreadyBooted.javaClass.name
@@ -32,8 +50,27 @@ object GuestHost {
             result.loaderInstalled = true
             result.instantiated = true
             result.attached = true
-            result.onCreated = true
-            result.outcome = "booted-at-startup"
+
+            val alreadyCreated = try { proxy.nativeIsGuestCreated() } catch (_: Throwable) { false }
+            if (alreadyCreated) {
+                // Combined path already ran (nativeOnCreate did attach+create).
+                result.onCreated = true
+                result.outcome = "booted-at-startup"
+                return result.finish()
+            }
+
+            // Session 22 — Viber-specific order: onCreate BEFORE providers.
+            // Framework order (providers → onCreate) leaves Viber's DI (bb2)
+            // null in every Viber-authored ContentProvider.onCreate. Log
+            // evidence: guest.onCreate at 04:26:11.400 runs AFTER providers
+            // at 04:26:11.247-11.400, all fail on bb2.r5 NPE. If bb2 is set
+            // inside Viber.onCreate, reversing the order lets providers see
+            // it. Deviation from framework order; Viber-specific.
+            Log.d(TAG, "alreadyAttached — creating guest FIRST, then providers (Viber order)")
+            val created = try { proxy.nativeCreateGuest() } catch (_: Throwable) { false }
+            result.onCreated = created
+            Log.d(TAG, "nativeCreateGuest returned $created")
+
             try {
                 val prov = installGuestProviders(alreadyBooted, apkPath)
                 result.providersDeclared = prov.declaredCount
@@ -45,6 +82,8 @@ object GuestHost {
             } catch (t: Throwable) {
                 result.firstProviderError = "installGuestProviders threw: $t"
             }
+
+            result.outcome = if (created) "booted-viber-order" else "create-failed"
             return result.finish()
         }
 
@@ -132,17 +171,19 @@ object GuestHost {
 
             val guestCtx = GuestContext(hostContext, guestPkg, guestAppInfo, guestLoader, guestRes)
             proxy.setBaseContext(guestCtx)
-            proxy.onCreate()
 
-            val guestApp = ApplicationProxy.getGuestApplication()
-            if (guestApp == null) {
-                result.outcome = "native-oncreate-failed"
-                result.error = "ApplicationProxy.onCreate did not boot guest; see DualCore.Native log"
+            // Framework order: attach → providers → create.
+            if (!proxy.nativeAttachGuest()) {
+                result.outcome = "attach-failed"
+                result.error = "nativeAttachGuest returned false"
+                return result.finish()
+            }
+            val guestApp = ApplicationProxy.getGuestApplication() ?: run {
+                result.outcome = "attach-guest-null"
                 return result.finish()
             }
             result.instantiated = true
             result.attached = true
-            result.onCreated = true
             result.guestApp = guestApp
 
             try {
@@ -157,6 +198,9 @@ object GuestHost {
                 Log.e(TAG, "provider install threw: $t")
                 result.firstProviderError = "installGuestProviders threw: $t"
             }
+
+            val created = try { proxy.nativeCreateGuest() } catch (_: Throwable) { false }
+            result.onCreated = created
 
             try {
                 PmSpoof.guestArchives = PmSpoof.guestArchives + (guestPkg to apkPath)

@@ -5,13 +5,6 @@ import android.content.Context
 import android.content.res.Configuration
 import android.content.res.Resources
 
-/**
- * Engine Application subclass — mirrors reference ApplicationProxy:
- * native onCreate/onTerminate/onConfigurationChanged/onDestroy which
- * dispatch into libhookengine.so. Not in manifest. Container calls
- * getInstance(), setBaseContext(guestCtx), then onCreate() which
- * attaches AND creates the guest Application in one native call.
- */
 class ApplicationProxy : Application() {
 
     companion object {
@@ -39,7 +32,16 @@ class ApplicationProxy : Application() {
             instance?.nativeBuildGuestResources(apkPath, host)
     }
 
+    /** Sandbox dataDir for the guest app — created by DualApplication before boot. */
+    @Volatile var guestDataDir: String? = null
+        private set
+
+    fun setGuestDataDir(path: String?) { this.guestDataDir = path }
+
     external fun nativeOnCreate()
+    external fun nativeAttachGuest(): Boolean
+    external fun nativeCreateGuest(): Boolean
+    external fun nativeIsGuestCreated(): Boolean
     external fun nativeOnTerminate()
     external fun nativeOnConfigurationChanged(newConfig: Configuration)
     external fun nativeOnDestroy()
@@ -50,22 +52,14 @@ class ApplicationProxy : Application() {
         super.onCreate()
         nativeOnCreate()
     }
-
     override fun onTerminate() {
         super.onTerminate()
         nativeOnTerminate()
     }
-
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         nativeOnConfigurationChanged(newConfig)
     }
-
-    fun onDestroy() {
-        nativeOnDestroy()
-    }
-
-    fun setBaseContext(base: Context) {
-        attachBaseContext(base)
-    }
+    fun onDestroy() { nativeOnDestroy() }
+    fun setBaseContext(base: Context) { attachBaseContext(base) }
 }

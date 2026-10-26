@@ -2,12 +2,6 @@
 //
 // Hooks android::IPCThreadState::transact. Caller thread does only pure C++.
 // Fresh thread does JNI.
-//
-// Session 10 bugs fixed here:
-//   A. mDataPos was set to newPos (= end of data), caller read from end →
-//      NameNotFoundException. Now preserves callerReplyPos (= 0).
-//   B. getInstalledPackages rewriter crashes parsing ParceledListSlice.
-//      Skipped for now; hex dump added so we can debug the format.
 
 #include <jni.h>
 #include <android/log.h>
@@ -29,6 +23,7 @@ extern "C" HookResult InstallInlineHookEx(void*, void*, void**, const char*);
 extern "C" HookResult UninstallInlineHook(void*);
 extern "C" bool ParcelRewriter_Init(JNIEnv* env);
 extern "C" bool ParcelRewriter_MatchesRequest(int code, jlong dataPtr);
+extern "C" bool ParcelRewriter_TryRewriteStorageRequest(jlong dataPtr, int code);
 
 extern "C" const uint8_t* ParcelRewriter_GetData(jlong parcelPtr);
 extern "C" size_t         ParcelRewriter_GetSize(jlong parcelPtr);
@@ -147,7 +142,6 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
         return;
     }
 
-    // Hex dump before anything: diagnostic for getInstalledPackages.
     HexDump(code == kCodeGetInstalledPackages ? "RewriteOnFreshThread: code 36 in" : "RewriteOnFreshThread: code 3 in",
             callerReplyBuf, callerReplySize, 32);
     if (code == kCodeGetInstalledPackages && callerReplySize <= 256 * 1024) {
@@ -157,14 +151,11 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
     LOGD("RewriteOnFreshThread: code=%d size=%zu pos=%zu",
          code, callerReplySize, callerReplyPos);
 
-    // Bug B: code 36's ParceledListSlice parsing crashes. Skip for now —
-    // caller reads server's valid reply unchanged. Debug format with hex dump above.
     if (code == kCodeGetInstalledPackages) {
         LOGD("RewriteOnFreshThread: code 36 skipped (parsing not yet safe)");
         return;
     }
 
-    // Create fresh writable parcel, give it a malloc'd copy of the reply.
     jclass cls = env->FindClass("android/os/Parcel");
     if (!cls) { env->ExceptionClear(); return; }
     jmethodID obtainM = env->GetStaticMethodID(cls, "obtain", "()Landroid/os/Parcel;");
@@ -189,17 +180,11 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
     *(size_t*)((uint8_t*)freshPtr + 24) = callerReplySize;
     *(size_t*)((uint8_t*)freshPtr + 32) = 0;
 
-// Copy parcel state from the caller's reply parcel. Our fresh parcel came
-// from Parcel.obtain() with default state; the caller's reply parcel came
-// from the binder kernel with different state. Same bytes, same reader,
-// different struct state → different parse result. Copy the fields that
-// influence createFromParcel / readString8 behavior.
-    *(int32_t*)((uint8_t*)freshPtr + 0)  = *(int32_t*)((uint8_t*)replyPtr + 0);  // mError
-    *(uint8_t*)((uint8_t*)freshPtr + 81) = *(uint8_t*)((uint8_t*)replyPtr + 81); // mParseHeader
-    *(uint8_t*)((uint8_t*)freshPtr + 82) = *(uint8_t*)((uint8_t*)replyPtr + 82); // mParseHeaderPadding
-    *(int32_t*)((uint8_t*)freshPtr + 88) = *(int32_t*)((uint8_t*)replyPtr + 88); // mType
+    *(int32_t*)((uint8_t*)freshPtr + 0)  = *(int32_t*)((uint8_t*)replyPtr + 0);
+    *(uint8_t*)((uint8_t*)freshPtr + 81) = *(uint8_t*)((uint8_t*)replyPtr + 81);
+    *(uint8_t*)((uint8_t*)freshPtr + 82) = *(uint8_t*)((uint8_t*)replyPtr + 82);
+    *(int32_t*)((uint8_t*)freshPtr + 88) = *(int32_t*)((uint8_t*)replyPtr + 88);
 
-    // Wrap data parcel (read-only source is fine).
     jlong origData = 0;
     jclass dcls = env->FindClass("android/os/Parcel");
     jmethodID dObtainM = dcls ? env->GetStaticMethodID(dcls, "obtain", "()Landroid/os/Parcel;") : nullptr;
@@ -212,7 +197,6 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
     env->DeleteLocalRef(dcls);
     if (!wData) { env->ExceptionClear(); env->DeleteLocalRef(wReplyFresh); return; }
 
-    // Run rewriter on the writable copy.
     bool rewriterOk = false;
     if (g_rewriter_rewriteReply) {
         env->CallStaticVoidMethod(g_rewriter_class, g_rewriter_rewriteReply,
@@ -226,30 +210,23 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
         }
     }
 
-    // Snapshot fresh's final state.
     const uint8_t* newData = ParcelRewriter_GetData(freshPtr);
     size_t newSize = ParcelRewriter_GetSize(freshPtr);
 
     bool swapped = false;
     if (rewriterOk && newData && newSize > 0) {
-        // Swap: caller gets fresh's rewritten buffer.
-        // mDataSize/mDataCapacity = newSize; mDataPos = callerReplyPos (typically 0).
-        // Bug A fix: was newPos (= end of data), now callerReplyPos (= 0).
         *(void**)((uint8_t*)replyPtr + 8) = (void*)newData;
         *(size_t*)((uint8_t*)replyPtr + 16) = newSize;
         *(size_t*)((uint8_t*)replyPtr + 24) = newSize;
         *(size_t*)((uint8_t*)replyPtr + 32) = callerReplyPos;
 
-        // Detach newData from fresh so recycle doesn't free it.
         *freshDataField = nullptr;
         *(size_t*)((uint8_t*)freshPtr + 16) = 0;
         *(size_t*)((uint8_t*)freshPtr + 24) = 0;
         *(size_t*)((uint8_t*)freshPtr + 32) = 0;
         swapped = true;
-
     }
 
-    // Recycle fresh.
     jclass rcls = env->FindClass("android/os/Parcel");
     if (rcls) {
         jmethodID recycleM = env->GetMethodID(rcls, "recycle", "()V");
@@ -259,7 +236,6 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
     }
     env->DeleteLocalRef(wReplyFresh);
 
-    // Recycle data wrapper.
     if (wData) {
         env->SetLongField(wData, dNativePtr, origData);
         jclass rcls2 = env->FindClass("android/os/Parcel");
@@ -292,6 +268,14 @@ extern "C" int32_t Hook_Transact(void* self, int32_t handle, uint32_t code,
     PushCode((int)code);
 
     if (!_orig_transact) return -1;
+
+    // Session 23 — Wall B: rewrite IStorageManager callingPackage BEFORE
+    // forwarding. AMS rejects com.viber.voip (we're uid 10428 = hookengine);
+    // swapping the string16 to com.ims134.hookengine makes AMS accept.
+    // Only for non-oneway transacts with a data parcel. Pure C++, no JNI.
+    if (!(flags & 1) && data) {
+        ParcelRewriter_TryRewriteStorageRequest((jlong)data, (int)code);
+    }
 
     bool matched = false;
     if (!(flags & 1) && data && reply &&

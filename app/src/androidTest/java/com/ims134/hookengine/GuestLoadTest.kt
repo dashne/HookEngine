@@ -21,6 +21,10 @@ class GuestLoadTest {
             apk.exists()
         )
 
+        // Session 23 — clear any codes from prior tests in the suite so the
+        // post-boot drain only captures IPC produced by this run.
+        BinderTransactHook.drainCodes()
+
         val result = GuestHost.load(ctx, apk.absolutePath)
 
         // Rule 12 — assert only that the harness produced a named outcome.
@@ -29,6 +33,20 @@ class GuestLoadTest {
 
         Log.d("DualCore.Guest",
             "GuestLoadTest: outcome=${result.outcome} elapsed=${result.elapsedMs}ms")
+
+        // Session 23 — Wall B probe: give Viber's JNI Engine IO_POOL thread
+        // time to spawn and attempt Environment.getExternalStorageDirectory().
+        // Then drain everything BinderTransactHook saw. The new code that
+        // appears here (not 3, not 36 — both already handled) is the
+        // IStorageManager.getVolumeList AIDL code we need to intercept in B.2.
+        // Session 24 — milestone 3 probe: is Viber's JNI Engine done initializing
+// after 60s, or is it stuck? If nothing crashes in 60s, engine likely
+// finished. If a new FATAL appears past the 2s mark, that names Wall C.
+        Thread.sleep(60_000)
+        val bootCodes = BinderTransactHook.drainCodes()
+        val codeList = bootCodes.joinToString(",")
+        Log.d("DualCore.Guest",
+            "Guest boot IPC codes (n=${bootCodes.size}): $codeList")
 
         val spoof = GuestHost.probeGuestSignatureSpoof(
             ctx, result.guestPackage ?: "com.viber.voip")
@@ -46,12 +64,15 @@ class GuestLoadTest {
             appendLine("instantiated=${result.instantiated}")
             appendLine("attached=${result.attached}")
             appendLine("onCreated=${result.onCreated}")
-            // (native diag now emitted directly to DualCore.Native logcat,
-            // not captured in Result — see GuestBoot.cpp LOGD/LOGE)
             result.error?.let {
                 appendLine("--- error ---")
                 appendLine(it)
             }
+
+            // Session 23 — Wall B code capture
+            appendLine("--- ipc codes (during boot + 2s post) ---")
+            appendLine("ipcCodesRaw=$codeList")
+            appendLine("ipcCodeCount=${bootCodes.size}")
 
             appendLine("--- pm-visibility probe ---")
             appendLine("guestPackage=${spoof.guestPackage}")
