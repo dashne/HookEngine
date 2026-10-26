@@ -12,6 +12,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <atomic>
+#include <mutex>
 #include <fcntl.h>
 #include "Hooks.h"
 #include "RedirectTable.h"
@@ -22,6 +23,7 @@
 #include "ArtMethodTrace.h"
 #include "SvcHook.h"
 #include "RegInspect.h"
+#include "MemoryOps.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -356,7 +358,7 @@ Java_com_ims134_hookengine_NativeTestBridge_runSuite(JNIEnv* env, jobject, jstri
 
 extern "C" void ChainResetAll();
 extern "C" void RetModResetAll();
-
+extern "C" void SvcHookResetAll();
 extern "C" void RegInspectResetAll();
 
 extern "C" JNIEXPORT void JNICALL
@@ -1145,102 +1147,11 @@ Java_com_ims134_hookengine_NativeTestBridge_retModReset(JNIEnv*, jobject) {
     g_retmod_last_arg0.store(-1);
 }
 
-// ─── Feature 1.4 — ArtMethod entry/exit trace fixtures + JNI bridges ─
-extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_NativeTestBridge_traceTargetS0(
-        JNIEnv*, jobject, jstring /*ignored*/) {
-    return 0x0BAD;
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_NativeTestBridge_traceTargetS1(
-        JNIEnv*, jobject, jstring /*ignored*/, jint x) {
-    return x + 100;
-}
-
-static std::atomic<int> g_trace_entry_count{0};
-static std::atomic<int> g_trace_exit_count{0};
-static std::atomic<int> g_trace_last_ret{0};
-
-extern "C" void trace_fixture_onEntry(void* /*ctx*/) {
-    g_trace_entry_count.fetch_add(1);
-}
-
-extern "C" void trace_fixture_onExit(void* /*ctx*/, int64_t ret) {
-    g_trace_exit_count.fetch_add(1);
-    g_trace_last_ret.store((int)ret);
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_NativeTestBridge_traceAttach0(JNIEnv* env, jobject, jobject method) {
-    return (jint)TraceAttach(env, method, trace_fixture_onEntry, trace_fixture_onExit,
-                             nullptr, /*arity=*/0);
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_NativeTestBridge_traceAttach1(JNIEnv* env, jobject, jobject method) {
-    return (jint)TraceAttach(env, method, trace_fixture_onEntry, trace_fixture_onExit,
-                             nullptr, /*arity=*/1);
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_NativeTestBridge_traceAttach2(JNIEnv* env, jobject, jobject method) {
-    return (jint)TraceAttach(env, method, trace_fixture_onEntry, trace_fixture_onExit,
-                             nullptr, /*arity=*/2);
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_NativeTestBridge_traceAttach3(JNIEnv* env, jobject, jobject method) {
-    return (jint)TraceAttach(env, method, trace_fixture_onEntry, trace_fixture_onExit,
-                             nullptr, /*arity=*/3);
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_NativeTestBridge_traceDetach(JNIEnv* env, jobject, jobject method) {
-    return (jint)TraceDetach(env, method);
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_NativeTestBridge_traceCount(JNIEnv*, jobject) {
-    return TraceCount();
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_NativeTestBridge_traceEntryCount(JNIEnv*, jobject) {
-    return g_trace_entry_count.load();
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_NativeTestBridge_traceExitCount(JNIEnv*, jobject) {
-    return g_trace_exit_count.load();
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_ims134_hookengine_NativeTestBridge_traceLastRet(JNIEnv*, jobject) {
-    return g_trace_last_ret.load();
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_ims134_hookengine_NativeTestBridge_traceResetCounters(JNIEnv*, jobject) {
-    g_trace_entry_count.store(0);
-    g_trace_exit_count.store(0);
-    g_trace_last_ret.store(0);
-}
-
 // ─── Feature 1.6 — SVC hooking fixtures + JNI bridges ────────────────
-//
-// Each fixture is a naked function whose body is exactly (mov x8, #NR;
-// svc #0; ret). The SVC lives at function_start + 4 — deterministic
-// because __attribute__((naked)) emits no prologue/epilogue and both
-// `mov x8, #NR` and `svc #0` are single 4-byte instructions.
-//
-// We expose both the function entry (for calling) and the SVC site
-// (for patching) to Kotlin, so the test never has to guess +4.
-
 extern "C" __attribute__((noinline, naked, used))
 int svc_getpid_target() {
     __asm__ volatile(
-            "mov x8, #172\n"   // __NR_getpid
+            "mov x8, #172\n"
             "svc #0\n"
             "ret\n"
             );
@@ -1249,7 +1160,7 @@ int svc_getpid_target() {
 extern "C" __attribute__((noinline, naked, used))
 int svc_getppid_target() {
     __asm__ volatile(
-            "mov x8, #173\n"   // __NR_getppid
+            "mov x8, #173\n"
             "svc #0\n"
             "ret\n"
             );
@@ -1257,17 +1168,13 @@ int svc_getppid_target() {
 
 extern "C" __attribute__((noinline, naked, used))
 int svc_close_invalid(int fd) {
-    // x0=fd on entry per AAPCS64. mov x8,#57 = __NR_close. svc #0.
-    // Caller is expected to pass fd=-1 → EBADF. Harmless.
     __asm__ volatile(
-            "mov x8, #57\n"    // __NR_close
+            "mov x8, #57\n"
             "svc #0\n"
             "ret\n"
             );
 }
 
-// Handler bookkeeping — all atomic since handler runs in signal context
-// and reading side runs in normal context.
 static std::atomic<uint64_t> g_svc_fires{0};
 static std::atomic<uint64_t> g_svc_last_nr{0};
 static std::atomic<uint64_t> g_svc_last_orig{0};
@@ -1282,7 +1189,6 @@ static inline void svc_record(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t or
     g_svc_last_arg1.store(a1, std::memory_order_relaxed);
 }
 
-// Force a fixed value regardless of the real return.
 extern "C" uint64_t svc_handler_force_7ace(uint64_t nr,
                                            uint64_t a0, uint64_t a1, uint64_t a2,
                                            uint64_t a3, uint64_t a4, uint64_t a5,
@@ -1292,7 +1198,6 @@ extern "C" uint64_t svc_handler_force_7ace(uint64_t nr,
     return 0x7ACE;
 }
 
-// Add a known delta so the caller can verify it saw the transformation.
 extern "C" uint64_t svc_handler_add1000(uint64_t nr,
                                         uint64_t a0, uint64_t a1, uint64_t a2,
                                         uint64_t a3, uint64_t a4, uint64_t a5,
@@ -1302,7 +1207,6 @@ extern "C" uint64_t svc_handler_add1000(uint64_t nr,
     return orig_ret + 1000;
 }
 
-// Record only — pass the real return through.
 extern "C" uint64_t svc_handler_identity(uint64_t nr,
                                          uint64_t a0, uint64_t a1, uint64_t a2,
                                          uint64_t a3, uint64_t a4, uint64_t a5,
@@ -1417,14 +1321,6 @@ Java_com_ims134_hookengine_NativeTestBridge_svcResetCounters(JNIEnv*, jobject) {
 }
 
 // ─── Feature 2.7 — Register state inspection fixtures + JNI bridges ─
-//
-// Two fixture functions:
-//   fn_reginspect_gp — int(a, b) → a + b
-//   fn_reginspect_fp — float(a, b) → a + b
-// Both are naked with simple NORMAL first instructions (relocatable by
-// EmitRelocated). Tests call with known args and inspect the captured
-// entry-time registers.
-
 extern "C" HookResult AttachRegInspect(void* target, int mode, void** outShadow);
 extern "C" HookResult DetachRegInspect(void* target);
 extern "C" HookResult RegInspectRead(void* target, RegInspectSnapshot* out);
@@ -1432,7 +1328,6 @@ extern "C" int        RegInspectCount();
 
 extern "C" __attribute__((noinline, naked, used))
 int fn_reginspect_gp(int a, int b) {
-    // First insn: add w0, w0, w1 (0x0B010000) — NORMAL, relocatable.
     __asm__ volatile(
             "add w0, w0, w1\n"
             "ret\n"
@@ -1441,7 +1336,6 @@ int fn_reginspect_gp(int a, int b) {
 
 extern "C" __attribute__((noinline, naked, used))
 float fn_reginspect_fp(float a, float b) {
-    // First insn: fadd s0, s0, s1 — NORMAL, relocatable.
     __asm__ volatile(
             "fadd s0, s0, s1\n"
             "ret\n"
@@ -1487,12 +1381,6 @@ Java_com_ims134_hookengine_NativeTestBridge_regInspectSnapshot(
     HookResult r = RegInspectRead((void*)(uintptr_t)target, &snap);
     if (r != HOOK_OK) return nullptr;
 
-    // Output array layout (99 longs):
-    //   [0..31]   x[0..31]   (x0..x30, sp_orig)
-    //   [32]      nzcv
-    //   [33]      pc
-    //   [34]      slot_id
-    //   [35..98]  q[0..63]   (32 Q-regs × low/high u64 pairs)
     jlongArray arr = env->NewLongArray(99);
     if (!arr) return nullptr;
     jlong vals[99];
@@ -1502,5 +1390,235 @@ Java_com_ims134_hookengine_NativeTestBridge_regInspectSnapshot(
     vals[34] = (jlong)snap.slot_id;
     for (int i = 0; i < 64; i++)  vals[35 + i] = (jlong)snap.q[i];
     env->SetLongArrayRegion(arr, 0, 99, vals);
+    return arr;
+}
+
+// ─── Feature 1.4 — ArtMethod entry/exit trace fixtures + JNI bridges ─
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceTargetS0(
+        JNIEnv*, jobject, jstring /*ignored*/) {
+    return 0x0BAD;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceTargetS1(
+        JNIEnv*, jobject, jstring /*ignored*/, jint x) {
+    return x + 100;
+}
+
+static std::atomic<int> g_trace_entry_count{0};
+static std::atomic<int> g_trace_exit_count{0};
+static std::atomic<int> g_trace_last_ret{0};
+
+extern "C" void trace_fixture_onEntry(void* /*ctx*/) {
+    g_trace_entry_count.fetch_add(1);
+}
+
+extern "C" void trace_fixture_onExit(void* /*ctx*/, int64_t ret) {
+    g_trace_exit_count.fetch_add(1);
+    g_trace_last_ret.store((int)ret);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceAttach0(JNIEnv* env, jobject, jobject method) {
+    return (jint)TraceAttach(env, method, trace_fixture_onEntry, trace_fixture_onExit,
+                             nullptr, /*arity=*/0);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceAttach1(JNIEnv* env, jobject, jobject method) {
+    return (jint)TraceAttach(env, method, trace_fixture_onEntry, trace_fixture_onExit,
+                             nullptr, /*arity=*/1);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceAttach2(JNIEnv* env, jobject, jobject method) {
+    return (jint)TraceAttach(env, method, trace_fixture_onEntry, trace_fixture_onExit,
+                             nullptr, /*arity=*/2);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceAttach3(JNIEnv* env, jobject, jobject method) {
+    return (jint)TraceAttach(env, method, trace_fixture_onEntry, trace_fixture_onExit,
+                             nullptr, /*arity=*/3);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceDetach(JNIEnv* env, jobject, jobject method) {
+    return (jint)TraceDetach(env, method);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceCount(JNIEnv*, jobject) {
+    return TraceCount();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceEntryCount(JNIEnv*, jobject) {
+    return g_trace_entry_count.load();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceExitCount(JNIEnv*, jobject) {
+    return g_trace_exit_count.load();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceLastRet(JNIEnv*, jobject) {
+    return g_trace_last_ret.load();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceResetCounters(JNIEnv*, jobject) {
+    g_trace_entry_count.store(0);
+    g_trace_exit_count.store(0);
+    g_trace_last_ret.store(0);
+}
+
+// ─── Feature 2.1 / 2.2 / 2.3 — MemoryOps fixtures + JNI bridges ─────
+//
+// g_memtest_buf[256] is filled once: bytes 0..99 = 0,1,2,...,99;
+// bytes 100..107 = magic {CA FE BA BE 13 37 42 99};
+// bytes 108..255 = 108,109,...,255.
+//
+// g_memtest_ro_page is a dedicated mmap page set to PROT_READ. The write
+// test proves MemWrite's mprotect save/restore on a page that starts
+// non-writable — Rule 10 preserved end-to-end.
+
+extern "C" uint8_t g_memtest_buf[256] = {0};
+static std::once_flag g_memtest_buf_init;
+
+static void EnsureMemTestBufInit() {
+    std::call_once(g_memtest_buf_init, []() {
+        for (int i = 0; i < 256; i++) g_memtest_buf[i] = (uint8_t)i;
+        static const uint8_t magic[] = {0xCA, 0xFE, 0xBA, 0xBE, 0x13, 0x37, 0x42, 0x99};
+        memcpy(&g_memtest_buf[100], magic, sizeof(magic));
+    });
+}
+
+static uint8_t* g_memtest_ro_page = nullptr;
+static std::once_flag g_memtest_ro_init;
+
+static uint8_t* EnsureRoPage() {
+    std::call_once(g_memtest_ro_init, []() {
+        long ps = sysconf(_SC_PAGESIZE);
+        void* p = mmap(nullptr, (size_t)ps, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) return;
+        memset(p, 0, (size_t)ps);
+        mprotect(p, (size_t)ps, PROT_READ);
+        g_memtest_ro_page = (uint8_t*)p;
+    });
+    return g_memtest_ro_page;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getMemTestBufAddr(JNIEnv*, jobject) {
+    EnsureMemTestBufInit();
+    return (jlong)(uintptr_t)&g_memtest_buf[0];
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getMemTestRoPageAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)EnsureRoPage();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_memTestResetRoPage(JNIEnv*, jobject) {
+    uint8_t* p = EnsureRoPage();
+    if (!p) return;
+    long ps = sysconf(_SC_PAGESIZE);
+    if (mprotect(p, (size_t)ps, PROT_READ | PROT_WRITE) != 0) return;
+    memset(p, 0, (size_t)ps);
+    mprotect(p, (size_t)ps, PROT_READ);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_memTestPageProtOf(
+        JNIEnv*, jobject, jlong addr) {
+    if (!addr) return 0;
+    long ps = sysconf(_SC_PAGESIZE);
+    uintptr_t pg = (uintptr_t)addr & ~((uintptr_t)ps - 1);
+    int prot = 0;
+    if (!MemGetPageProt(pg, &prot)) return -1;
+    return (jint)prot;
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_memRead(
+        JNIEnv* env, jobject, jlong addr, jint len) {
+    if (!env || !addr || len <= 0) return nullptr;
+    jbyteArray arr = env->NewByteArray((jsize)len);
+    if (!arr) return nullptr;
+    uint8_t* tmp = (uint8_t*)malloc((size_t)len);
+    if (!tmp) { env->DeleteLocalRef(arr); return nullptr; }
+    HookResult r = MemRead((uintptr_t)addr, tmp, (size_t)len);
+    if (r != HOOK_OK) {
+        free(tmp);
+        env->DeleteLocalRef(arr);
+        return nullptr;
+    }
+    env->SetByteArrayRegion(arr, 0, (jsize)len, (const jbyte*)tmp);
+    free(tmp);
+    return arr;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_memWrite(
+        JNIEnv* env, jobject, jlong addr, jbyteArray data) {
+    if (!env || !addr || !data) return (jint)HOOK_INTERNAL_ERROR;
+    jsize len = env->GetArrayLength(data);
+    if (len <= 0) return (jint)HOOK_INTERNAL_ERROR;
+    uint8_t* tmp = (uint8_t*)malloc((size_t)len);
+    if (!tmp) return (jint)HOOK_ALLOC_FAILED;
+    env->GetByteArrayRegion(data, 0, len, (jbyte*)tmp);
+    HookResult r = MemWrite((uintptr_t)addr, tmp, (size_t)len);
+    free(tmp);
+    return (jint)r;
+}
+
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_memScan(
+        JNIEnv* env, jobject, jlong start, jlong len,
+        jbyteArray pattern, jbyteArray mask, jint maxOut) {
+    if (!env || !start || len <= 0 || !pattern || maxOut <= 0) return nullptr;
+    jsize plen = env->GetArrayLength(pattern);
+    if (plen <= 0) return nullptr;
+
+    uint8_t* pat = (uint8_t*)malloc((size_t)plen);
+    uint8_t* msk = nullptr;
+    if (!pat) return nullptr;
+    env->GetByteArrayRegion(pattern, 0, plen, (jbyte*)pat);
+
+    if (mask) {
+        jsize mlen = env->GetArrayLength(mask);
+        if (mlen == plen) {
+            msk = (uint8_t*)malloc((size_t)plen);
+            if (msk) env->GetByteArrayRegion(mask, 0, plen, (jbyte*)msk);
+        }
+    }
+
+    uintptr_t* found = (uintptr_t*)malloc((size_t)maxOut * sizeof(uintptr_t));
+    if (!found) { free(pat); free(msk); return nullptr; }
+
+    size_t count = 0;
+    HookResult r = MemScan((uintptr_t)start, (size_t)len,
+                           pat, msk, (size_t)plen,
+                           found, (size_t)maxOut, &count);
+    free(pat); free(msk);
+
+    if (r != HOOK_OK) { free(found); return nullptr; }
+
+    size_t out_n = count < (size_t)maxOut ? count : (size_t)maxOut;
+    jlongArray arr = env->NewLongArray((jsize)out_n);
+    if (arr && out_n > 0) {
+        jlong* vals = (jlong*)malloc(out_n * sizeof(jlong));
+        if (vals) {
+            for (size_t i = 0; i < out_n; i++) vals[i] = (jlong)found[i];
+            env->SetLongArrayRegion(arr, 0, (jsize)out_n, vals);
+            free(vals);
+        }
+    }
+    free(found);
     return arr;
 }

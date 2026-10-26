@@ -96,13 +96,6 @@ object NativeTestBridge {
     external fun svcResetCounters()
 
     // ─── Feature 2.7 — register state inspection ────────────────────
-    //
-    // Snapshot array layout (99 longs):
-    //   [0..31]   x[0..31]   (x0..x30, sp_orig)
-    //   [32]      nzcv
-    //   [33]      pc
-    //   [34]      slot_id
-    //   [35..98]  q[0..63]   (32 Q-regs × low/high u64 pairs)
     external fun getRegInspectGpTargetAddr(): Long
     external fun getRegInspectFpTargetAddr(): Long
     external fun callRegInspectGp(a: Int, b: Int): Int
@@ -111,6 +104,22 @@ object NativeTestBridge {
     external fun detachRegInspect(target: Long): Int
     external fun regInspectCount(): Int
     external fun regInspectSnapshot(target: Long): LongArray?
+
+    // ─── Feature 2.1 / 2.2 / 2.3 — memory read / write / scan ────────
+    //
+    // All three operations validate against /proc/self/maps. Unmapped
+    // regions return null (read/scan) or HOOK_TARGET_INVALID (write).
+    // MemWrite mprotects each page to RW, writes, and restores the orig
+    // prot — Rule 10 preserved.
+    external fun getMemTestBufAddr(): Long
+    external fun getMemTestRoPageAddr(): Long
+    external fun memTestResetRoPage()
+    external fun memTestPageProtOf(addr: Long): Int
+    external fun memRead(addr: Long, len: Int): ByteArray?
+    external fun memWrite(addr: Long, data: ByteArray): Int
+    external fun memScan(start: Long, len: Long,
+                         pattern: ByteArray, mask: ByteArray?,
+                         maxOut: Int): LongArray?
 
     // ─── Feature 1.4 — ArtMethod entry/exit trace ───────────────────
     external fun traceAttach0(method: java.lang.reflect.Method): Int
