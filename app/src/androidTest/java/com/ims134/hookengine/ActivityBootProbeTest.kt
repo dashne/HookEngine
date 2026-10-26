@@ -1,6 +1,7 @@
 package com.ims134.hookengine
 
 import android.app.Activity
+import android.app.ActivityManager
 import android.app.Application
 import android.app.Instrumentation
 import android.content.ComponentName
@@ -16,6 +17,7 @@ import android.provider.Settings
 import android.util.Log
 import android.view.Surface
 import android.view.View
+import android.view.ViewGroup
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertTrue
@@ -28,27 +30,22 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * Session 35 — Wall C5 probe.
+ * Session 37 — Wall C6 verification probe.
  *
- * Session 34 closed Wall C4 (WMS accepted the stolen token, addView returned
- * success). But immediately after addView, isAttachedToWindow=false,
- * width/height=0, windowToken=null — because the first Choreographer
- * traversal (ViewRootImpl.performTraversals → dispatchAttachedToWindow) has
- * not fired yet. That traversal is the next category of wall (Wall C5).
+ * Wall C5 (WMS state gate on mAppVisible) was closed Session 36 when the host
+ * task was user-visible at guest addView time. mSurface.isValid=true was the
+ * confirmation. Wall C6 question: is the guest decorView actually populated
+ * with content, or is it a live Surface rendering an empty DecorView frame?
  *
- * Two-phase structure:
- *   Phase 1 (main thread): newActivity + lifecycle + token steal + addView,
- *                          then RETURN so Looper can drain pending
- *                          Choreographer callbacks and run the traversal.
- *   Sleep 250 ms on test thread (never on main).
- *   Phase 2 (main thread): read post-traversal state — isAttachedToWindow,
- *                          width/height, windowToken, mAttachInfo,
- *                          ViewRootImpl.mSurface validity.
- *
- * If the traversal crashes (Wall C5 — likely IWindowSession identity check,
- * SurfaceFlinger buffer allocation, or EGL context setup), the FATAL kills
- * main; phase2Latch never fires; probe times out at 10 s. Wall C5 named by
- * the FATAL stack in logcat.
+ * Additions over Session 36:
+ *   1. Task visibility pre-check (replaces moveTaskToFront, which threw
+ *      SecurityException due to Session 22 setArgV0 spoof and had no effect
+ *      because the task was already visible). Now: poll taskInfo.isVisible
+ *      for 2s before phase 1. If NOT visible, we expect Session 35 outcome
+ *      (mSurface.isValid=false). If visible, Session 36 outcome (valid).
+ *   2. View tree introspection in phase 2: android.R.id.content FrameLayout
+ *      childCount, first child's class / width / height / visibility, and
+ *      decorView childCount.
  *
  * Rule 12: probe reports outcomes, asserts only that outcomes were produced.
  */
@@ -58,7 +55,6 @@ class ActivityBootProbeTest {
     private val ctx get() = InstrumentationRegistry.getInstrumentation().targetContext
     private val tag = "ActivityBoot"
 
-    // Captured in phase 1 for phase 2 reads (post-addView, post-traversal).
     @Volatile private var guestDecor: View? = null
     @Volatile private var guestActivity: Activity? = null
 
@@ -94,9 +90,7 @@ class ActivityBootProbeTest {
         val apk = File(ctx.filesDir, "viber.apk")
         assertTrue("stage viber.apk at ${apk.absolutePath}", apk.exists())
 
-        // Permission self-check (dumpsys says granted; checkSelfPermission
-        // reports denied via PmSpoof interference — cosmetic, prewarm proves
-        // syscall-level access works).
+        // Permission self-check (cosmetic; prewarm proves syscall access works)
         val permsToCheck = listOf(
             "android.permission.INTERNET",
             "android.permission.ACCESS_NETWORK_STATE",
@@ -129,7 +123,7 @@ class ActivityBootProbeTest {
         report("guestApp", guestApp.javaClass.name)
         report("guestCtx", guestCtx.javaClass.name)
 
-        // Prewarm (skip-if-correct in rewriter validated Session 34)
+        // Prewarm
         val settingsNames = listOf("window_animation_scale", "transition_animation_scale", "animator_duration_scale")
         var preWarmOk = 0
         var preWarmFail = 0
@@ -146,7 +140,7 @@ class ActivityBootProbeTest {
         report("preWarm.summary", "ok=$preWarmOk fail=$preWarmFail")
         val canLaunchHost = (preWarmFail == 0)
 
-        // Archive
+        // Archive + launcher
         val pm = ctx.packageManager
         val flags = PackageManager.GET_ACTIVITIES or PackageManager.GET_META_DATA
         val archive = pm.getPackageArchiveInfo(apk.absolutePath, flags) ?: run {
@@ -216,7 +210,7 @@ class ActivityBootProbeTest {
             component = ComponentName(guestPkg, launcher.name)
         }
 
-        // Host Activity launch (token source)
+        // Host launch + token capture
         var hostToken: IBinder? = null
         var hostTokenSource = "<skipped>"
         if (canLaunchHost) {
@@ -258,9 +252,46 @@ class ActivityBootProbeTest {
         report("hostToken", hostToken)
         report("hostToken.hashCode", hostToken?.hashCode())
 
+        // ── Task visibility pre-check (replaces moveTaskToFront) ──
+        // Wall C5 is a state gate: mSurface.isValid=true requires the host
+        // task to be user-visible at guest addView time. Poll for up to 2s.
+        // moveTaskToFront no longer attempted (it threw SecurityException
+        // because setArgV0 spoof sets our process name to "com.viber.voip"
+        // while the task belongs to uid 10431; task was already visible in
+        // Session 36 anyway, so the call was a no-op).
+        var taskVisible = false
+        if (hostToken != null) {
+            try {
+                val am = ctx.getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                val tasks = am.getAppTasks()
+                report("precheck.taskCount", tasks.size)
+                if (tasks.isNotEmpty()) {
+                    try {
+                        report("precheck.taskId", tasks[0].taskInfo?.taskId)
+                        report("precheck.topActivity",
+                            tasks[0].taskInfo?.topActivity?.flattenToShortString())
+                    } catch (_: Throwable) {}
+                    val deadline = System.currentTimeMillis() + 2000L
+                    var lastVis = false
+                    while (System.currentTimeMillis() < deadline) {
+                        try {
+                            val t = am.getAppTasks().firstOrNull()
+                            val vis = t?.taskInfo?.isVisible ?: false
+                            if (vis != lastVis) {
+                                report("precheck.isVisible", vis); lastVis = vis
+                            }
+                            if (vis) { taskVisible = true; break }
+                        } catch (_: Throwable) {}
+                        Thread.sleep(50)
+                    }
+                }
+            } catch (t: Throwable) {
+                report("precheck.threw", "${t.javaClass.name}: ${t.message}")
+            }
+        }
+        report("precheck.taskVisible", taskVisible)
+
         // ── Phase 1: main thread — newActivity + lifecycle + steal + addView ──
-        // Return from this block cleanly so Looper can drain pending
-        // Choreographer callbacks and run the first traversal.
         val phase1Latch = CountDownLatch(1)
         Handler(Looper.getMainLooper()).post {
             try {
@@ -278,7 +309,6 @@ class ActivityBootProbeTest {
                 report("newActivity.result", activity?.javaClass?.name)
                 if (activity == null) return@post
 
-                // Lifecycle callbacks (Session 28 stable)
                 val onCreateM = findMethod(activityClass, "onCreate", Bundle::class.java)
                 try { onCreateM?.invoke(activity, null as Bundle?); report("onCreate.result", "success") }
                 catch (t: Throwable) {
@@ -299,7 +329,6 @@ class ActivityBootProbeTest {
                 }
                 report("lifecycle.result", "onCreate+onStart+onResume all succeeded")
 
-                // Token steal (Session 34 closed Wall C4)
                 if (hostToken != null) {
                     try {
                         val f = HiddenApiBridge.reflectGetDeclaredField(Activity::class.java, "mToken")
@@ -329,7 +358,6 @@ class ActivityBootProbeTest {
                     } catch (t: Throwable) { report("steal.mAppToken.threw", "${t.javaClass.name}: ${t.message}") }
                 }
 
-                // addView — Wall C4 verification carried forward
                 try {
                     val wm = activity.window.windowManager
                     val decor = activity.window.decorView
@@ -337,7 +365,6 @@ class ActivityBootProbeTest {
                     report("wallC4.lp.token.hashCode", lp.token?.hashCode())
                     wm.addView(decor, lp)
                     report("wallC4.addView.result", "success")
-                    // Capture refs for phase 2 (post-traversal reads)
                     guestDecor = decor
                     guestActivity = activity
                 } catch (t: Throwable) {
@@ -355,13 +382,10 @@ class ActivityBootProbeTest {
         val phase1Done = try { phase1Latch.await(60, TimeUnit.SECONDS) } catch (_: InterruptedException) { false }
         if (!phase1Done) { report("phase1.timeout", "60s"); finish(outcomes); return }
 
-        // ── Wait ~250 ms for Choreographer → first traversal ──
-        // Main thread has returned from phase 1. Looper drains and Choreographer
-        // fires ViewRootImpl.performTraversals. If that crashes (Wall C5),
-        // main thread dies; phase 2 latch times out; FATAL visible in logcat.
+        // Wait for Choreographer → first traversal
         Thread.sleep(250)
 
-        // ── Phase 2: read post-traversal state ──
+        // ── Phase 2: read post-traversal state + view tree introspection ──
         val phase2Latch = CountDownLatch(1)
         Handler(Looper.getMainLooper()).post {
             try {
@@ -379,9 +403,7 @@ class ActivityBootProbeTest {
                 report("wallC5.decorView.height", decor.height)
                 report("wallC5.decorView.visibility", decor.visibility)
                 report("wallC5.decorView.windowToken", decor.windowToken)
-                report("wallC5.decorView.windowToken.hashCode", decor.windowToken?.hashCode())
 
-                // ViewRootImpl via View.mParent
                 try {
                     val f = HiddenApiBridge.reflectGetDeclaredField(View::class.java, "mParent")
                     if (f == null) {
@@ -407,7 +429,6 @@ class ActivityBootProbeTest {
                     report("wallC5.viewRootImpl.threw", "${t.javaClass.simpleName}: ${t.message}")
                 }
 
-                // mAttachInfo via View
                 try {
                     val f = HiddenApiBridge.reflectGetDeclaredField(View::class.java, "mAttachInfo")
                     if (f != null) {
@@ -422,6 +443,54 @@ class ActivityBootProbeTest {
                     report("wallC5.mAttachInfo.threw", "${t.javaClass.simpleName}: ${t.message}")
                 }
 
+                // ── Wall C6 view tree introspection ──
+                // DecorView always exists with a live surface; the question is
+                // whether Viber's setContentView populated android.R.id.content.
+                try {
+                    val decorGroup = decor as? ViewGroup
+                    report("wallC5.decorView.childCount", decorGroup?.childCount)
+
+                    val contentFrame = decor.findViewById<View>(android.R.id.content)
+                    report("wallC5.content.exists", contentFrame != null)
+                    report("wallC5.content.class", contentFrame?.javaClass?.name)
+
+                    if (contentFrame is ViewGroup) {
+                        val n = contentFrame.childCount
+                        report("wallC5.content.childCount", n)
+                        report("wallC5.content.width", contentFrame.width)
+                        report("wallC5.content.height", contentFrame.height)
+                        if (n > 0) {
+                            val child = contentFrame.getChildAt(0)
+                            report("wallC5.content.child0.class", child.javaClass.name)
+                            report("wallC5.content.child0.width", child.width)
+                            report("wallC5.content.child0.height", child.height)
+                            report("wallC5.content.child0.visibility", child.visibility)
+                            report("wallC5.content.child0.isAttachedToWindow", child.isAttachedToWindow)
+                            // If it's a ViewGroup, peek one level deeper for a
+                            // Viber-authored class (Layout/TextView/ComposeView etc.)
+                            if (child is ViewGroup) {
+                                report("wallC5.content.child0.grandchildCount", child.childCount)
+                                if (child.childCount > 0) {
+                                    val gc = child.getChildAt(0)
+                                    report("wallC5.content.grandchild0.class", gc.javaClass.name)
+                                }
+                            }
+                        }
+                    } else if (contentFrame != null) {
+                        report("wallC5.content.isViewGroup", "false")
+                    }
+
+                    // Diagnostic: peek Activity.window.peekDecorView structure.
+                    // If Viber's SplashActivity didn't call setContentView, the
+                    // decorView may be a very shallow tree. If it called
+                    // setContentView with a Compose view or a layout, we'll see
+                    // children here.
+                    report("wallC5.activity.window.peekDecor",
+                        try { activity.window.peekDecorView()?.javaClass?.name } catch (_: Throwable) { "threw" })
+                } catch (t: Throwable) {
+                    report("wallC5.content.threw", "${t.javaClass.simpleName}: ${t.message}")
+                }
+
                 report("wallC5.readComplete", "true")
             } catch (t: Throwable) {
                 report("phase2.uncaught", "${t.javaClass.simpleName}: ${t.message}")
@@ -431,7 +500,7 @@ class ActivityBootProbeTest {
         }
 
         val phase2Done = try { phase2Latch.await(10, TimeUnit.SECONDS) } catch (_: InterruptedException) { false }
-        if (!phase2Done) report("phase2.timeout", "10s — main thread dead (Wall C5)")
+        if (!phase2Done) report("phase2.timeout", "10s — main thread dead")
 
         finish(outcomes)
     }

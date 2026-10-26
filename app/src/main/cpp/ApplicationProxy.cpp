@@ -1,19 +1,19 @@
 // ApplicationProxy.cpp
 // Session 22 — BlackBox-fidelity native boot.
-// Session 32 — GetMyUid now returns kernel uid via syscall(SYS_getuid)
-//              instead of Process.myUid(). The spoofed myUid (10000)
-//              propagates into ApplicationInfo.uid, which propagates into
-//              every AttributionSource created from the guest ContextImpl.
-//              Server-side AttributionSource.enforceCallingUid checks
-//              parcel uid vs Binder.getCallingUid() — 10000 vs 10431 —
-//              rejects. Rewriter can't fix it (Mechanism C: parcel swap
-//              doesn't reach wire for same-size rewrites). Fix at source:
-//              ApplicationInfo.uid = kernel uid. Guest code calling
-//              Process.myUid() still sees 10000 (Fake_getuid unchanged).
+// Session 32 — GetMyUid uses syscall(SYS_getuid).
+// Session 38 — nativeInit(structural port): 3-param signature matching
+//              reference decomp; extracts .so + classes*.dex from staged
+//              APK to libPath. Uses JNI java.util.zip.ZipFile for the ZIP
+//              walk. Returns 0 on success, -1 on failure.
+//              Rule 5 partial — signature faithful, body inferred from
+//              reference architecture (Session 19+20 decomp of JNI_OnLoad
+//              + ApplicationProxy flow); sub_2A998 body not decomp'd.
 
 #include <jni.h>
 #include <android/log.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
+#include <dirent.h>
 #include <unistd.h>
 #include <cstring>
 #include <cstdio>
@@ -71,7 +71,150 @@ static void LogAndClearException(JNIEnv* env, const char* where) {
     LOGE("%s: %s", where, out.c_str());
 }
 
-// ─── HiddenApiBridge helpers ────────────────────────────────────────
+// ─── Session 38 — nativeInit (structural port) ───────────────────────
+// Signature (decomp-verified Session 20): nativeInit(String, String, int) -> int
+// Body (inferred): walk APK entries; extract lib/arm64-v8a/*.so and
+// classes*.dex into libPath. Return 0 on success, -1 on any failure.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_ApplicationProxy_nativeInit(
+        JNIEnv* env, jobject /*thiz*/,
+        jstring jApkPath, jstring jLibPath, jint flags) {
+    if (!env || !jApkPath || !jLibPath) return -1;
+
+    const char* apkPath = env->GetStringUTFChars(jApkPath, nullptr);
+    const char* libPath = env->GetStringUTFChars(jLibPath, nullptr);
+    if (!apkPath || !libPath) {
+        if (apkPath) env->ReleaseStringUTFChars(jApkPath, apkPath);
+        if (libPath) env->ReleaseStringUTFChars(jLibPath, libPath);
+        return -1;
+    }
+
+    LOGD("nativeInit: apk=%s lib=%s flags=%d", apkPath, libPath, (int)flags);
+
+    int extracted_so  = 0;
+    int extracted_dex = 0;
+    int result        = 0;
+
+    struct stat st{};
+    if (stat(apkPath, &st) != 0 || st.st_size == 0) {
+        LOGE("nativeInit: apk missing or empty: %s", apkPath);
+        result = -1;
+        goto done;
+    }
+
+    // Ensure libPath directory exists.
+    mkdir(libPath, 0755);
+
+    do {
+        jclass zipCls = env->FindClass("java/util/zip/ZipFile");
+        if (!zipCls) { env->ExceptionClear(); result = -1; break; }
+        jmethodID zipCtor = env->GetMethodID(zipCls, "<init>", "(Ljava/lang/String;)V");
+        if (!zipCtor) { env->ExceptionClear(); result = -1; break; }
+
+        jobject zipFile = env->NewObject(zipCls, zipCtor, jApkPath);
+        if (!zipFile) { env->ExceptionClear(); result = -1; break; }
+
+        jmethodID entriesM   = env->GetMethodID(zipCls, "entries", "()Ljava/util/Enumeration;");
+        jmethodID closeM     = env->GetMethodID(zipCls, "close", "()V");
+        jmethodID getIsM     = env->GetMethodID(zipCls, "getInputStream",
+                                                "(Ljava/util/zip/ZipEntry;)Ljava/io/InputStream;");
+
+        jclass enumCls       = env->FindClass("java/util/Enumeration");
+        jmethodID hasMoreM   = env->GetMethodID(enumCls, "hasMoreElements", "()Z");
+        jmethodID nextM      = env->GetMethodID(enumCls, "nextElement", "()Ljava/lang/Object;");
+
+        jclass entryCls      = env->FindClass("java/util/zip/ZipEntry");
+        jmethodID getNameM   = env->GetMethodID(entryCls, "getName", "()Ljava/lang/String;");
+        jmethodID getSizeM   = env->GetMethodID(entryCls, "getSize", "()J");
+
+        jclass isCls         = env->FindClass("java/io/InputStream");
+        jmethodID readM      = env->GetMethodID(isCls, "read", "([B)I");
+        jmethodID closeIsM   = env->GetMethodID(isCls, "close", "()V");
+
+        jobject enumeration = env->CallObjectMethod(zipFile, entriesM);
+        if (!enumeration) { env->ExceptionClear(); result = -1;
+            if (closeM) env->CallVoidMethod(zipFile, closeM);
+            env->DeleteLocalRef(zipFile); break; }
+
+        while (env->CallBooleanMethod(enumeration, hasMoreM)) {
+            jobject entry = env->CallObjectMethod(enumeration, nextM);
+            if (!entry) break;
+
+            jstring nameJ = (jstring)env->CallObjectMethod(entry, getNameM);
+            if (!nameJ) { env->DeleteLocalRef(entry); break; }
+            const char* name = env->GetStringUTFChars(nameJ, nullptr);
+            if (!name) { env->DeleteLocalRef(nameJ); env->DeleteLocalRef(entry); break; }
+            jlong entrySize = env->CallLongMethod(entry, getSizeM);
+
+            size_t nlen = strlen(name);
+            bool isSo  = (strncmp(name, "lib/arm64-v8a/", 14) == 0 && nlen > 3 &&
+                          strcmp(name + nlen - 3, ".so") == 0);
+            bool isDex = (strncmp(name, "classes", 7) == 0 && nlen > 4 &&
+                          strcmp(name + nlen - 4, ".dex") == 0);
+
+            if (isSo || isDex) {
+                const char* base = strrchr(name, '/');
+                base = base ? base + 1 : name;
+                std::string outPath = std::string(libPath) + "/" + base;
+
+                struct stat ost{};
+                bool already = (stat(outPath.c_str(), &ost) == 0 &&
+                                ost.st_size == (off_t)entrySize);
+
+                if (!already) {
+                    jobject is = env->CallObjectMethod(zipFile, getIsM, entry);
+                    if (is) {
+                        FILE* out = fopen(outPath.c_str(), "wb");
+                        if (out) {
+                            jbyteArray buf = env->NewByteArray(65536);
+                            while (true) {
+                                jint n = env->CallIntMethod(is, readM, buf);
+                                if (n <= 0) break;
+                                jbyte* b = env->GetByteArrayElements(buf, nullptr);
+                                if (b) {
+                                    fwrite(b, 1, (size_t)n, out);
+                                    env->ReleaseByteArrayElements(buf, b, JNI_ABORT);
+                                }
+                            }
+                            env->DeleteLocalRef(buf);
+                            fclose(out);
+                        }
+                        env->CallVoidMethod(is, closeIsM);
+                        env->DeleteLocalRef(is);
+                    }
+                    if (env->ExceptionCheck()) { env->ExceptionClear(); }
+                }
+
+                if (isSo)  extracted_so++;
+                if (isDex) extracted_dex++;
+            }
+
+            env->ReleaseStringUTFChars(nameJ, name);
+            env->DeleteLocalRef(nameJ);
+            env->DeleteLocalRef(entry);
+        }
+
+        env->DeleteLocalRef(enumeration);
+        if (closeM) env->CallVoidMethod(zipFile, closeM);
+        env->DeleteLocalRef(zipFile);
+
+        if (extracted_so == 0 || extracted_dex == 0) {
+            LOGE("nativeInit: incomplete extraction so=%d dex=%d",
+                 extracted_so, extracted_dex);
+            result = -1;
+        }
+    } while (0);
+
+    done:
+    env->ReleaseStringUTFChars(jApkPath, apkPath);
+    env->ReleaseStringUTFChars(jLibPath, libPath);
+    LOGD("nativeInit: extracted so=%d dex=%d result=%d",
+         extracted_so, extracted_dex, result);
+    return result;
+}
+
+// ─── (unchanged from Session 32) ─────────────────────────────────────
+
 static jobject GetHiddenApiBridgeInstance(JNIEnv* env, jclass* outCls) {
     *outCls = nullptr;
     jclass habCls = env->FindClass("com/ims134/hookengine/HiddenApiBridge");
@@ -142,7 +285,6 @@ static jobject ReadStaticObjectField(
     return val;
 }
 
-// ─── GuestContext helpers ─────────────────────────────────────────
 static jobject GetGuestContext(JNIEnv* env, jobject proxy) {
     jclass appCls = env->FindClass("android/app/Application");
     jmethodID getBaseM = env->GetMethodID(appCls, "getBaseContext",
@@ -162,11 +304,9 @@ static jstring ReadGuestDataDir(JNIEnv* env, jobject proxy) {
     return (jstring)env->GetObjectField(proxy, f);
 }
 
-// ─── Process.setArgV0 — direct then reflection fallback ────────────
 static bool SetProcessArgV0(JNIEnv* env, const char* name) {
     jclass procCls = env->FindClass("android/os/Process");
     if (!procCls) { env->ExceptionClear(); return false; }
-
     jmethodID m = env->GetStaticMethodID(procCls, "setArgV0", "(Ljava/lang/String;)V");
     if (m) {
         jstring jName = env->NewStringUTF(name);
@@ -178,16 +318,11 @@ static bool SetProcessArgV0(JNIEnv* env, const char* name) {
         return true;
     }
     env->ExceptionClear();
-
     jclass strCls = env->FindClass("java/lang/String");
     jobject reflected = ReflectGetDeclaredMethod(env, procCls, "setArgV0", {strCls});
     env->DeleteLocalRef(strCls);
     env->DeleteLocalRef(procCls);
-    if (!reflected) {
-        LOGE("setArgV0: not found via direct or reflection");
-        return false;
-    }
-
+    if (!reflected) { LOGE("setArgV0: not found"); return false; }
     jclass methodCls = env->FindClass("java/lang/reflect/Method");
     jmethodID invokeM = env->GetMethodID(methodCls, "invoke",
                                          "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
@@ -197,42 +332,34 @@ static bool SetProcessArgV0(JNIEnv* env, const char* name) {
     env->DeleteLocalRef(objCls);
     jstring jName = env->NewStringUTF(name);
     env->SetObjectArrayElement(args, 0, jName);
-
     env->CallObjectMethod(reflected, invokeM, nullptr, args);
     bool ok = !env->ExceptionCheck();
     if (!ok) LogAndClearException(env, "setArgV0 reflection");
     else LOGD("setArgV0(%s) OK (reflection)", name);
-
     env->DeleteLocalRef(jName);
     env->DeleteLocalRef(args);
     env->DeleteLocalRef(reflected);
     return ok;
 }
 
-// ─── ActivityThread patch after makeApplication ────────────────────
 static void PatchActivityThreadState(JNIEnv* env, jobject guestApp,
                                      jobject ai, const char* guestPkg) {
     jclass atCls = env->FindClass("android/app/ActivityThread");
     if (!atCls) { env->ExceptionClear(); return; }
-
     jmethodID curM = env->GetStaticMethodID(atCls, "currentActivityThread",
                                             "()Landroid/app/ActivityThread;");
     jobject at = curM ? env->CallStaticObjectMethod(atCls, curM) : nullptr;
     if (env->ExceptionCheck() || !at) {
-        env->ExceptionClear();
-        env->DeleteLocalRef(atCls);
-        LOGE("PatchAT: no currentActivityThread");
-        return;
+        env->ExceptionClear(); env->DeleteLocalRef(atCls);
+        LOGE("PatchAT: no currentActivityThread"); return;
     }
-
     jfieldID fBoundApp = env->GetFieldID(atCls, "mBoundApplication",
                                          "Landroid/app/ActivityThread$AppBindData;");
     if (fBoundApp) {
         jobject boundApp = env->GetObjectField(at, fBoundApp);
         if (boundApp) {
             jclass baCls = env->GetObjectClass(boundApp);
-            jfieldID fProcessName = env->GetFieldID(baCls, "processName",
-                                                    "Ljava/lang/String;");
+            jfieldID fProcessName = env->GetFieldID(baCls, "processName", "Ljava/lang/String;");
             if (fProcessName) {
                 jstring jPkg = env->NewStringUTF(guestPkg);
                 env->SetObjectField(boundApp, fProcessName, jPkg);
@@ -241,7 +368,6 @@ static void PatchActivityThreadState(JNIEnv* env, jobject guestApp,
                     LOGD("PatchAT: mBoundApplication.processName = %s", guestPkg);
                 else env->ExceptionClear();
             } else env->ExceptionClear();
-
             jfieldID fAppInfo = env->GetFieldID(baCls, "appInfo",
                                                 "Landroid/content/pm/ApplicationInfo;");
             if (fAppInfo) {
@@ -250,12 +376,10 @@ static void PatchActivityThreadState(JNIEnv* env, jobject guestApp,
                     LOGD("PatchAT: mBoundApplication.appInfo patched");
                 else env->ExceptionClear();
             } else env->ExceptionClear();
-
             env->DeleteLocalRef(baCls);
             env->DeleteLocalRef(boundApp);
         }
     } else env->ExceptionClear();
-
     jfieldID fInitApp = env->GetFieldID(atCls, "mInitialApplication",
                                         "Landroid/app/Application;");
     if (fInitApp) {
@@ -264,12 +388,10 @@ static void PatchActivityThreadState(JNIEnv* env, jobject guestApp,
             LOGD("PatchAT: mInitialApplication patched");
         else env->ExceptionClear();
     } else env->ExceptionClear();
-
     env->DeleteLocalRef(at);
     env->DeleteLocalRef(atCls);
 }
 
-// ─── ApplicationInfo fix ──────────────────────────────────────────
 static bool FixApplicationInfo(
         JNIEnv* env, jobject ai,
         const char* apkPath, const char* libDir,
@@ -305,46 +427,28 @@ static bool FixApplicationInfo(
     return true;
 }
 
-// ─── Session 32 — kernel uid, not spoofed myUid ─────────────────────
-static jint GetMyUid(JNIEnv* env) {
-    (void)env;
-    // Process.myUid() returns 10000 via Fake_getuid hook. That propagates
-    // into ApplicationInfo.uid, which propagates into every AttributionSource
-    // created from the guest ContextImpl. Server-side
-    // AttributionSource.enforceCallingUid compares parcel uid to
-    // Binder.getCallingUid() (kernel, 10431) and rejects.
-    // Parcel-rewrite of uid doesn't reach the wire on same-size swaps
-    // (Mechanism C — verified Session 32). Fix at source: use kernel uid.
-    // Guest code calling Process.myUid() still sees 10000 (unchanged).
+static jint GetMyUid(JNIEnv* /*env*/) {
     return (jint)syscall(SYS_getuid);
 }
 
-// ─── LoadedApk boot ────────────────────────────────────────────────
 static jobject BootViaLoadedApk(JNIEnv* env, jobject ai, jobject guestCtx) {
     jclass ciCls = env->FindClass("android/content/res/CompatibilityInfo");
     if (!ciCls) { env->ExceptionClear(); return nullptr; }
     jobject ci = ReadStaticObjectField(env, ciCls, "DEFAULT_COMPATIBILITY_INFO");
     env->DeleteLocalRef(ciCls);
     if (!ci) {
-        env->ExceptionClear();
-        LOGE("BootLoadedApk: no DEFAULT_COMPATIBILITY_INFO");
+        env->ExceptionClear(); LOGE("BootLoadedApk: no DEFAULT_COMPATIBILITY_INFO");
         return nullptr;
     }
-
     jclass atCls = env->FindClass("android/app/ActivityThread");
     jmethodID curM = env->GetStaticMethodID(atCls, "currentActivityThread",
                                             "()Landroid/app/ActivityThread;");
     jobject at = curM ? env->CallStaticObjectMethod(atCls, curM) : nullptr;
     if (env->ExceptionCheck()) { env->ExceptionClear(); at = nullptr; }
-    if (!at) {
-        LOGE("BootLoadedApk: no ActivityThread");
-        env->DeleteLocalRef(ci); env->DeleteLocalRef(atCls); return nullptr;
-    }
-
+    if (!at) { LOGE("BootLoadedApk: no ActivityThread"); env->DeleteLocalRef(ci); env->DeleteLocalRef(atCls); return nullptr; }
     jclass aiCls = env->FindClass("android/content/pm/ApplicationInfo");
     jclass ciCls2 = env->FindClass("android/content/res/CompatibilityInfo");
-    jobject method = ReflectGetDeclaredMethod(env, atCls, "getPackageInfoNoCheck",
-                                              {aiCls, ciCls2});
+    jobject method = ReflectGetDeclaredMethod(env, atCls, "getPackageInfoNoCheck", {aiCls, ciCls2});
     env->DeleteLocalRef(aiCls);
     env->DeleteLocalRef(ciCls2);
     jobject loadedApk = nullptr;
@@ -352,10 +456,7 @@ static jobject BootViaLoadedApk(JNIEnv* env, jobject ai, jobject guestCtx) {
         jmethodID mid = env->FromReflectedMethod(method);
         if (mid) {
             loadedApk = env->CallObjectMethod(at, mid, ai, ci);
-            if (env->ExceptionCheck()) {
-                LogAndClearException(env, "getPackageInfoNoCheck");
-                loadedApk = nullptr;
-            }
+            if (env->ExceptionCheck()) { LogAndClearException(env, "getPackageInfoNoCheck"); loadedApk = nullptr; }
         }
         env->DeleteLocalRef(method);
     }
@@ -364,63 +465,51 @@ static jobject BootViaLoadedApk(JNIEnv* env, jobject ai, jobject guestCtx) {
     env->DeleteLocalRef(atCls);
     if (!loadedApk) { LOGE("BootLoadedApk: getPackageInfoNoCheck failed"); return nullptr; }
     LOGD("BootLoadedApk: got LoadedApk=%p", (void*)loadedApk);
-
     jclass laCls = env->GetObjectClass(loadedApk);
     jfieldID fSec = env->GetFieldID(laCls, "mSecurityViolation", "Z");
-    if (fSec) { env->SetBooleanField(loadedApk, fSec, JNI_FALSE);
-        if (env->ExceptionCheck()) env->ExceptionClear(); }
+    if (fSec) { env->SetBooleanField(loadedApk, fSec, JNI_FALSE); if (env->ExceptionCheck()) env->ExceptionClear(); }
     else env->ExceptionClear();
-    jfieldID fAppInfo = env->GetFieldID(laCls, "mApplicationInfo",
-                                        "Landroid/content/pm/ApplicationInfo;");
-    if (fAppInfo) { env->SetObjectField(loadedApk, fAppInfo, ai);
-        if (env->ExceptionCheck()) env->ExceptionClear(); }
+    jfieldID fAppInfo = env->GetFieldID(laCls, "mApplicationInfo", "Landroid/content/pm/ApplicationInfo;");
+    if (fAppInfo) { env->SetObjectField(loadedApk, fAppInfo, ai); if (env->ExceptionCheck()) env->ExceptionClear(); }
     else env->ExceptionClear();
     env->DeleteLocalRef(laCls);
     LOGD("BootLoadedApk: flags cleared");
-
     if (guestCtx) {
         jclass ctxCls = env->FindClass("android/content/Context");
-        jmethodID getClM = env->GetMethodID(ctxCls, "getClassLoader",
-                                            "()Ljava/lang/ClassLoader;");
-        jmethodID getResM = env->GetMethodID(ctxCls, "getResources",
-                                             "()Landroid/content/res/Resources;");
+        jmethodID getClM = env->GetMethodID(ctxCls, "getClassLoader", "()Ljava/lang/ClassLoader;");
+        jmethodID getResM = env->GetMethodID(ctxCls, "getResources", "()Landroid/content/res/Resources;");
         env->DeleteLocalRef(ctxCls);
         jobject loader = getClM ? env->CallObjectMethod(guestCtx, getClM) : nullptr;
         if (env->ExceptionCheck()) { env->ExceptionClear(); loader = nullptr; }
         jobject resources = getResM ? env->CallObjectMethod(guestCtx, getResM) : nullptr;
         if (env->ExceptionCheck()) { env->ExceptionClear(); resources = nullptr; }
-
         jclass laCls3 = env->GetObjectClass(loadedApk);
         if (loader) {
-            jfieldID fMClassLoader = env->GetFieldID(laCls3, "mClassLoader",
-                                                     "Ljava/lang/ClassLoader;");
+            jfieldID fMClassLoader = env->GetFieldID(laCls3, "mClassLoader", "Ljava/lang/ClassLoader;");
             if (fMClassLoader) {
                 env->SetObjectField(loadedApk, fMClassLoader, loader);
                 if (env->ExceptionCheck()) env->ExceptionClear();
                 else LOGD("BootLoadedApk: mClassLoader pre-set");
-            } else { env->ExceptionClear(); LOGE("BootLoadedApk: no mClassLoader field"); }
+            } else { env->ExceptionClear(); }
             env->DeleteLocalRef(loader);
-        } else LOGE("BootLoadedApk: guestCtx.getClassLoader() null");
+        }
         if (resources) {
-            jfieldID fMResources = env->GetFieldID(laCls3, "mResources",
-                                                   "Landroid/content/res/Resources;");
+            jfieldID fMResources = env->GetFieldID(laCls3, "mResources", "Landroid/content/res/Resources;");
             if (fMResources) {
                 env->SetObjectField(loadedApk, fMResources, resources);
                 if (env->ExceptionCheck()) env->ExceptionClear();
                 else LOGD("BootLoadedApk: mResources pre-set");
-            } else { env->ExceptionClear(); LOGE("BootLoadedApk: no mResources field"); }
+            } else { env->ExceptionClear(); }
             env->DeleteLocalRef(resources);
-        } else LOGE("BootLoadedApk: guestCtx.getResources() null");
+        }
         env->DeleteLocalRef(laCls3);
     }
-
     jclass laCls2 = env->GetObjectClass(loadedApk);
     jclass boolCls = env->FindClass("java/lang/Boolean");
     jfieldID fBoolType = env->GetStaticFieldID(boolCls, "TYPE", "Ljava/lang/Class;");
     jobject boolType = env->GetStaticObjectField(boolCls, fBoolType);
     env->DeleteLocalRef(boolCls);
     jclass instrCls = env->FindClass("android/app/Instrumentation");
-
     jclass habCls = nullptr;
     jobject habInst = GetHiddenApiBridgeInstance(env, &habCls);
     jobject makeAppMethod = nullptr;
@@ -445,7 +534,6 @@ static jobject BootViaLoadedApk(JNIEnv* env, jobject ai, jobject guestCtx) {
     env->DeleteLocalRef(boolType);
     env->DeleteLocalRef(instrCls);
     env->DeleteLocalRef(laCls2);
-
     jobject app = nullptr;
     if (makeAppMethod) {
         jclass methodCls = env->FindClass("java/lang/reflect/Method");
@@ -465,22 +553,17 @@ static jobject BootViaLoadedApk(JNIEnv* env, jobject ai, jobject guestCtx) {
         LOGD("BootLoadedApk: invoking makeApplication");
         app = env->CallObjectMethod(makeAppMethod, invokeM, loadedApk, args);
         bool hadEx = env->ExceptionCheck() == JNI_TRUE;
-        if (hadEx) {
-            LOGD("BootLoadedApk: makeApplication threw — catching");
-            LogAndClearException(env, "LoadedApk.makeApplication");
-        }
+        if (hadEx) { LogAndClearException(env, "LoadedApk.makeApplication"); }
         env->DeleteLocalRef(args);
         env->DeleteLocalRef(makeAppMethod);
         if (hadEx) app = nullptr;
-    } else LOGE("BootLoadedApk: makeApplication method not found");
-
+    }
     env->DeleteLocalRef(loadedApk);
     if (app) {
         LOGD("BootLoadedApk: Application created=%p", (void*)app);
-        jclass aiCls = env->FindClass("android/content/pm/ApplicationInfo");
-        jfieldID fPkgName = env->GetFieldID(aiCls, "packageName",
-                                            "Ljava/lang/String;");
-        env->DeleteLocalRef(aiCls);
+        jclass aiCls2 = env->FindClass("android/content/pm/ApplicationInfo");
+        jfieldID fPkgName = env->GetFieldID(aiCls2, "packageName", "Ljava/lang/String;");
+        env->DeleteLocalRef(aiCls2);
         if (fPkgName) {
             jstring jGuestPkg = (jstring)env->GetObjectField(ai, fPkgName);
             if (jGuestPkg) {
@@ -496,13 +579,10 @@ static jobject BootViaLoadedApk(JNIEnv* env, jobject ai, jobject guestCtx) {
     return app;
 }
 
-// ─── Manual fallback ─────────────────────────────────────────────
 static jobject BootManual(JNIEnv* env, jobject guestCtx) {
     jclass ctxCls = env->FindClass("android/content/Context");
-    jmethodID getAiM = env->GetMethodID(ctxCls, "getApplicationInfo",
-                                        "()Landroid/content/pm/ApplicationInfo;");
-    jmethodID getClM = env->GetMethodID(ctxCls, "getClassLoader",
-                                        "()Ljava/lang/ClassLoader;");
+    jmethodID getAiM = env->GetMethodID(ctxCls, "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;");
+    jmethodID getClM = env->GetMethodID(ctxCls, "getClassLoader", "()Ljava/lang/ClassLoader;");
     env->DeleteLocalRef(ctxCls);
     jobject ai = env->CallObjectMethod(guestCtx, getAiM);
     jobject loader = env->CallObjectMethod(guestCtx, getClM);
@@ -517,8 +597,7 @@ static jobject BootManual(JNIEnv* env, jobject guestCtx) {
     jstring jCls = (jstring)env->GetObjectField(ai, clsF);
     if (!jCls) { env->DeleteLocalRef(ai); env->DeleteLocalRef(loader); return nullptr; }
     jclass clCls = env->FindClass("java/lang/ClassLoader");
-    jmethodID loadClassM = env->GetMethodID(clCls, "loadClass",
-                                            "(Ljava/lang/String;)Ljava/lang/Class;");
+    jmethodID loadClassM = env->GetMethodID(clCls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
     env->DeleteLocalRef(clCls);
     jobject guestCls = env->CallObjectMethod(loader, loadClassM, jCls);
     env->DeleteLocalRef(jCls);
@@ -570,15 +649,11 @@ static jobject BootManual(JNIEnv* env, jobject guestCtx) {
 
 static jobject BootGuest(JNIEnv* env, jobject proxy) {
     if (!g_vm) env->GetJavaVM(&g_vm);
-
     jobject guestCtx = GetGuestContext(env, proxy);
     if (!guestCtx) { LOGE("BootGuest: no guestCtx"); return nullptr; }
-
     jclass ctxCls = env->FindClass("android/content/Context");
-    jmethodID getAiM   = env->GetMethodID(ctxCls, "getApplicationInfo",
-                                          "()Landroid/content/pm/ApplicationInfo;");
-    jmethodID getPkgM  = env->GetMethodID(ctxCls, "getPackageName",
-                                          "()Ljava/lang/String;");
+    jmethodID getAiM   = env->GetMethodID(ctxCls, "getApplicationInfo", "()Landroid/content/pm/ApplicationInfo;");
+    jmethodID getPkgM  = env->GetMethodID(ctxCls, "getPackageName", "()Ljava/lang/String;");
     env->DeleteLocalRef(ctxCls);
     jobject ai = env->CallObjectMethod(guestCtx, getAiM);
     jstring jPkg = (jstring)env->CallObjectMethod(guestCtx, getPkgM);
@@ -590,13 +665,7 @@ static jobject BootGuest(JNIEnv* env, jobject proxy) {
         return nullptr;
     }
     const char* guestPkg = env->GetStringUTFChars(jPkg, nullptr);
-    if (!guestPkg) {
-        env->DeleteLocalRef(jPkg);
-        env->DeleteLocalRef(ai);
-        env->DeleteLocalRef(guestCtx);
-        return nullptr;
-    }
-
+    if (!guestPkg) { env->DeleteLocalRef(jPkg); env->DeleteLocalRef(ai); env->DeleteLocalRef(guestCtx); return nullptr; }
     jclass aiCls = env->FindClass("android/content/pm/ApplicationInfo");
     jfieldID fSrc = env->GetFieldID(aiCls, "sourceDir", "Ljava/lang/String;");
     env->DeleteLocalRef(aiCls);
@@ -604,25 +673,18 @@ static jobject BootGuest(JNIEnv* env, jobject proxy) {
     if (!jApk) {
         LOGE("BootGuest: no sourceDir");
         env->ReleaseStringUTFChars(jPkg, guestPkg);
-        env->DeleteLocalRef(jPkg);
-        env->DeleteLocalRef(ai);
-        env->DeleteLocalRef(guestCtx);
+        env->DeleteLocalRef(jPkg); env->DeleteLocalRef(ai); env->DeleteLocalRef(guestCtx);
         return nullptr;
     }
     const char* apkPath = env->GetStringUTFChars(jApk, nullptr);
     if (!apkPath) {
         env->ReleaseStringUTFChars(jPkg, guestPkg);
-        env->DeleteLocalRef(jApk);
-        env->DeleteLocalRef(jPkg);
-        env->DeleteLocalRef(ai);
-        env->DeleteLocalRef(guestCtx);
+        env->DeleteLocalRef(jApk); env->DeleteLocalRef(jPkg);
+        env->DeleteLocalRef(ai); env->DeleteLocalRef(guestCtx);
         return nullptr;
     }
-
     LOGD("BootGuest: pkg=%s apk=%s", guestPkg, apkPath);
-
     SetProcessArgV0(env, guestPkg);
-
     jobject guestApp = nullptr;
     jint myUid = GetMyUid(env);
     jstring jDataDir = ReadGuestDataDir(env, proxy);
@@ -635,44 +697,37 @@ static jobject BootGuest(JNIEnv* env, jobject proxy) {
     if (dataDirStr.empty()) {
         dataDirStr = std::string("/data/user/0/com.ims134.hookengine/files/guest-data/") + guestPkg;
     }
-
     jclass aiCls2 = env->FindClass("android/content/pm/ApplicationInfo");
     jfieldID fLib = env->GetFieldID(aiCls2, "nativeLibraryDir", "Ljava/lang/String;");
     env->DeleteLocalRef(aiCls2);
     jstring jLib = (jstring)env->GetObjectField(ai, fLib);
     const char* libDir = jLib ? env->GetStringUTFChars(jLib, nullptr) : "";
-
     if (myUid >= 0 && !dataDirStr.empty()) {
         if (FixApplicationInfo(env, ai, apkPath, libDir ? libDir : "", dataDirStr.c_str(), myUid)) {
             LOGD("BootGuest: trying LoadedApk path");
             guestApp = BootViaLoadedApk(env, ai, guestCtx);
             if (guestApp) LOGD("BootGuest: LoadedApk path SUCCEEDED");
-            else LOGE("BootGuest: LoadedApk path failed — falling back to manual");
+            else LOGE("BootGuest: LoadedApk path failed");
         }
     }
     if (jLib) env->ReleaseStringUTFChars(jLib, libDir);
     env->DeleteLocalRef(jLib);
-
     if (!guestApp) {
         LOGD("BootGuest: trying manual path");
         guestApp = BootManual(env, guestCtx);
         if (guestApp) LOGD("BootGuest: manual path SUCCEEDED");
-        else LOGE("BootGuest: manual path failed too");
+        else LOGE("BootGuest: manual path failed");
     }
-
     env->ReleaseStringUTFChars(jPkg, guestPkg);
     env->ReleaseStringUTFChars(jApk, apkPath);
-    env->DeleteLocalRef(jApk);
-    env->DeleteLocalRef(jPkg);
-    env->DeleteLocalRef(ai);
-    env->DeleteLocalRef(guestCtx);
+    env->DeleteLocalRef(jApk); env->DeleteLocalRef(jPkg);
+    env->DeleteLocalRef(ai); env->DeleteLocalRef(guestCtx);
     return guestApp;
 }
 
-// ─── JNI exports ──────────────────────────────────────────────────
 extern "C" JNIEXPORT void JNICALL
 Java_com_ims134_hookengine_ApplicationProxy_nativeOnCreate(JNIEnv* env, jobject thiz) {
-    LOGD("nativeOnCreate: entry (LoadedApk → manual fallback)");
+    LOGD("nativeOnCreate: entry");
     if (!env) return;
     jobject guestApp = BootGuest(env, thiz);
     if (!guestApp) { LOGE("nativeOnCreate: boot failed"); return; }
@@ -683,12 +738,11 @@ Java_com_ims134_hookengine_ApplicationProxy_nativeOnCreate(JNIEnv* env, jobject 
         env->DeleteLocalRef(guestApp);
         g_guest_created = false;
     }
-    LOGD("nativeOnCreate: complete (onCreate deferred until after providers)");
+    LOGD("nativeOnCreate: complete");
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_ims134_hookengine_ApplicationProxy_nativeAttachGuest(
-        JNIEnv* env, jobject thiz) {
+Java_com_ims134_hookengine_ApplicationProxy_nativeAttachGuest(JNIEnv* env, jobject thiz) {
     if (!env) return JNI_FALSE;
     jobject guestApp = BootGuest(env, thiz);
     if (!guestApp) return JNI_FALSE;
@@ -703,28 +757,21 @@ Java_com_ims134_hookengine_ApplicationProxy_nativeAttachGuest(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_ims134_hookengine_ApplicationProxy_nativeCreateGuest(
-        JNIEnv* env, jobject /*thiz*/) {
+Java_com_ims134_hookengine_ApplicationProxy_nativeCreateGuest(JNIEnv* env, jobject) {
     jobject guestApp;
     { std::lock_guard<std::mutex> lk(g_guest_mutex); guestApp = g_guest_app; }
     if (!guestApp) { LOGE("nativeCreateGuest: no guest"); return JNI_FALSE; }
-
     jclass threadCls = env->FindClass("java/lang/Thread");
-    jmethodID curThM = env->GetStaticMethodID(threadCls, "currentThread",
-                                              "()Ljava/lang/Thread;");
-    jmethodID getClM = env->GetMethodID(threadCls, "getContextClassLoader",
-                                        "()Ljava/lang/ClassLoader;");
-    jmethodID setClM = env->GetMethodID(threadCls, "setContextClassLoader",
-                                        "(Ljava/lang/ClassLoader;)V");
+    jmethodID curThM = env->GetStaticMethodID(threadCls, "currentThread", "()Ljava/lang/Thread;");
+    jmethodID getClM = env->GetMethodID(threadCls, "getContextClassLoader", "()Ljava/lang/ClassLoader;");
+    jmethodID setClM = env->GetMethodID(threadCls, "setContextClassLoader", "(Ljava/lang/ClassLoader;)V");
     jobject thread = curThM ? env->CallStaticObjectMethod(threadCls, curThM) : nullptr;
     jobject oldCL = (thread && getClM) ? env->CallObjectMethod(thread, getClM) : nullptr;
     if (env->ExceptionCheck()) env->ExceptionClear();
-
     jobject guestCL = nullptr;
     {
         jclass ctxCls2 = env->FindClass("android/content/Context");
-        jmethodID getCLM = env->GetMethodID(ctxCls2, "getClassLoader",
-                                            "()Ljava/lang/ClassLoader;");
+        jmethodID getCLM = env->GetMethodID(ctxCls2, "getClassLoader", "()Ljava/lang/ClassLoader;");
         if (getCLM) guestCL = env->CallObjectMethod(guestApp, getCLM);
         env->DeleteLocalRef(ctxCls2);
         if (env->ExceptionCheck()) env->ExceptionClear();
@@ -732,24 +779,20 @@ Java_com_ims134_hookengine_ApplicationProxy_nativeCreateGuest(
     if (thread && guestCL && setClM) {
         env->CallVoidMethod(thread, setClM, guestCL);
         if (env->ExceptionCheck()) env->ExceptionClear();
-        LOGD("nativeCreateGuest: contextClassLoader set to guest's");
+        LOGD("nativeCreateGuest: contextClassLoader set");
     }
-
     jclass appCls = env->FindClass("android/app/Application");
     jmethodID onCreateM = appCls ? env->GetMethodID(appCls, "onCreate", "()V") : nullptr;
     if (appCls) env->DeleteLocalRef(appCls);
-
     bool ok = false;
     if (onCreateM) {
         env->CallVoidMethod(guestApp, onCreateM);
-
         if (!env->ExceptionCheck()) {
             ok = true;
-            LOGD("nativeCreateGuest: onCreate succeeded cleanly");
+            LOGD("nativeCreateGuest: onCreate succeeded");
         } else {
             jthrowable ex = env->ExceptionOccurred();
             env->ExceptionClear();
-
             bool isViberComponentError = false;
             if (ex) {
                 jclass illArgCls = env->FindClass("java/lang/IllegalArgumentException");
@@ -757,16 +800,13 @@ Java_com_ims134_hookengine_ApplicationProxy_nativeCreateGuest(
                     if (env->IsInstanceOf(ex, illArgCls)) {
                         jclass thCls = env->FindClass("java/lang/Throwable");
                         if (thCls) {
-                            jmethodID getMsgM = env->GetMethodID(thCls, "getMessage",
-                                                                 "()Ljava/lang/String;");
+                            jmethodID getMsgM = env->GetMethodID(thCls, "getMessage", "()Ljava/lang/String;");
                             if (getMsgM) {
                                 jstring msg = (jstring)env->CallObjectMethod(ex, getMsgM);
                                 if (msg) {
                                     const char* m = env->GetStringUTFChars(msg, nullptr);
                                     if (m) {
-                                        if (strstr(m, "unknown component class")) {
-                                            isViberComponentError = true;
-                                        }
+                                        if (strstr(m, "unknown component class")) isViberComponentError = true;
                                         env->ReleaseStringUTFChars(msg, m);
                                     }
                                     env->DeleteLocalRef(msg);
@@ -781,17 +821,15 @@ Java_com_ims134_hookengine_ApplicationProxy_nativeCreateGuest(
                 }
                 env->DeleteLocalRef(ex);
             }
-
             if (isViberComponentError) {
-                LOGD("nativeCreateGuest: Viber DI 'unknown component class' swallowed — bb2 already set");
+                LOGD("nativeCreateGuest: Viber DI swallowed");
                 ok = true;
             } else {
-                LOGE("nativeCreateGuest: unexpected exception (non-Viber-DI)");
+                LOGE("nativeCreateGuest: unexpected exception");
                 ok = false;
             }
         }
     }
-
     if (thread && oldCL && setClM) {
         env->CallVoidMethod(thread, setClM, oldCL);
         if (env->ExceptionCheck()) env->ExceptionClear();
@@ -800,7 +838,6 @@ Java_com_ims134_hookengine_ApplicationProxy_nativeCreateGuest(
     if (oldCL) env->DeleteLocalRef(oldCL);
     if (thread) env->DeleteLocalRef(thread);
     env->DeleteLocalRef(threadCls);
-
     if (ok) {
         std::lock_guard<std::mutex> lk(g_guest_mutex);
         g_guest_created = true;
@@ -811,42 +848,33 @@ Java_com_ims134_hookengine_ApplicationProxy_nativeCreateGuest(
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
-Java_com_ims134_hookengine_ApplicationProxy_nativeIsGuestCreated(
-        JNIEnv* /*env*/, jobject /*thiz*/) {
+Java_com_ims134_hookengine_ApplicationProxy_nativeIsGuestCreated(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_guest_mutex);
     return g_guest_created ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_ims134_hookengine_ApplicationProxy_nativeOnTerminate(JNIEnv* env, jobject /*thiz*/) {
+Java_com_ims134_hookengine_ApplicationProxy_nativeOnTerminate(JNIEnv* env, jobject) {
     std::lock_guard<std::mutex> lk(g_guest_mutex);
     if (!g_guest_app) return;
     jclass appCls = env->FindClass("android/app/Application");
     jmethodID m = env->GetMethodID(appCls, "onTerminate", "()V");
     env->DeleteLocalRef(appCls);
-    if (m) {
-        env->CallVoidMethod(g_guest_app, m);
-        if (env->ExceptionCheck()) LogAndClearException(env, "onTerminate");
-    }
+    if (m) { env->CallVoidMethod(g_guest_app, m); if (env->ExceptionCheck()) LogAndClearException(env, "onTerminate"); }
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_ims134_hookengine_ApplicationProxy_nativeOnConfigurationChanged(
-        JNIEnv* env, jobject /*thiz*/, jobject newConfig) {
+Java_com_ims134_hookengine_ApplicationProxy_nativeOnConfigurationChanged(JNIEnv* env, jobject, jobject newConfig) {
     std::lock_guard<std::mutex> lk(g_guest_mutex);
     if (!g_guest_app) return;
     jclass appCls = env->FindClass("android/app/Application");
-    jmethodID m = env->GetMethodID(appCls, "onConfigurationChanged",
-                                   "(Landroid/content/res/Configuration;)V");
+    jmethodID m = env->GetMethodID(appCls, "onConfigurationChanged", "(Landroid/content/res/Configuration;)V");
     env->DeleteLocalRef(appCls);
-    if (m) {
-        env->CallVoidMethod(g_guest_app, m, newConfig);
-        if (env->ExceptionCheck()) LogAndClearException(env, "onConfigurationChanged");
-    }
+    if (m) { env->CallVoidMethod(g_guest_app, m, newConfig); if (env->ExceptionCheck()) LogAndClearException(env, "onConfigurationChanged"); }
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_com_ims134_hookengine_ApplicationProxy_nativeOnDestroy(JNIEnv* env, jobject /*thiz*/) {
+Java_com_ims134_hookengine_ApplicationProxy_nativeOnDestroy(JNIEnv* env, jobject) {
     std::lock_guard<std::mutex> lk(g_guest_mutex);
     if (g_guest_app) { env->DeleteGlobalRef(g_guest_app); g_guest_app = nullptr; }
     g_guest_created = false;
@@ -854,15 +882,13 @@ Java_com_ims134_hookengine_ApplicationProxy_nativeOnDestroy(JNIEnv* env, jobject
 }
 
 extern "C" JNIEXPORT jobject JNICALL
-Java_com_ims134_hookengine_ApplicationProxy_nativeGetGuestApplication(
-        JNIEnv* /*env*/, jobject /*thiz*/) {
+Java_com_ims134_hookengine_ApplicationProxy_nativeGetGuestApplication(JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lk(g_guest_mutex);
     return g_guest_app;
 }
 
 extern "C" JNIEXPORT jobject JNICALL
-Java_com_ims134_hookengine_ApplicationProxy_nativeBuildGuestResources(
-        JNIEnv* env, jobject /*thiz*/, jstring jApkPath, jobject jHostContext) {
+Java_com_ims134_hookengine_ApplicationProxy_nativeBuildGuestResources(JNIEnv* env, jobject, jstring jApkPath, jobject jHostContext) {
     if (!jApkPath || !jHostContext) return nullptr;
     const char* apkPath = env->GetStringUTFChars(jApkPath, nullptr);
     if (!apkPath) return nullptr;
@@ -882,21 +908,16 @@ Java_com_ims134_hookengine_ApplicationProxy_nativeBuildGuestResources(
         if (env->ExceptionCheck()) { env->ExceptionClear(); break; }
         LOGD("buildGuestRes: addAssetPath -> %d", (int)addRc);
         if (addRc == 0) break;
-
         jclass ctxCls = env->FindClass("android/content/Context");
-        jmethodID getResM = env->GetMethodID(ctxCls, "getResources",
-                                             "()Landroid/content/res/Resources;");
+        jmethodID getResM = env->GetMethodID(ctxCls, "getResources", "()Landroid/content/res/Resources;");
         env->DeleteLocalRef(ctxCls);
         if (!getResM) break;
         hostRes = env->CallObjectMethod(jHostContext, getResM);
         if (env->ExceptionCheck()) { env->ExceptionClear(); hostRes = nullptr; }
         if (!hostRes) break;
-
         jclass resCls = env->FindClass("android/content/res/Resources");
-        jmethodID getMetricsM = env->GetMethodID(resCls, "getDisplayMetrics",
-                                                 "()Landroid/util/DisplayMetrics;");
-        jmethodID getConfigM = env->GetMethodID(resCls, "getConfiguration",
-                                                "()Landroid/content/res/Configuration;");
+        jmethodID getMetricsM = env->GetMethodID(resCls, "getDisplayMetrics", "()Landroid/util/DisplayMetrics;");
+        jmethodID getConfigM = env->GetMethodID(resCls, "getConfiguration", "()Landroid/content/res/Configuration;");
         jmethodID resCtor = env->GetMethodID(resCls, "<init>",
                                              "(Landroid/content/res/AssetManager;Landroid/util/DisplayMetrics;Landroid/content/res/Configuration;)V");
         if (!getMetricsM || !getConfigM || !resCtor) { env->DeleteLocalRef(resCls); break; }

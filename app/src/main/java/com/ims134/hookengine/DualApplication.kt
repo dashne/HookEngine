@@ -26,6 +26,21 @@ class DualApplication : Application() {
         Log.d(TAG, "DualApplication.attachBaseContext: entering")
         try { nativeOnLoad(base.applicationInfo.sourceDir, base.applicationInfo.nativeLibraryDir) }
         catch (t: Throwable) { Log.e(TAG, "nativeOnLoad failed: $t", t) }
+
+        // Session 38 — nativeInit (structural port, 3-param reference signature).
+        // Extracts .so + classes*.dex from staged APK into libPath before
+        // tryWireApplicationProxy runs. Idempotent with tryWireApplicationProxy's
+        // own extraction (already-extracted files are skipped there by size check).
+        try {
+            val apk = File(base.filesDir, GUEST_APK)
+            if (apk.exists()) {
+                val libDir = File(base.filesDir, GUEST_LIB_DIR).apply { mkdirs() }
+                val rc = ApplicationProxy.getInstance()
+                    .nativeInit(apk.absolutePath, libDir.absolutePath, 0)
+                Log.d(TAG, "nativeInit: rc=$rc (0=ok)")
+            }
+        } catch (t: Throwable) { Log.e(TAG, "nativeInit failed: $t", t) }
+
         try { nativeAttachBaseContext(base) }
         catch (t: Throwable) { Log.e(TAG, "nativeAttachBaseContext failed: $t", t) }
         try { ClassLoaderBridge.install() }
@@ -97,19 +112,15 @@ class DualApplication : Application() {
             } catch (t: Throwable) { Log.w(TAG, "lib extract: $t") }
 
             val guestDataDir = File(base.filesDir, "guest-data/$guestPkg").apply { mkdirs() }
-
             val loader = GuestClassLoader(apk.absolutePath, libDir.absolutePath, base.classLoader)
             val proxy = ApplicationProxy.getInstance()
             proxy.setGuestDataDir(guestDataDir.absolutePath)
-
             val guestRes = try { proxy.nativeBuildGuestResources(apk.absolutePath, base) }
             catch (t: Throwable) { Log.w(TAG, "buildGuestResources: $t"); null }
             Log.d(TAG, "tryWireApplicationProxy: guestRes=${guestRes?.javaClass?.simpleName}")
             Log.d(TAG, "tryWireApplicationProxy: dataDir=${guestDataDir.absolutePath}")
-
             val guestCtx = GuestHost.GuestContext(base, guestPkg, guestAi, loader, guestRes)
             proxy.setBaseContext(guestCtx)
-
             try {
                 PmSpoof.guestArchives = PmSpoof.guestArchives + (guestPkg to apk.absolutePath)
                 PmSpoof.signatureNullOutPackages =

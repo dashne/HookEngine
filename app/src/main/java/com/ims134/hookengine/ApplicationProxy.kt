@@ -38,6 +38,15 @@ class ApplicationProxy : Application() {
 
     fun setGuestDataDir(path: String?) { this.guestDataDir = path }
 
+    // Session 38 — nativeInit (structural port).
+    // 3-param signature matches reference decomp (Session 20):
+    //   nativeInit(String, String, int) -> int
+    // Behavior: extract .so files and classes*.dex from the staged APK
+    // into libPath; return 0 on success, -1 on failure. Body inferred from
+    // reference architecture (JNI_OnLoad + ApplicationProxy flow); sub_2A998
+    // body not directly decomp'd. Rule 5 partial — structural port only.
+    external fun nativeInit(dexPath: String, libPath: String, flags: Int): Int
+
     external fun nativeOnCreate()
     external fun nativeAttachGuest(): Boolean
     external fun nativeCreateGuest(): Boolean
