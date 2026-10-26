@@ -1,32 +1,26 @@
 // ApplicationProxy.cpp
 // Session 22 — BlackBox-fidelity native boot.
-//
-// Flow (LoadedApk path):
-//   1. Process.setArgV0(guestPkg) via direct or reflection    ← process name
-//   2. Fix ai: uid=myUid, dataDir=sandbox, sourceDir,
-//              nativeLibraryDir, flags |= FLAG_DEBUGGABLE
-//   3. ActivityThread.getPackageInfoNoCheck(ai, ci) → LoadedApk
-//   4. LoadedApk.mSecurityViolation=false, mApplicationInfo=ai
-//   5. Pre-populate LoadedApk.mClassLoader + mResources
-//   6. LoadedApk.makeApplication(false, null) → guest Application
-//   7. Patch ActivityThread: mBoundApplication.processName = guestPkg,
-//                            mBoundApplication.appInfo = ai,
-//                            mInitialApplication = guestApp
-//   8. Guest Application.onCreate runs (Viber sets bb2 in lines 1-64;
-//      line 65 throws "unknown component class ii" — that exception is
-//      swallowed because bb2 IS set and providers work correctly after).
-//
-// Fallback (manual path) if LoadedApk path fails.
+// Session 32 — GetMyUid now returns kernel uid via syscall(SYS_getuid)
+//              instead of Process.myUid(). The spoofed myUid (10000)
+//              propagates into ApplicationInfo.uid, which propagates into
+//              every AttributionSource created from the guest ContextImpl.
+//              Server-side AttributionSource.enforceCallingUid checks
+//              parcel uid vs Binder.getCallingUid() — 10000 vs 10431 —
+//              rejects. Rewriter can't fix it (Mechanism C: parcel swap
+//              doesn't reach wire for same-size rewrites). Fix at source:
+//              ApplicationInfo.uid = kernel uid. Guest code calling
+//              Process.myUid() still sees 10000 (Fake_getuid unchanged).
 
 #include <jni.h>
 #include <android/log.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <cstring>
 #include <cstdio>
 #include <cstdarg>
 #include <string>
 #include <mutex>
 #include <initializer_list>
-#include <unistd.h>
 
 #define TAG "DualCore.Native"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
@@ -311,15 +305,18 @@ static bool FixApplicationInfo(
     return true;
 }
 
+// ─── Session 32 — kernel uid, not spoofed myUid ─────────────────────
 static jint GetMyUid(JNIEnv* env) {
-    jclass procCls = env->FindClass("android/os/Process");
-    if (!procCls) { env->ExceptionClear(); return -1; }
-    jmethodID m = env->GetStaticMethodID(procCls, "myUid", "()I");
-    if (!m) { env->ExceptionClear(); env->DeleteLocalRef(procCls); return -1; }
-    jint uid = env->CallStaticIntMethod(procCls, m);
-    env->DeleteLocalRef(procCls);
-    if (env->ExceptionCheck()) { env->ExceptionClear(); return -1; }
-    return uid;
+    (void)env;
+    // Process.myUid() returns 10000 via Fake_getuid hook. That propagates
+    // into ApplicationInfo.uid, which propagates into every AttributionSource
+    // created from the guest ContextImpl. Server-side
+    // AttributionSource.enforceCallingUid compares parcel uid to
+    // Binder.getCallingUid() (kernel, 10431) and rejects.
+    // Parcel-rewrite of uid doesn't reach the wire on same-size swaps
+    // (Mechanism C — verified Session 32). Fix at source: use kernel uid.
+    // Guest code calling Process.myUid() still sees 10000 (unchanged).
+    return (jint)syscall(SYS_getuid);
 }
 
 // ─── LoadedApk boot ────────────────────────────────────────────────
@@ -705,7 +702,6 @@ Java_com_ims134_hookengine_ApplicationProxy_nativeAttachGuest(
     return JNI_TRUE;
 }
 
-// ─── nativeCreateGuest with Viber exception swallow ───────────────
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_ims134_hookengine_ApplicationProxy_nativeCreateGuest(
         JNIEnv* env, jobject /*thiz*/) {
@@ -713,7 +709,6 @@ Java_com_ims134_hookengine_ApplicationProxy_nativeCreateGuest(
     { std::lock_guard<std::mutex> lk(g_guest_mutex); guestApp = g_guest_app; }
     if (!guestApp) { LOGE("nativeCreateGuest: no guest"); return JNI_FALSE; }
 
-    // Swap contextClassLoader so Viber's loaders can resolve their own classes.
     jclass threadCls = env->FindClass("java/lang/Thread");
     jmethodID curThM = env->GetStaticMethodID(threadCls, "currentThread",
                                               "()Ljava/lang/Thread;");
@@ -740,7 +735,6 @@ Java_com_ims134_hookengine_ApplicationProxy_nativeCreateGuest(
         LOGD("nativeCreateGuest: contextClassLoader set to guest's");
     }
 
-    // Look up Application.onCreate BEFORE calling it.
     jclass appCls = env->FindClass("android/app/Application");
     jmethodID onCreateM = appCls ? env->GetMethodID(appCls, "onCreate", "()V") : nullptr;
     if (appCls) env->DeleteLocalRef(appCls);
@@ -753,16 +747,11 @@ Java_com_ims134_hookengine_ApplicationProxy_nativeCreateGuest(
             ok = true;
             LOGD("nativeCreateGuest: onCreate succeeded cleanly");
         } else {
-            // ── CRITICAL FIX: get throwable ref, THEN clear, THEN FindClass.
-            // JNI: FindClass is illegal with pending exception. Previous
-            // version called FindClass while `unknown component class`
-            // was still pending → JNI abort → SIGABRT.
             jthrowable ex = env->ExceptionOccurred();
             env->ExceptionClear();
 
             bool isViberComponentError = false;
             if (ex) {
-                // Now safe to call FindClass — no pending exception.
                 jclass illArgCls = env->FindClass("java/lang/IllegalArgumentException");
                 if (illArgCls) {
                     if (env->IsInstanceOf(ex, illArgCls)) {
@@ -803,7 +792,6 @@ Java_com_ims134_hookengine_ApplicationProxy_nativeCreateGuest(
         }
     }
 
-    // Restore old loader.
     if (thread && oldCL && setClM) {
         env->CallVoidMethod(thread, setClM, oldCL);
         if (env->ExceptionCheck()) env->ExceptionClear();

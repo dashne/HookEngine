@@ -1,6 +1,29 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
+    <!--
+      Session 31 — Wall C4 pre-requisite.
+
+      com.ims134.hookengine was self-contained through Session 30: hook
+      installation, PmSpoof, ParcelRewriter, guest boot — none of those
+      require network permissions because they intercept at the Binder or
+      GOT layer.
+
+      Milestone 4 changes the contract: MainActivity launches a real Activity
+      through AMS, and every real Activity on Android 15+ runs a permission
+      self-check path during launch. Viber's Application onCreate (which runs
+      in :remote during RemoteService startup) reads network state to decide
+      connectivity-dependent initialization. Without ACCESS_NETWORK_STATE,
+      that self-check throws SecurityException on a thread that can propagate
+      back to main, killing the process before the test runner reports
+      completion — which manifests as "am instrument hangs."
+
+      All three are normal (install-time) permissions. No runtime prompt.
+      Declaring them grants them.
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <queries>
         <package android:name="com.viber.voip" />
     </queries>
