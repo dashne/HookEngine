@@ -14,6 +14,7 @@ enum HookResult : int {
     HOOK_ALREADY_HOOKED,
     HOOK_NOT_HOOKED,
     HOOK_INTERNAL_ERROR,
+    HOOK_TARGET_INVALID,      // Session 42: unmapped / misaligned / non-exec target or replacement
 };
 
 enum HookType { HT_INLINE = 0, HT_GOT = 1 };

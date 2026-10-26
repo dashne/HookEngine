@@ -301,3 +301,54 @@ extern "C" HookResult UninstallInlineHook(void* targetFunc) {
     g_relay_free_count++;
     return HOOK_OK;
 }
+
+// ─── Feature 1.5 — dynamic runtime attach by computed address ──────
+//
+// InstallInlineHookEx already accepts any void* target, so the primitive
+// exists. AttachRuntime is the *engine-facing* API for callers that have
+// only a numeric address (dlsym result, /proc/maps walk, pattern scan,
+// captured return address) — not a symbol reference. It adds:
+//
+//   - Alignment guard (refuse addr & 3 != 0; write is 4 bytes)
+//   - Mapped-page guard (ReadPageProt must find the page)
+//   - Executable-page guard (refuse rw-/r-- targets — CPU would SIGSEGV
+//     the instant control reaches the patched page)
+//   - Replacement executable guard (same reason; relay branches straight
+//     into repl)
+//
+// Then delegates to InstallInlineHookEx. Refusal paths return
+// HOOK_TARGET_INVALID so callers can distinguish "bad input" from
+// "install machinery failed".
+
+extern "C" HookResult AttachRuntime(uint64_t addr, void* replacement, void** outOrig) {
+    if (addr == 0 || replacement == nullptr) return HOOK_INTERNAL_ERROR;
+    if ((addr & 3u) != 0) return HOOK_TARGET_INVALID;
+
+    long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) return HOOK_INTERNAL_ERROR;
+
+    uintptr_t targetPage = (uintptr_t)addr & ~((uintptr_t)pageSize - 1);
+    int targetProt = 0;
+    if (!ReadPageProt(targetPage, &targetProt)) {
+        // Not present in /proc/self/maps: address is unmapped.
+        return HOOK_TARGET_INVALID;
+    }
+    if ((targetProt & PROT_EXEC) == 0) {
+        // Mapped but non-executable (data page, .bss, heap). Writing a
+        // B.imm26 there would corrupt data; if the CPU ever reached the
+        // patched word it would SIGSEGV on the non-exec page.
+        return HOOK_TARGET_INVALID;
+    }
+
+    uintptr_t replPage = (uintptr_t)replacement & ~((uintptr_t)pageSize - 1);
+    int replProt = 0;
+    if (!ReadPageProt(replPage, &replProt)) return HOOK_TARGET_INVALID;
+    if ((replProt & PROT_EXEC) == 0) return HOOK_TARGET_INVALID;
+
+    return InstallInlineHookEx((void*)(uintptr_t)addr, replacement, outOrig, "runtime");
+}
+
+extern "C" HookResult DetachRuntime(uint64_t addr) {
+    if (addr == 0) return HOOK_INTERNAL_ERROR;
+    return UninstallInlineHook((void*)(uintptr_t)addr);
+}

@@ -921,5 +921,64 @@ Java_com_ims134_hookengine_NativeTestBridge_probeFromReflectedMethod(
     return (jlong)(uintptr_t)mid;
 }
 
+// ─── Feature 1.5 — DynamicAttachTest fixtures + JNI bridges ──────────
+//
+// fn_attach_target is a plain C++ function in libhookengine.so. Its
+// address is NOT resolvable via the linker from Kotlin — the only way
+// to reach it is `getFnAttachTargetAddr()`, which returns it as a jlong.
+// That makes it the canonical "computed address" for Feature 1.5,
+// distinguishing it from the ordinary symbol path (item1 installs on
+// &fn_normal directly via linker).
 
+extern "C" HookResult AttachRuntime(uint64_t addr, void* replacement, void** outOrig);
+extern "C" HookResult DetachRuntime(uint64_t addr);
+
+extern "C" __attribute__((noinline, naked, used))
+int fn_attach_target(int x) {
+    __asm__ volatile("add w0, w0, #1\nret\n");
+}
+
+extern "C" __attribute__((noinline, used))
+int fake_attach(int x) { (void)x; return 0xDA77; }
+
+// Static data — lands in .data / .bss (rw-, no exec). Proves the
+// executable-page guard fires on a real, mapped, non-exec address.
+extern "C" int g_test_data_var = 0x42;
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getFnAttachTargetAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&fn_attach_target;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getFakeAttachAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&fake_attach;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getTestDataVarAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&g_test_data_var;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_callFnAttachTarget(JNIEnv*, jobject, jint x) {
+    return (jint)fn_attach_target((int)x);
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_readU32At(JNIEnv*, jobject, jlong addr) {
+    if (!addr) return -1;
+    return (jlong)((uint32_t)*(volatile uint32_t*)(uintptr_t)addr);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_attachRuntime(
+        JNIEnv*, jobject, jlong addr, jlong repl) {
+    return (jint)AttachRuntime((uint64_t)addr, (void*)(uintptr_t)repl, nullptr);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_detachRuntime(JNIEnv*, jobject, jlong addr) {
+    return (jint)DetachRuntime((uint64_t)addr);
+}
 

@@ -22,4 +22,13 @@ object NativeTestBridge {
     external fun parcelRewriterReady(): Boolean
 
     external fun dumpLastCode36Reply(): ByteArray?
+
+    // ─── Feature 1.5 — dynamic runtime attach ───────────────────────
+    external fun attachRuntime(addr: Long, repl: Long): Int
+    external fun detachRuntime(addr: Long): Int
+    external fun getFnAttachTargetAddr(): Long
+    external fun getFakeAttachAddr(): Long
+    external fun getTestDataVarAddr(): Long
+    external fun callFnAttachTarget(x: Int): Int
+    external fun readU32At(addr: Long): Long
 }
