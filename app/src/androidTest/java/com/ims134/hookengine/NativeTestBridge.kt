@@ -56,11 +56,6 @@ object NativeTestBridge {
     external fun chainPredLastX0(): Int
 
     // ─── Feature 1.9 — return-value modification ────────────────────
-    //
-    // attachRetMod installs a post-call modifier. The modifier sees
-    // (entry-time x0..x7, orig_ret) and returns the caller-visible
-    // value. Distinct from chaining — chaining preserves the return
-    // value; retmod transforms it.
     external fun attachRetMod(target: Long, modifier: Long): Int
     external fun detachRetMod(target: Long): Int
     external fun retModCount(): Int
@@ -71,6 +66,38 @@ object NativeTestBridge {
     external fun getRetModAdd1000Addr(): Long
     external fun getRetModClamp100Addr(): Long
     external fun getRetModForceDeadAddr(): Long
+
+    // ─── Feature 1.6 — SVC instruction hooking ──────────────────────
+    //
+    // SVC fixtures are naked functions with exactly (mov x8,#nr; svc #0;
+    // ret). The SVC address is function_start + 4. Test passes explicit
+    // addresses for both — no +4 assumption in Kotlin.
+    external fun getSvcGetpidTargetAddr(): Long
+    external fun getSvcGetpidSvcAddr(): Long
+    external fun getSvcGetppidTargetAddr(): Long
+    external fun getSvcGetppidSvcAddr(): Long
+    external fun getSvcCloseInvalidTargetAddr(): Long
+    external fun getSvcCloseInvalidSvcAddr(): Long
+
+    external fun getSvcHandlerForce7aceAddr(): Long
+    external fun getSvcHandlerAdd1000Addr(): Long
+    external fun getSvcHandlerIdentityAddr(): Long
+
+    external fun callSvcGetpid(): Int
+    external fun callSvcGetppid(): Int
+    external fun callSvcCloseInvalid(fd: Int): Int
+
+    external fun svcHookAttach(svcAddr: Long, expectedNr: Int, handler: Long): Int
+    external fun svcHookDetach(svcAddr: Long): Int
+    external fun svcHookCount(): Int
+    external fun svcHookScanLib(lib: String): Int
+
+    external fun svcFires(): Long
+    external fun svcLastNr(): Long
+    external fun svcLastOrig(): Long
+    external fun svcLastArg0(): Long
+    external fun svcLastArg1(): Long
+    external fun svcResetCounters()
 
     // ─── Feature 1.4 — ArtMethod entry/exit trace ───────────────────
     external fun traceAttach0(method: java.lang.reflect.Method): Int
@@ -84,7 +111,6 @@ object NativeTestBridge {
     external fun traceLastRet(): Int
     external fun traceResetCounters()
 
-    // Trace fixture targets (String arg breaks fast-JNI eligibility).
     external fun traceTargetS0(warmup: String): Int
     external fun traceTargetS1(warmup: String, x: Int): Int
 }

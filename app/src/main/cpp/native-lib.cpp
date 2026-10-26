@@ -20,6 +20,7 @@
 #include "test_suite.h"
 #include "ProcessHooks.h"
 #include "ArtMethodTrace.h"
+#include "SvcHook.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -361,6 +362,7 @@ Java_com_ims134_hookengine_NativeTestBridge_uninstallAll(JNIEnv*, jobject) {
     ChainResetAll();
     TraceResetAll();
     RetModResetAll();
+    SvcHookResetAll();
 }
 
 extern "C" void SetItem4Paths(const char* realDir, const char* fakeDir);
@@ -927,12 +929,6 @@ static std::atomic<int> g_chain_last_x0_2{0};
 static std::atomic<int> g_chain_order_first{-1};
 
 // ─── Feature 1.8 — Conditional hook fixtures ────────────────────────
-//
-// Predicates are called by the chain dispatcher BEFORE the paired handler
-// with a read-only view of x0..x7 at the target site. Returning false
-// skips the handler (no entry callback, no body). Even when all handlers
-// are skipped, the chain still falls through to the trampoline — the
-// original function executes and returns its real value.
 extern "C" HookResult ChainAttachCond(void* target, bool (*predicate)(const uint64_t*),
                                       void (*handler)(const uint64_t*), void** outTramp);
 
@@ -1225,4 +1221,193 @@ Java_com_ims134_hookengine_NativeTestBridge_traceResetCounters(JNIEnv*, jobject)
     g_trace_entry_count.store(0);
     g_trace_exit_count.store(0);
     g_trace_last_ret.store(0);
+}
+
+// ─── Feature 1.6 — SVC hooking fixtures + JNI bridges ────────────────
+//
+// Each fixture is a naked function whose body is exactly (mov x8, #NR;
+// svc #0; ret). The SVC lives at function_start + 4 — deterministic
+// because __attribute__((naked)) emits no prologue/epilogue and both
+// `mov x8, #NR` and `svc #0` are single 4-byte instructions.
+//
+// We expose both the function entry (for calling) and the SVC site
+// (for patching) to Kotlin, so the test never has to guess +4.
+
+extern "C" __attribute__((noinline, naked, used))
+int svc_getpid_target() {
+    __asm__ volatile(
+            "mov x8, #172\n"   // __NR_getpid
+            "svc #0\n"
+            "ret\n"
+            );
+}
+
+extern "C" __attribute__((noinline, naked, used))
+int svc_getppid_target() {
+    __asm__ volatile(
+            "mov x8, #173\n"   // __NR_getppid
+            "svc #0\n"
+            "ret\n"
+            );
+}
+
+extern "C" __attribute__((noinline, naked, used))
+int svc_close_invalid(int fd) {
+    // x0=fd on entry per AAPCS64. mov x8,#57 = __NR_close. svc #0.
+    // Caller is expected to pass fd=-1 → EBADF. Harmless.
+    __asm__ volatile(
+            "mov x8, #57\n"    // __NR_close
+            "svc #0\n"
+            "ret\n"
+            );
+}
+
+// Handler bookkeeping — all atomic since handler runs in signal context
+// and reading side runs in normal context.
+static std::atomic<uint64_t> g_svc_fires{0};
+static std::atomic<uint64_t> g_svc_last_nr{0};
+static std::atomic<uint64_t> g_svc_last_orig{0};
+static std::atomic<uint64_t> g_svc_last_arg0{0};
+static std::atomic<uint64_t> g_svc_last_arg1{0};
+
+static inline void svc_record(uint64_t nr, uint64_t a0, uint64_t a1, uint64_t orig) {
+    g_svc_fires.fetch_add(1, std::memory_order_relaxed);
+    g_svc_last_nr.store(nr, std::memory_order_relaxed);
+    g_svc_last_orig.store(orig, std::memory_order_relaxed);
+    g_svc_last_arg0.store(a0, std::memory_order_relaxed);
+    g_svc_last_arg1.store(a1, std::memory_order_relaxed);
+}
+
+// Force a fixed value regardless of the real return.
+extern "C" uint64_t svc_handler_force_7ace(uint64_t nr,
+                                           uint64_t a0, uint64_t a1, uint64_t a2,
+                                           uint64_t a3, uint64_t a4, uint64_t a5,
+                                           uint64_t orig_ret) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    svc_record(nr, a0, a1, orig_ret);
+    return 0x7ACE;
+}
+
+// Add a known delta so the caller can verify it saw the transformation.
+extern "C" uint64_t svc_handler_add1000(uint64_t nr,
+                                        uint64_t a0, uint64_t a1, uint64_t a2,
+                                        uint64_t a3, uint64_t a4, uint64_t a5,
+                                        uint64_t orig_ret) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    svc_record(nr, a0, a1, orig_ret);
+    return orig_ret + 1000;
+}
+
+// Record only — pass the real return through.
+extern "C" uint64_t svc_handler_identity(uint64_t nr,
+                                         uint64_t a0, uint64_t a1, uint64_t a2,
+                                         uint64_t a3, uint64_t a4, uint64_t a5,
+                                         uint64_t orig_ret) {
+    (void)a2; (void)a3; (void)a4; (void)a5;
+    svc_record(nr, a0, a1, orig_ret);
+    return orig_ret;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getSvcGetpidTargetAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&svc_getpid_target;
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getSvcGetpidSvcAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)((char*)&svc_getpid_target + 4);
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getSvcGetppidTargetAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&svc_getppid_target;
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getSvcGetppidSvcAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)((char*)&svc_getppid_target + 4);
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getSvcCloseInvalidTargetAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&svc_close_invalid;
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getSvcCloseInvalidSvcAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)((char*)&svc_close_invalid + 4);
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getSvcHandlerForce7aceAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&svc_handler_force_7ace;
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getSvcHandlerAdd1000Addr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&svc_handler_add1000;
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getSvcHandlerIdentityAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&svc_handler_identity;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_callSvcGetpid(JNIEnv*, jobject) {
+    return (jint)svc_getpid_target();
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_callSvcGetppid(JNIEnv*, jobject) {
+    return (jint)svc_getppid_target();
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_callSvcCloseInvalid(JNIEnv*, jobject, jint fd) {
+    return (jint)svc_close_invalid((int)fd);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_svcHookAttach(
+        JNIEnv*, jobject, jlong svcAddr, jint expectedNr, jlong handler) {
+    return (jint)SvcHookAttach((void*)(uintptr_t)svcAddr, (int)expectedNr,
+                               (SyscallHandlerFn)(uintptr_t)handler);
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_svcHookDetach(JNIEnv*, jobject, jlong svcAddr) {
+    return (jint)SvcHookDetach((void*)(uintptr_t)svcAddr);
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_svcHookCount(JNIEnv*, jobject) {
+    return SvcHookCount();
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_svcHookScanLib(JNIEnv* env, jobject, jstring jlib) {
+    if (!env || !jlib) return -1;
+    const char* lib = env->GetStringUTFChars(jlib, nullptr);
+    if (!lib) return -1;
+    int n = SvcHookScanLib(lib);
+    env->ReleaseStringUTFChars(jlib, lib);
+    return n;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_svcFires(JNIEnv*, jobject) {
+    return (jlong)g_svc_fires.load();
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_svcLastNr(JNIEnv*, jobject) {
+    return (jlong)g_svc_last_nr.load();
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_svcLastOrig(JNIEnv*, jobject) {
+    return (jlong)g_svc_last_orig.load();
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_svcLastArg0(JNIEnv*, jobject) {
+    return (jlong)g_svc_last_arg0.load();
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_svcLastArg1(JNIEnv*, jobject) {
+    return (jlong)g_svc_last_arg1.load();
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_svcResetCounters(JNIEnv*, jobject) {
+    g_svc_fires.store(0);
+    g_svc_last_nr.store(0);
+    g_svc_last_orig.store(0);
+    g_svc_last_arg0.store(0);
+    g_svc_last_arg1.store(0);
 }

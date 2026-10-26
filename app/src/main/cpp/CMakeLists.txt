@@ -22,6 +22,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ChainHook.cpp
         ArtMethodTrace.cpp
         ReturnMod.cpp
+        SvcHook.cpp
         ApplicationProxy.cpp
         GuestBoot.cpp
         test_item1.cpp
