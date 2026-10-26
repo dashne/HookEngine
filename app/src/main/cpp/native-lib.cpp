@@ -353,12 +353,14 @@ Java_com_ims134_hookengine_NativeTestBridge_runSuite(JNIEnv* env, jobject, jstri
 }
 
 extern "C" void ChainResetAll();
+extern "C" void RetModResetAll();
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_uninstallAll(JNIEnv*, jobject) {
     UninstallAllHooks();
     ChainResetAll();
     TraceResetAll();
+    RetModResetAll();
 }
 
 extern "C" void SetItem4Paths(const char* realDir, const char* fakeDir);
@@ -931,9 +933,6 @@ static std::atomic<int> g_chain_order_first{-1};
 // skips the handler (no entry callback, no body). Even when all handlers
 // are skipped, the chain still falls through to the trampoline — the
 // original function executes and returns its real value.
-//
-// These declarations MUST appear above chainReset (which resets the two
-// atomics) and above the JNI bridges (which return the fixture addresses).
 extern "C" HookResult ChainAttachCond(void* target, bool (*predicate)(const uint64_t*),
                                       void (*handler)(const uint64_t*), void** outTramp);
 
@@ -1067,14 +1066,86 @@ Java_com_ims134_hookengine_NativeTestBridge_chainPredLastX0(JNIEnv*, jobject) {
     return g_pred_last_x0.load();
 }
 
+// ─── Feature 1.9 — Return-value modification fixtures + JNI bridges ─
+extern "C" HookResult AttachRetMod(void* target,
+                                   uint64_t (*modifier)(const uint64_t*, uint64_t),
+                                   void** outTramp);
+extern "C" HookResult DetachRetMod(void* target);
+extern "C" int        RetModCount();
+
+static std::atomic<int> g_retmod_calls{0};
+static std::atomic<int> g_retmod_last_orig_ret{-1};
+static std::atomic<int> g_retmod_last_arg0{-1};
+
+extern "C" uint64_t retmod_add1000(const uint64_t* xregs, uint64_t orig_ret) {
+    g_retmod_calls.fetch_add(1);
+    g_retmod_last_orig_ret.store((int)(int32_t)orig_ret);
+    g_retmod_last_arg0.store((int)(int32_t)xregs[0]);
+    return orig_ret + 1000;
+}
+extern "C" uint64_t retmod_clamp100(const uint64_t* xregs, uint64_t orig_ret) {
+    g_retmod_calls.fetch_add(1);
+    g_retmod_last_orig_ret.store((int)(int32_t)orig_ret);
+    g_retmod_last_arg0.store((int)(int32_t)xregs[0]);
+    int32_t v = (int32_t)orig_ret;
+    if (v < 0) v = 0;
+    if (v > 100) v = 100;
+    return (uint64_t)(int64_t)v;
+}
+extern "C" uint64_t retmod_force_dead(const uint64_t* xregs, uint64_t orig_ret) {
+    (void)xregs;
+    g_retmod_calls.fetch_add(1);
+    g_retmod_last_orig_ret.store((int)(int32_t)orig_ret);
+    return 0xDEAD;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getRetModAdd1000Addr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&retmod_add1000;
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getRetModClamp100Addr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&retmod_clamp100;
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getRetModForceDeadAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&retmod_force_dead;
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_attachRetMod(
+        JNIEnv*, jobject, jlong target, jlong modifier) {
+    return (jint)AttachRetMod((void*)(uintptr_t)target,
+                              (uint64_t (*)(const uint64_t*, uint64_t))(uintptr_t)modifier,
+                              nullptr);
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_detachRetMod(JNIEnv*, jobject, jlong target) {
+    return (jint)DetachRetMod((void*)(uintptr_t)target);
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_retModCount(JNIEnv*, jobject) {
+    return RetModCount();
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_retModCalls(JNIEnv*, jobject) {
+    return g_retmod_calls.load();
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_retModLastOrigRet(JNIEnv*, jobject) {
+    return g_retmod_last_orig_ret.load();
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_retModLastArg0(JNIEnv*, jobject) {
+    return g_retmod_last_arg0.load();
+}
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_retModReset(JNIEnv*, jobject) {
+    g_retmod_calls.store(0);
+    g_retmod_last_orig_ret.store(-1);
+    g_retmod_last_arg0.store(-1);
+}
+
 // ─── Feature 1.4 — ArtMethod entry/exit trace fixtures + JNI bridges ─
-//
-// CRITICAL: fixtures take a String argument to avoid ART's fast-JNI
-// optimization. All-primitive signatures (int(), int(int)) get marked
-// kAccFastNative by RegisterNatives, which turns ArtMethod.data_ into a
-// small index token (<0x1000) that JavaHookInstall refuses. Adding a
-// non-primitive (String) in the signature breaks eligibility — data_
-// stays a real code pointer — and hooking works.
 extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_traceTargetS0(
         JNIEnv*, jobject, jstring /*ignored*/) {

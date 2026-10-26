@@ -47,12 +47,6 @@ object NativeTestBridge {
     external fun chainReset()
 
     // ─── Feature 1.8 — conditional hook ─────────────────────────────
-    //
-    // Attach a handler with an optional predicate. Null predicate (Long=0)
-    // is equivalent to ChainAttach. Predicate is called with a read-only
-    // view of x0..x7 before the handler fires; returns true to fire, false
-    // to skip. Skipping does NOT prevent the original function from
-    // executing — chain still falls through to the trampoline.
     external fun chainAttachCond(target: Long, predicate: Long, handler: Long): Int
     external fun getChainPredAcceptAllAddr(): Long
     external fun getChainPredRejectAllAddr(): Long
@@ -60,6 +54,23 @@ object NativeTestBridge {
     external fun getChainPredX0Is20Addr(): Long
     external fun chainPredCalls(): Int
     external fun chainPredLastX0(): Int
+
+    // ─── Feature 1.9 — return-value modification ────────────────────
+    //
+    // attachRetMod installs a post-call modifier. The modifier sees
+    // (entry-time x0..x7, orig_ret) and returns the caller-visible
+    // value. Distinct from chaining — chaining preserves the return
+    // value; retmod transforms it.
+    external fun attachRetMod(target: Long, modifier: Long): Int
+    external fun detachRetMod(target: Long): Int
+    external fun retModCount(): Int
+    external fun retModCalls(): Int
+    external fun retModLastOrigRet(): Int
+    external fun retModLastArg0(): Int
+    external fun retModReset()
+    external fun getRetModAdd1000Addr(): Long
+    external fun getRetModClamp100Addr(): Long
+    external fun getRetModForceDeadAddr(): Long
 
     // ─── Feature 1.4 — ArtMethod entry/exit trace ───────────────────
     external fun traceAttach0(method: java.lang.reflect.Method): Int
