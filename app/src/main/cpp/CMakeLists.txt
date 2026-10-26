@@ -20,6 +20,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         CppParcelRewriter.cpp
         ProxyBridge.cpp
         ChainHook.cpp
+        ArtMethodTrace.cpp
         ApplicationProxy.cpp
         GuestBoot.cpp
         test_item1.cpp

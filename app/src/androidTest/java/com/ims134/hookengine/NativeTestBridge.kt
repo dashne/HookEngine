@@ -45,4 +45,29 @@ object NativeTestBridge {
     external fun chainLastX0_2(): Int
     external fun chainOrderFirst(): Int
     external fun chainReset()
+
+    // ─── Feature 1.4 — ArtMethod entry/exit trace ───────────────────
+    //
+    // arity parameter selects the wrapper JNI signature:
+    //   0 = int foo()          → traceAttach0
+    //   1 = int foo(int)       → traceAttach1
+    //   2 = int foo(String)    → traceAttach2
+    //   3 = int foo(String,int)→ traceAttach3
+    //
+    // The fixture methods deliberately take a String to avoid ART's
+    // fast-JNI optimization (which rejects all-primitive signatures).
+    external fun traceAttach0(method: java.lang.reflect.Method): Int
+    external fun traceAttach1(method: java.lang.reflect.Method): Int
+    external fun traceAttach2(method: java.lang.reflect.Method): Int
+    external fun traceAttach3(method: java.lang.reflect.Method): Int
+    external fun traceDetach(method: java.lang.reflect.Method): Int
+    external fun traceCount(): Int
+    external fun traceEntryCount(): Int
+    external fun traceExitCount(): Int
+    external fun traceLastRet(): Int
+    external fun traceResetCounters()
+
+    // Trace fixture targets (String arg breaks fast-JNI eligibility).
+    external fun traceTargetS0(warmup: String): Int
+    external fun traceTargetS1(warmup: String, x: Int): Int
 }

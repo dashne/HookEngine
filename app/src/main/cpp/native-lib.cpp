@@ -19,6 +19,7 @@
 #include "TestReport.h"
 #include "test_suite.h"
 #include "ProcessHooks.h"
+#include "ArtMethodTrace.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -97,24 +98,6 @@ static void*  g_hooked_page        = nullptr;
 static int    g_hooked_orig_prot   = 0;
 static long   g_hooked_page_size   = 0;
 
-// ─────────────────────────────────────────────────────────────────────────
-// Supported Android API levels — VERIFIED ONLY
-// ─────────────────────────────────────────────────────────────────────────
-// VERIFIED: API 37 (Android 17) on Xiaomi 17T / HyperOS / ARM64 only.
-//
-// The ArtMethod layout, entry-point offset (24), offset scan range
-// (24..48) and mprotect-with-origProt|WRITE behavior have NOT been tested
-// on API 34, 35, 36, or 38+. Installing HookJavaMethod on an unverified
-// API level may silently corrupt ART.
-//
-// The gate refuses to install on anything outside [kMinApi, kMaxApi].
-// To widen the range:
-//   1. Run the full test suite (items 1–6) on a physical device at the
-//      new API level.
-//   2. Confirm all tests pass, particularly `hook_works_when_gate_allows`
-//      and `hook_refused_when_gate_blocks`.
-//   3. Extend kMinApi / kMaxApi and record the verification date.
-// ─────────────────────────────────────────────────────────────────────────
 static constexpr int kMinApi = 37;
 static constexpr int kMaxApi = 37;
 
@@ -246,7 +229,6 @@ Java_com_ims134_hookengine_RemoteService_hookBinderMethod(
     return (jint)r;
 }
 
-// ─── Item-5 public diagnostics ────────────────────────────────────────────
 extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_RemoteService_capabilityCheck(JNIEnv*, jobject) {
     return CheckHookCapability();
@@ -263,7 +245,6 @@ Java_com_ims134_hookengine_RemoteService_setApiOverride(JNIEnv*, jobject, jint a
     return CheckHookCapability();
 }
 
-// ─── Ordinary JNI surface ─────────────────────────────────────────────────
 extern "C" JNIEXPORT void JNICALL
 Java_com_ims134_hookengine_RemoteService_setInSystemCall(JNIEnv*, jobject, jboolean on) {
     if (on) g_systemCallDepth.fetch_add(1, std::memory_order_acq_rel);
@@ -345,9 +326,6 @@ Java_com_ims134_hookengine_RemoteService_diagRawZip(JNIEnv* env, jobject, jstrin
     return env->NewStringUTF(buf);
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Test harness JNI bridge (§7.3)
-// ─────────────────────────────────────────────────────────────────────────
 extern "C" JNIEXPORT jobjectArray JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_runSuite(JNIEnv* env, jobject, jstring jsuite) {
     if (!env || !jsuite) return nullptr;
@@ -380,6 +358,7 @@ extern "C" JNIEXPORT void JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_uninstallAll(JNIEnv*, jobject) {
     UninstallAllHooks();
     ChainResetAll();
+    TraceResetAll();
 }
 
 extern "C" void SetItem4Paths(const char* realDir, const char* fakeDir);
@@ -395,9 +374,6 @@ Java_com_ims134_hookengine_NativeTestBridge_setItem4Paths(
     if (fake) env->ReleaseStringUTFChars(jFake, fake);
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Regression bug 1: HookJavaMethod destroyed page write permission.
-// ─────────────────────────────────────────────────────────────────────────
 static bool ReadPageProtReg(uintptr_t page, int* outProt) {
     FILE* f = fopen("/proc/self/maps", "r");
     if (!f) return false;
@@ -476,9 +452,6 @@ extern "C" int RunRegressionBug1(JNIEnv* env) {
     return pass ? 1 : 0;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// §7.7 — selftest.txt file channel.
-// ─────────────────────────────────────────────────────────────────────────
 extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_RemoteService_writeSelftestFile(
         JNIEnv* env, jobject, jstring jpath) {
@@ -521,7 +494,6 @@ Java_com_ims134_hookengine_NativeTestBridge_restoreProcessStatics(JNIEnv* env, j
     RestoreProcessStatics();
 }
 
-
 extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_installProcessHooks(JNIEnv* env, jobject) {
     return InstallProcessHooks(env);
@@ -544,10 +516,6 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_HiddenApiBridge_probe(JNIEnv*, jobject) {
     return HiddenApi_Probe();
 }
-
-// ─────────────────────────────────────────────────────────────────────────
-// PmSpoof JNI bridge — bypasses hiddenapi
-// ─────────────────────────────────────────────────────────────────────────
 
 static jobject ReadMListFrom(JNIEnv* env, jclass c, jobject slice, const char* label) {
     if (!c) return nullptr;
@@ -707,10 +675,6 @@ Java_com_ims134_hookengine_PmSpoof_replaceSliceListNative(JNIEnv* env, jobject, 
 
 #include <future>
 
-// ─────────────────────────────────────────────────────────────────────────
-// Hidden API bypass via native-attached-thread reflection.
-// ─────────────────────────────────────────────────────────────────────────
-
 extern "C" JNIEXPORT jobject JNICALL
 Java_com_ims134_hookengine_HiddenApiBridge_reflectGetDeclaredField(
         JNIEnv* env, jobject, jclass cls, jstring name) {
@@ -803,7 +767,6 @@ Java_com_ims134_hookengine_HiddenApiBridge_reflectSetAccessible(
     return r;
 }
 
-// ─── Test bridge for E2E anti-detection tests ─────────────────────────
 int InstallHooks();
 extern "C" int InstallAntiDetection(JNIEnv*);
 
@@ -950,11 +913,6 @@ Java_com_ims134_hookengine_NativeTestBridge_detachRuntime(JNIEnv*, jobject, jlon
 }
 
 // ─── Feature 1.7 — ChainHook fixtures + JNI bridges ─────────────────
-//
-// JNI name-mangling note: '_' in a Java method name maps to "_1" in the
-// C symbol. chainLastX0_1  →  Java_..._chainLastX0_11
-//                     chainLastX0_2  →  Java_..._chainLastX0_12
-// chainCalls1/chainCalls2 have no underscore, so their symbols are direct.
 extern "C" HookResult ChainAttach(void* target, void (*handler)(const uint64_t*), void** outTramp);
 extern "C" HookResult ChainDetach(void* target, void (*handler)(const uint64_t*));
 extern "C" int        ChainCount();
@@ -1034,4 +992,93 @@ Java_com_ims134_hookengine_NativeTestBridge_chainReset(JNIEnv*, jobject) {
     g_chain_last_x0_1.store(0);
     g_chain_last_x0_2.store(0);
     g_chain_order_first.store(-1);
+}
+
+// ─── Feature 1.4 — ArtMethod entry/exit trace fixtures + JNI bridges ─
+//
+// CRITICAL: fixtures take a String argument to avoid ART's fast-JNI
+// optimization. All-primitive signatures (int(), int(int)) get marked
+// kAccFastNative by RegisterNatives, which turns ArtMethod.data_ into a
+// small index token (<0x1000) that JavaHookInstall refuses. Adding a
+// non-primitive (String) in the signature breaks eligibility — data_
+// stays a real code pointer — and hooking works.
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceTargetS0(
+        JNIEnv*, jobject, jstring /*ignored*/) {
+    return 0x0BAD;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceTargetS1(
+        JNIEnv*, jobject, jstring /*ignored*/, jint x) {
+    return x + 100;
+}
+
+static std::atomic<int> g_trace_entry_count{0};
+static std::atomic<int> g_trace_exit_count{0};
+static std::atomic<int> g_trace_last_ret{0};
+
+extern "C" void trace_fixture_onEntry(void* /*ctx*/) {
+    g_trace_entry_count.fetch_add(1);
+}
+
+extern "C" void trace_fixture_onExit(void* /*ctx*/, int64_t ret) {
+    g_trace_exit_count.fetch_add(1);
+    g_trace_last_ret.store((int)ret);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceAttach0(JNIEnv* env, jobject, jobject method) {
+    return (jint)TraceAttach(env, method, trace_fixture_onEntry, trace_fixture_onExit,
+                             nullptr, /*arity=*/0);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceAttach1(JNIEnv* env, jobject, jobject method) {
+    return (jint)TraceAttach(env, method, trace_fixture_onEntry, trace_fixture_onExit,
+                             nullptr, /*arity=*/1);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceAttach2(JNIEnv* env, jobject, jobject method) {
+    return (jint)TraceAttach(env, method, trace_fixture_onEntry, trace_fixture_onExit,
+                             nullptr, /*arity=*/2);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceAttach3(JNIEnv* env, jobject, jobject method) {
+    return (jint)TraceAttach(env, method, trace_fixture_onEntry, trace_fixture_onExit,
+                             nullptr, /*arity=*/3);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceDetach(JNIEnv* env, jobject, jobject method) {
+    return (jint)TraceDetach(env, method);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceCount(JNIEnv*, jobject) {
+    return TraceCount();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceEntryCount(JNIEnv*, jobject) {
+    return g_trace_entry_count.load();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceExitCount(JNIEnv*, jobject) {
+    return g_trace_exit_count.load();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceLastRet(JNIEnv*, jobject) {
+    return g_trace_last_ret.load();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_traceResetCounters(JNIEnv*, jobject) {
+    g_trace_entry_count.store(0);
+    g_trace_exit_count.store(0);
+    g_trace_last_ret.store(0);
 }
