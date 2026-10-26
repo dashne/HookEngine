@@ -12,47 +12,28 @@ import java.io.PrintWriter
 import java.io.StringWriter
 import java.util.zip.ZipFile
 
-/**
- * Session 20 — DualHost guest loader.
- *
- * Rule 15: engine behavior in native. The guest Application boot
- * (instantiate + attachBaseContext + onCreate) is a native call into
- * GuestBoot.cpp, matching the reference's ApplicationProxy.onCreate
- * being a native method that constructs the guest Application.
- *
- * Kotlin's role is scaffolding: stage the APK, read manifest for
- * reporting, call native boot, drive provider installation, register
- * guest package for sig null-out.
- */
 object GuestHost {
     private const val TAG = "DualCore.Guest"
     @Volatile private var installed = false
-
-    private external fun nativeBootGuest(
-        apkPath: String,
-        guestContext: Context,
-        guestLoader: ClassLoader
-    ): Application?
 
     @Synchronized
     fun load(hostContext: Context, apkPath: String): Result {
         val result = Result(apkPath)
 
-        // Session 20b — if DualApplication already booted the guest at
-        // process start (APK was staged before launch), report that.
-        // ApplicationProxy is the single source of truth for guest boot.
-        val alreadyBooted = try { ApplicationProxy.getGuestApplication() } catch (_: Throwable) { null }
+        val alreadyBooted = try {
+            ApplicationProxy.getGuestApplication()
+        } catch (_: Throwable) { null }
+
         if (alreadyBooted != null) {
-            result.outcome = "booted-at-startup"
-            result.instantiated = true
-            result.attached = true
-            result.onCreated = true
             result.guestApp = alreadyBooted
             result.guestPackage = alreadyBooted.packageName
             result.guestAppClass = alreadyBooted.javaClass.name
             result.guestLoaderClass = alreadyBooted.classLoader?.javaClass?.name
             result.loaderInstalled = true
-            // Attempt providers for reporting
+            result.instantiated = true
+            result.attached = true
+            result.onCreated = true
+            result.outcome = "booted-at-startup"
             try {
                 val prov = installGuestProviders(alreadyBooted, apkPath)
                 result.providersDeclared = prov.declaredCount
@@ -71,8 +52,8 @@ object GuestHost {
             result.outcome = "already-loaded"
             return result.finish()
         }
+
         try {
-            // 0. APK existence + chmod read-only
             val apk = File(apkPath)
             if (!apk.exists()) {
                 result.outcome = "apk-missing"
@@ -86,7 +67,6 @@ object GuestHost {
                 return result.finish()
             }
 
-            // 1. Extract arm64-v8a native libs
             val libDir = File(hostContext.filesDir, "guest-libs").apply { mkdirs() }
             var extracted = 0
             try {
@@ -108,7 +88,6 @@ object GuestHost {
             }
             result.libsExtracted = extracted
 
-            // 2. Read manifest for reporting
             val pm = hostContext.packageManager
             val flags = PackageManager.GET_META_DATA or
                     PackageManager.GET_ACTIVITIES or
@@ -131,15 +110,6 @@ object GuestHost {
             guestAppInfo.publicSourceDir = apkPath
             result.guestAppClass = guestAppInfo.className
 
-            // 3. Native boot — Application construction + attach + onCreate
-            // 3. Native boot — Application construction + attach + onCreate.
-            // We construct one PathClassLoader in Kotlin, pass it to both:
-            //  - GuestContext (so guest code's getClassLoader() returns it)
-            //  - nativeBootGuest (so guest Application is instantiated via it)
-            // This guarantees class identity: the loader Viber's code sees
-            // via getClassLoader() is exactly the one its Application was
-            // instantiated through. Session 18's fix preserved this; Session
-            // 20's refactor lost it (attachBaseContext → StringsKt.i0).
             val guestLoader: ClassLoader = try {
                 GuestClassLoader(apkPath, libDir.absolutePath, hostContext.classLoader)
             } catch (t: Throwable) {
@@ -151,20 +121,30 @@ object GuestHost {
             result.guestLoaderClass = guestLoader.javaClass.name
             result.loaderInstalled = true
 
-            val guestCtx = GuestContext(hostContext, guestPkg, guestAppInfo, guestLoader)
-            val guestApp = nativeBootGuest(apkPath, guestCtx, guestLoader)
+            val proxy = ApplicationProxy.getInstance()
+            val guestRes = try {
+                proxy.nativeBuildGuestResources(apkPath, hostContext)
+            } catch (t: Throwable) {
+                Log.w(TAG, "nativeBuildGuestResources failed: $t")
+                null
+            }
+            Log.d(TAG, "guestRes=${guestRes?.javaClass?.simpleName}")
+
+            val guestCtx = GuestContext(hostContext, guestPkg, guestAppInfo, guestLoader, guestRes)
+            proxy.setBaseContext(guestCtx)
+            proxy.onCreate()
+
+            val guestApp = ApplicationProxy.getGuestApplication()
             if (guestApp == null) {
-                result.outcome = "native-boot-failed"
-                result.error = "nativeBootGuest returned null; see DualCore.Native log"
+                result.outcome = "native-oncreate-failed"
+                result.error = "ApplicationProxy.onCreate did not boot guest; see DualCore.Native log"
                 return result.finish()
             }
             result.instantiated = true
             result.attached = true
             result.onCreated = true
             result.guestApp = guestApp
-            Log.d(TAG, "native boot OK for $guestPkg")
 
-            // 4. ContentProviders (Session 19 instrumentation)
             try {
                 val prov = installGuestProviders(guestApp, apkPath)
                 result.providersDeclared = prov.declaredCount
@@ -178,13 +158,13 @@ object GuestHost {
                 result.firstProviderError = "installGuestProviders threw: $t"
             }
 
-            // 5. Register guest for sig null-out
             try {
+                PmSpoof.guestArchives = PmSpoof.guestArchives + (guestPkg to apkPath)
                 PmSpoof.signatureNullOutPackages =
                     PmSpoof.signatureNullOutPackages + guestPkg
-                Log.d(TAG, "registered guest sig null-out: $guestPkg")
+                Log.d(TAG, "registered guest archive + sig null-out: $guestPkg")
             } catch (t: Throwable) {
-                Log.w(TAG, "sig null-out registration: $t")
+                Log.w(TAG, "guest archive registration: $t")
             }
 
             installed = true
@@ -197,8 +177,69 @@ object GuestHost {
         }
     }
 
+    /**
+     * Session 21g — run block on main thread, 15s timeout, catch everything.
+     *
+     * Previous version re-threw exceptions from the block. On the main
+     * Looper thread, an uncaught exception propagates through
+     * Looper.loop() → uncaught handler → process killed. That killed
+     * the instrumentation when ViberContactsProvider.onCreate threw
+     * bb2.r5 NPE.
+     *
+     * Contract now:
+     *   - Block is called on the main Looper thread.
+     *   - Any exception thrown by the block is caught and logged here.
+     *   - Return true if the block returned normally (with or without
+     *     an internally-caught exception — caller checks lastEx).
+     *   - Return false only on 15s timeout.
+     *
+     * Caller distinguishes outcomes via:
+     *   completed && lastEx == null  → provider succeeded
+     *   completed && lastEx != null  → provider threw (exception stored)
+     *  !completed                    → provider hung (timeout, break loop)
+     */
+    private fun runOnMainThreadWithTimeout(timeoutMs: Long, block: () -> Unit): Boolean {
+        val mainLooper = android.os.Looper.getMainLooper()
+        if (android.os.Looper.myLooper() == mainLooper) {
+            try {
+                block()
+                return true
+            } catch (t: Throwable) {
+                Log.e(TAG, "main-thread block threw (in-place): " +
+                        "${t.javaClass.simpleName}: ${t.message}")
+                return true
+            }
+        }
+        val latch = java.util.concurrent.CountDownLatch(1)
+        android.os.Handler(mainLooper).post {
+            try {
+                block()
+            } catch (t: Throwable) {
+                // Swallow — must never kill main thread.
+                Log.e(TAG, "main-thread block threw (posted): " +
+                        "${t.javaClass.simpleName}: ${t.message}")
+            } finally {
+                latch.countDown()
+            }
+        }
+        val done = try {
+            latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (e: InterruptedException) {
+            Log.w(TAG, "main-thread block interrupted")
+            false
+        }
+        if (!done) Log.e(TAG, "main-thread block timed out after ${timeoutMs}ms")
+        return done
+    }
+
     fun installGuestProviders(guestApp: Application, apkPath: String): ProviderResult {
         val result = ProviderResult()
+        try {
+            val gPkg = guestApp.packageName
+            if (!gPkg.isNullOrEmpty()) {
+                PmSpoof.guestArchives = PmSpoof.guestArchives + (gPkg to apkPath)
+            }
+        } catch (_: Throwable) {}
         val pm = guestApp.packageManager
 
         val info = try {
@@ -237,24 +278,46 @@ object GuestHost {
                 !rawName.contains(".") -> "${guestApp.packageName}.$rawName"
                 else -> rawName
             }
-            try {
-                pin.applicationInfo = guestInfo
-                if (pin.packageName.isNullOrEmpty()) pin.packageName = guestApp.packageName
-                if (pin.processName.isNullOrEmpty()) pin.processName = guestApp.packageName
+            val lastEx = arrayOfNulls<Throwable>(1)
+            val startMs = System.currentTimeMillis()
+            val completed = runOnMainThreadWithTimeout(15_000L) {
+                try {
+                    pin.applicationInfo = guestInfo
+                    if (pin.packageName.isNullOrEmpty()) pin.packageName = guestApp.packageName
+                    if (pin.processName.isNullOrEmpty()) pin.processName = guestApp.packageName
+                    val cls = Class.forName(fqName, true, guestApp.classLoader)
+                    val ctor = cls.getDeclaredConstructor().apply { isAccessible = true }
+                    val provider = ctor.newInstance() as ContentProvider
+                    provider.attachInfo(guestApp, pin)
+                    provider.onCreate()
+                } catch (t: Throwable) {
+                    // Store and swallow — do NOT rethrow. Rethrowing would
+                    // escape to Looper.loop() and kill the process.
+                    lastEx[0] = t
+                }
+            }
+            val elapsed = System.currentTimeMillis() - startMs
 
-                val cls = Class.forName(fqName, true, guestApp.classLoader)
-                val ctor = cls.getDeclaredConstructor().apply { isAccessible = true }
-                val provider = ctor.newInstance() as ContentProvider
-                provider.attachInfo(guestApp, pin)
-                provider.onCreate()
-                result.succeeded++
-                result.installed += fqName
-            } catch (t: Throwable) {
+            if (!completed) {
+                // Timeout — main thread stuck, break to avoid N×15s hangs.
+                result.failed++
+                result.errors += "$fqName: TIMEOUT (main thread stuck)"
+                Log.e(TAG, "provider[$fqName] TIMEOUT — breaking loop")
+                break
+            }
+            val t = lastEx[0]
+            if (t != null) {
                 val inner = (t as? java.lang.reflect.InvocationTargetException)
                     ?.targetException ?: t
                 result.failed++
                 result.errors += "$fqName: ${inner.javaClass.simpleName}: ${inner.message}"
                 if (result.firstErrorStack == null) result.firstErrorStack = stackOf(inner)
+                Log.e(TAG, "provider FAIL[$fqName] ${elapsed}ms: " +
+                        "${inner.javaClass.simpleName}: ${inner.message}")
+            } else {
+                result.succeeded++
+                result.installed += fqName
+                Log.d(TAG, "provider OK[$fqName] ${elapsed}ms")
             }
         }
         return result
@@ -307,15 +370,25 @@ object GuestHost {
     }
 
     class GuestContext(
-        private val hostBase: Context,
+        hostBase: Context,
         private val guestPackage: String,
         private val guestAppInfo: ApplicationInfo,
-        private val guestLoader: ClassLoader
+        private val guestLoader: ClassLoader,
+        private val guestResources: android.content.res.Resources? = null
     ) : ContextWrapper(hostBase) {
         override fun getPackageName(): String = guestPackage
         override fun getApplicationInfo(): ApplicationInfo = guestAppInfo
-        override fun getApplicationContext(): Context = this
         override fun getClassLoader(): ClassLoader = guestLoader
+        override fun getResources(): android.content.res.Resources =
+            guestResources ?: super.getResources()
+
+        override fun getApplicationContext(): Context {
+            return try {
+                ApplicationProxy.getGuestApplication() ?: super.getApplicationContext()
+            } catch (_: Throwable) {
+                super.getApplicationContext()
+            }
+        }
     }
 
     class Result(val apkPath: String) {

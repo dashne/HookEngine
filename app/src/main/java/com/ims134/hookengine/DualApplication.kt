@@ -7,33 +7,6 @@ import android.util.Log
 import java.io.File
 import java.util.zip.ZipFile
 
-/**
- * Session 20b — reference-shape container Application.
- *
- * Mirrors com.excelliance.kxqp.app.KXQPApplication (which extends
- * MultiDexApplication and drives VmApplication → ApplicationProxy):
- *
- *   KXQPApplication.attachBaseContext(base)
- *     ├─ NativeHelper.onAttachBaseContext(base)   [our nativeOnLoad]
- *     ├─ super.attachBaseContext(base)
- *     ├─ mFakeApplication = VmApplication
- *     └─ VmApplication.mo75702a(this, base)
- *          └─ VmManager → ApplicationProxy.attachBaseContext(guestCtx)
- *
- *   KXQPApplication.onCreate()
- *     └─ VmApplication.mo75705d()
- *          └─ VmManager → ApplicationProxy.onCreate()  [guest boots HERE]
- *
- *   KXQPApplication.onConfigurationChanged / onTerminate / etc.
- *     └─ forwards to VmApplication → ApplicationProxy
- *
- * Same flow here. DualApplication is our container app. ApplicationProxy
- * is our engine Application. Guest Context built here; ApplicationProxy
- * boots the guest.
- *
- * Rule 15: ApplicationProxy lifecycle is native. This Kotlin class just
- * drives it the way the container does.
- */
 class DualApplication : Application() {
 
     companion object {
@@ -68,22 +41,16 @@ class DualApplication : Application() {
             Log.e(TAG, "nativeAttachBaseContext failed: $t", t)
         }
 
-        try {
-            ClassLoaderBridge.install()
-        } catch (t: Throwable) {
+        try { ClassLoaderBridge.install() } catch (t: Throwable) {
             Log.e(TAG, "ClassLoaderBridge.install failed: $t", t)
         }
-        try {
-            PmSpoof.install(base)
-        } catch (t: Throwable) {
+        try { PmSpoof.install(base) } catch (t: Throwable) {
             Log.e(TAG, "PmSpoof.install failed: $t", t)
         }
 
         Log.d(TAG, "DualApplication: hooks installed, calling super.attachBaseContext")
         super.attachBaseContext(base)
 
-        // Reference-shape: attach phase wires guestCtx into ApplicationProxy.
-        // Boot itself fires from onCreate (see below), matching KXQPApplication.
         tryWireApplicationProxy(base)
 
         initialized = true
@@ -103,14 +70,10 @@ class DualApplication : Application() {
         }
         ParcelRewriter.ourPackageName = packageName
 
-        try {
-            nativeOnCreate()
-        } catch (t: Throwable) {
+        try { nativeOnCreate() } catch (t: Throwable) {
             Log.e(TAG, "nativeOnCreate failed: $t", t)
         }
 
-        // Reference-shape: KXQPApplication.onCreate → VmApplication.mo75705d()
-        // → ApplicationProxy.onCreate(). Same here.
         driveApplicationProxyOnCreate()
     }
 
@@ -124,29 +87,22 @@ class DualApplication : Application() {
     }
 
     override fun onTerminate() {
-        try {
-            ApplicationProxy.getInstance().onTerminate()
-        } catch (t: Throwable) {
+        try { ApplicationProxy.getInstance().onTerminate() } catch (t: Throwable) {
             Log.w(TAG, "ApplicationProxy.onTerminate: $t")
         }
-        try {
-            ApplicationProxy.getInstance().onDestroy()
-        } catch (t: Throwable) {
+        try { ApplicationProxy.getInstance().onDestroy() } catch (t: Throwable) {
             Log.w(TAG, "ApplicationProxy.onDestroy: $t")
         }
         super.onTerminate()
     }
 
-    // ─── Reference-shape wiring — mirrors VmManager.m79670b / m79655N ──
-
     private fun tryWireApplicationProxy(base: Context) {
         val apk = File(base.filesDir, GUEST_APK)
         if (!apk.exists()) {
-            Log.d(TAG, "tryWireApplicationProxy: guest APK not staged at startup — skip")
+            Log.d(TAG, "tryWireApplicationProxy: guest APK not staged — skip")
             return
         }
         try {
-            // ART 34+ rule: no writable dex
             if (apk.canWrite() && !apk.setReadOnly()) {
                 Log.e(TAG, "tryWireApplicationProxy: chmod failed")
                 return
@@ -171,7 +127,6 @@ class DualApplication : Application() {
             guestAi.sourceDir = apk.absolutePath
             guestAi.publicSourceDir = apk.absolutePath
 
-            // Extract arm64-v8a natives (same as GuestHost path)
             val libDir = File(base.filesDir, GUEST_LIB_DIR).apply { mkdirs() }
             try {
                 ZipFile(apk.absolutePath).use { zip ->
@@ -191,13 +146,24 @@ class DualApplication : Application() {
             }
 
             val loader = GuestClassLoader(apk.absolutePath, libDir.absolutePath, base.classLoader)
-            val guestCtx = GuestHost.GuestContext(base, guestPkg, guestAi, loader)
 
-            ApplicationProxy.getInstance().setBaseContext(guestCtx)
+            val proxy = ApplicationProxy.getInstance()
+            val guestRes = try {
+                proxy.nativeBuildGuestResources(apk.absolutePath, base)
+            } catch (t: Throwable) {
+                Log.w(TAG, "nativeBuildGuestResources failed: $t", t)
+                null
+            }
+            Log.d(TAG, "tryWireApplicationProxy: guestRes=${guestRes?.javaClass?.simpleName}")
+
+            val guestCtx = GuestHost.GuestContext(base, guestPkg, guestAi, loader, guestRes)
+            proxy.setBaseContext(guestCtx)
             Log.d(TAG, "tryWireApplicationProxy: base context set for $guestPkg")
 
             try {
-                PmSpoof.signatureNullOutPackages = PmSpoof.signatureNullOutPackages + guestPkg
+                PmSpoof.guestArchives = PmSpoof.guestArchives + (guestPkg to apk.absolutePath)
+                PmSpoof.signatureNullOutPackages =
+                    PmSpoof.signatureNullOutPackages + guestPkg
             } catch (_: Throwable) {}
         } catch (t: Throwable) {
             Log.e(TAG, "tryWireApplicationProxy failed: $t", t)
@@ -207,10 +173,20 @@ class DualApplication : Application() {
     private fun driveApplicationProxyOnCreate() {
         try {
             val proxy = ApplicationProxy.getInstance()
-            proxy.onCreate()   // native — boots guest
+            proxy.onCreate()   // native — attach + create
             val guest = ApplicationProxy.getGuestApplication()
             if (guest != null) {
                 Log.d(TAG, "DualApplication.onCreate: guest booted — ${guest.javaClass.name}")
+                try {
+                    val guestPkg = guest.packageName
+                    val apkPath = File(filesDir, GUEST_APK).absolutePath
+                    if (!guestPkg.isNullOrEmpty() && File(apkPath).exists()) {
+                        PmSpoof.guestArchives = PmSpoof.guestArchives + (guestPkg to apkPath)
+                        Log.d(TAG, "DualApplication.onCreate: archive registered for $guestPkg")
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "DualApplication.onCreate: archive register: $t")
+                }
             } else {
                 Log.w(TAG, "DualApplication.onCreate: ApplicationProxy.onCreate did not boot guest (APK not staged?)")
             }

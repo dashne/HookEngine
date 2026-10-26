@@ -1,8 +1,10 @@
 package com.ims134.hookengine
 
+import android.content.ComponentName
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
+import android.content.pm.ProviderInfo
 import android.content.pm.ResolveInfo
 import android.util.Log
 import java.lang.reflect.Field
@@ -23,6 +25,17 @@ object PmSpoof {
      * without a re-install.
      */
     @Volatile var signatureNullOutPackages: Set<String> = emptySet()
+    /**
+     * Session 21 — guest archive paths for provider synthesis.
+     * Package name -> staged APK absolute path. When guest code calls
+     * pm.getProviderInfo() for one of its own providers, AMS rejects
+     * with NameNotFoundException (guest isn't installed). Synthesize
+     * the ProviderInfo from the APK archive on the throw path.
+     */
+    @Volatile var guestArchives: Map<String, String> = emptyMap()
+
+    /** Host PackageManager captured at install — used for archive reads. */
+    @Volatile private var hostPm: android.content.pm.PackageManager? = null
 
     /** True only if proxy + list field are both in place. */
     fun isInstalled(): Boolean = storedProxy != null && listFieldResolved
@@ -46,6 +59,9 @@ object PmSpoof {
      */
     @Synchronized
     fun install(ctx: Context) {
+        if (hostPm == null) {
+            hostPm = ctx.packageManager
+        }
         // 1. Create the proxy once — but re-attempt if a prior call failed
         if (storedProxy == null) {
             try {
@@ -92,15 +108,45 @@ object PmSpoof {
         val pkgName = ctx.packageName
 
         val handler = InvocationHandler { _, method, args ->
+            // Session 21b — first-line diagnostic: confirm proxy is consulted.
+            if (method.name == "getProviderInfo" || method.name == "resolveContentProvider") {
+                Log.d(TAG, "PmSpoof: proxy ${method.name} intercepted args=${args?.joinToString { it?.javaClass?.simpleName ?: "null" }}")
+            }
+
             val result = try {
                 if (args == null) method.invoke(realPm) else method.invoke(realPm, *args)
-            } catch (e: InvocationTargetException) { throw e.targetException }
+            } catch (e: InvocationTargetException) {
+                val target = e.targetException
+                // Exception-path synthesis (kept from 21a).
+                if (method.name == "getProviderInfo" &&
+                    target is android.content.pm.PackageManager.NameNotFoundException) {
+                    val synthetic = synthesizeGuestProviderInfo(args)
+                    if (synthetic != null) {
+                        Log.d(TAG, "PmSpoof: getProviderInfo exception-path synthesized for ${synthetic.name}")
+                        return@InvocationHandler synthetic
+                    }
+                }
+                throw target
+            }
+
+            // Session 21b — NULL-RETURN path. On API 34+ ApplicationPackageManager
+            // calls mPM.getProviderInfo(), receives null, and throws NameNotFoundException
+            // client-side. The proxy sees null, no exception. Synthesize here too.
+            if (result == null && method.name == "getProviderInfo") {
+                val synthetic = synthesizeGuestProviderInfo(args)
+                if (synthetic != null) {
+                    Log.d(TAG, "PmSpoof: getProviderInfo null-path synthesized for ${synthetic.name}")
+                    return@InvocationHandler synthetic
+                }
+            }
+
             val n = method.name
             if (n.startsWith("getInstalled") || n.startsWith("queryIntent")) {
                 Log.d(TAG, "PmSpoof: proxy $n result=${result?.javaClass?.name}")
             }
             rewrite(n, args, result, pkgName)
         }
+
         storedProxy = Proxy.newProxyInstance(iPmCls.classLoader, arrayOf(iPmCls), handler)
         Log.d(TAG, "PmSpoof: proxy created")
     }
@@ -184,6 +230,73 @@ object PmSpoof {
                 return filterList(result) { o -> o !is ResolveInfo || (o.providerInfo?.packageName) !in hiddenPackages }
         }
         return result
+    }
+
+    /**
+     * Session 21 — synthesize a ProviderInfo for a guest provider.
+     * Called from the proxy's exception path — AMS already threw
+     * NameNotFoundException. Read the provider declaration from
+     * getPackageArchiveInfo(GET_PROVIDERS | GET_META_DATA) and return
+     * it so the caller reads metaData and completes initialization.
+     */
+    private fun synthesizeGuestProviderInfo(args: Array<Any?>?): ProviderInfo? {
+        if (args == null || args.isEmpty()) {
+            Log.w(TAG, "synth: no args")
+            return null
+        }
+        val comp = args[0] as? ComponentName
+        if (comp == null) {
+            Log.w(TAG, "synth: args[0] is not ComponentName — actual ${args[0]?.javaClass?.name}")
+            return null
+        }
+        val guestApk = guestArchives[comp.packageName]
+        if (guestApk == null) {
+            Log.d(TAG, "synth: package ${comp.packageName} not in guestArchives ${guestArchives.keys}")
+            return null
+        }
+        val pm = hostPm
+        if (pm == null) {
+            Log.w(TAG, "synth: hostPm null")
+            return null
+        }
+
+        val archives = try {
+            pm.getPackageArchiveInfo(
+                guestApk,
+                android.content.pm.PackageManager.GET_PROVIDERS or
+                        android.content.pm.PackageManager.GET_META_DATA)
+        } catch (t: Throwable) {
+            Log.w(TAG, "synthesizeGuestProviderInfo: archive read failed: $t")
+            return null
+        } ?: return null
+
+        val providers = archives.providers ?: return null
+        val wanted = comp.className
+        val matching = providers.firstOrNull { p ->
+            val name = p?.name ?: return@firstOrNull false
+            name == wanted ||
+                    (name.startsWith(".") && comp.packageName + name == wanted) ||
+                    (!name.contains(".") && comp.packageName + "." + name == wanted)
+        } ?: run {
+            Log.d(TAG, "synthesizeGuestProviderInfo: no match for $wanted " +
+                    "in ${providers.size} providers")
+            return null
+        }
+
+        val ai = archives.applicationInfo ?: ApplicationInfo().apply {
+            packageName = comp.packageName
+            sourceDir = guestApk
+            publicSourceDir = guestApk
+        }
+        ai.sourceDir = guestApk
+        ai.publicSourceDir = guestApk
+        if (ai.packageName.isNullOrEmpty()) ai.packageName = comp.packageName
+
+        matching.packageName = comp.packageName
+        matching.applicationInfo = ai
+        Log.d(TAG, "synthesizeGuestProviderInfo: OK for ${comp.flattenToString()} " +
+                "metaData=${matching.metaData?.keySet()?.joinToString(",") ?: "null"}")
+        return matching
     }
 
     private fun filterList(result: Any?, keep: (Any?) -> Boolean): Any? {
