@@ -21,6 +21,7 @@
 #include "ProcessHooks.h"
 #include "ArtMethodTrace.h"
 #include "SvcHook.h"
+#include "RegInspect.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -356,6 +357,8 @@ Java_com_ims134_hookengine_NativeTestBridge_runSuite(JNIEnv* env, jobject, jstri
 extern "C" void ChainResetAll();
 extern "C" void RetModResetAll();
 
+extern "C" void RegInspectResetAll();
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_uninstallAll(JNIEnv*, jobject) {
     UninstallAllHooks();
@@ -363,6 +366,7 @@ Java_com_ims134_hookengine_NativeTestBridge_uninstallAll(JNIEnv*, jobject) {
     TraceResetAll();
     RetModResetAll();
     SvcHookResetAll();
+    RegInspectResetAll();
 }
 
 extern "C" void SetItem4Paths(const char* realDir, const char* fakeDir);
@@ -1410,4 +1414,93 @@ Java_com_ims134_hookengine_NativeTestBridge_svcResetCounters(JNIEnv*, jobject) {
     g_svc_last_orig.store(0);
     g_svc_last_arg0.store(0);
     g_svc_last_arg1.store(0);
+}
+
+// ─── Feature 2.7 — Register state inspection fixtures + JNI bridges ─
+//
+// Two fixture functions:
+//   fn_reginspect_gp — int(a, b) → a + b
+//   fn_reginspect_fp — float(a, b) → a + b
+// Both are naked with simple NORMAL first instructions (relocatable by
+// EmitRelocated). Tests call with known args and inspect the captured
+// entry-time registers.
+
+extern "C" HookResult AttachRegInspect(void* target, int mode, void** outShadow);
+extern "C" HookResult DetachRegInspect(void* target);
+extern "C" HookResult RegInspectRead(void* target, RegInspectSnapshot* out);
+extern "C" int        RegInspectCount();
+
+extern "C" __attribute__((noinline, naked, used))
+int fn_reginspect_gp(int a, int b) {
+    // First insn: add w0, w0, w1 (0x0B010000) — NORMAL, relocatable.
+    __asm__ volatile(
+            "add w0, w0, w1\n"
+            "ret\n"
+            );
+}
+
+extern "C" __attribute__((noinline, naked, used))
+float fn_reginspect_fp(float a, float b) {
+    // First insn: fadd s0, s0, s1 — NORMAL, relocatable.
+    __asm__ volatile(
+            "fadd s0, s0, s1\n"
+            "ret\n"
+            );
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getRegInspectGpTargetAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&fn_reginspect_gp;
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getRegInspectFpTargetAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&fn_reginspect_fp;
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_callRegInspectGp(JNIEnv*, jobject, jint a, jint b) {
+    return (jint)fn_reginspect_gp((int)a, (int)b);
+}
+extern "C" JNIEXPORT jfloat JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_callRegInspectFp(JNIEnv*, jobject, jfloat a, jfloat b) {
+    return (jfloat)fn_reginspect_fp((float)a, (float)b);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_attachRegInspect(
+        JNIEnv*, jobject, jlong target, jint mode) {
+    return (jint)AttachRegInspect((void*)(uintptr_t)target, (int)mode, nullptr);
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_detachRegInspect(JNIEnv*, jobject, jlong target) {
+    return (jint)DetachRegInspect((void*)(uintptr_t)target);
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_regInspectCount(JNIEnv*, jobject) {
+    return RegInspectCount();
+}
+
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_regInspectSnapshot(
+        JNIEnv* env, jobject, jlong target) {
+    if (!env || !target) return nullptr;
+    RegInspectSnapshot snap;
+    HookResult r = RegInspectRead((void*)(uintptr_t)target, &snap);
+    if (r != HOOK_OK) return nullptr;
+
+    // Output array layout (99 longs):
+    //   [0..31]   x[0..31]   (x0..x30, sp_orig)
+    //   [32]      nzcv
+    //   [33]      pc
+    //   [34]      slot_id
+    //   [35..98]  q[0..63]   (32 Q-regs × low/high u64 pairs)
+    jlongArray arr = env->NewLongArray(99);
+    if (!arr) return nullptr;
+    jlong vals[99];
+    for (int i = 0; i < 32; i++)  vals[i]     = (jlong)snap.x[i];
+    vals[32] = (jlong)snap.nzcv;
+    vals[33] = (jlong)snap.pc;
+    vals[34] = (jlong)snap.slot_id;
+    for (int i = 0; i < 64; i++)  vals[35 + i] = (jlong)snap.q[i];
+    env->SetLongArrayRegion(arr, 0, 99, vals);
+    return arr;
 }

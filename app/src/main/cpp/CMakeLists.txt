@@ -23,6 +23,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ArtMethodTrace.cpp
         ReturnMod.cpp
         SvcHook.cpp
+        RegInspect.cpp
         ApplicationProxy.cpp
         GuestBoot.cpp
         test_item1.cpp

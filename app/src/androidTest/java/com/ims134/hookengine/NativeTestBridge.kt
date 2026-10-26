@@ -68,10 +68,6 @@ object NativeTestBridge {
     external fun getRetModForceDeadAddr(): Long
 
     // ─── Feature 1.6 — SVC instruction hooking ──────────────────────
-    //
-    // SVC fixtures are naked functions with exactly (mov x8,#nr; svc #0;
-    // ret). The SVC address is function_start + 4. Test passes explicit
-    // addresses for both — no +4 assumption in Kotlin.
     external fun getSvcGetpidTargetAddr(): Long
     external fun getSvcGetpidSvcAddr(): Long
     external fun getSvcGetppidTargetAddr(): Long
@@ -98,6 +94,23 @@ object NativeTestBridge {
     external fun svcLastArg0(): Long
     external fun svcLastArg1(): Long
     external fun svcResetCounters()
+
+    // ─── Feature 2.7 — register state inspection ────────────────────
+    //
+    // Snapshot array layout (99 longs):
+    //   [0..31]   x[0..31]   (x0..x30, sp_orig)
+    //   [32]      nzcv
+    //   [33]      pc
+    //   [34]      slot_id
+    //   [35..98]  q[0..63]   (32 Q-regs × low/high u64 pairs)
+    external fun getRegInspectGpTargetAddr(): Long
+    external fun getRegInspectFpTargetAddr(): Long
+    external fun callRegInspectGp(a: Int, b: Int): Int
+    external fun callRegInspectFp(a: Float, b: Float): Float
+    external fun attachRegInspect(target: Long, mode: Int): Int
+    external fun detachRegInspect(target: Long): Int
+    external fun regInspectCount(): Int
+    external fun regInspectSnapshot(target: Long): LongArray?
 
     // ─── Feature 1.4 — ArtMethod entry/exit trace ───────────────────
     external fun traceAttach0(method: java.lang.reflect.Method): Int
