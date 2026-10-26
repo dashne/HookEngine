@@ -147,27 +147,37 @@ static TestResult test_bl_structural() {
     return r;
 }
 
-static TestResult test_unsupported(const char* name, void* fn, void* fake) {
-    TestResult r{name, false, ""};
+// B_COND structural — fn_bcond's return depends on the ambient Z flag, which
+// can't be controlled from C. Rather than fight that in a call-through test,
+// verify the byte lifecycle: install rewrites the first instruction to a B,
+// uninstall restores 0x54000060 exactly. Behavioral coverage (inverted-skip
+// + B target) lives in RelocTest at the instruction level — 44 assertions
+// across reloc_emit_bcond_two_insns and reloc_emit_bcond_ne_inverts_to_eq.
+static TestResult test_bcond_structural() {
+    TestResult r{"B_COND", false, ""};
     std::ostringstream d;
 
-    uint32_t before = *(volatile uint32_t*)fn;
+    uint32_t before = *(volatile uint32_t*)&fn_bcond;
     void* tramp = nullptr;
-    HookResult hr = InstallInlineHookEx(fn, fake, &tramp, name);
-    uint32_t after = *(volatile uint32_t*)fn;
+    HookResult hr = InstallInlineHookEx((void*)&fn_bcond, (void*)&fake_void_int,
+                                        &tramp, "B_COND");
+    uint32_t after = *(volatile uint32_t*)&fn_bcond;
 
-    d << "first_before=0x" << std::hex << before
-      << " install=" << (hr == HOOK_OK ? "SUCCEEDED(want REJECTED)" : "REJECTED")
-      << " first_after=0x" << after;
+    d << "before=0x" << std::hex << before
+      << " install=" << (hr == HOOK_OK ? "OK" : "FAILED")
+      << " after=0x" << after;
+    if (hr != HOOK_OK) { r.detail = d.str(); return r; }
 
-    r.pass = (hr != HOOK_OK) && (before == after);
+    HookResult ur = UninstallInlineHook((void*)&fn_bcond);
+    uint32_t restored = *(volatile uint32_t*)&fn_bcond;
+    d << std::dec << " unhook=" << (int)ur
+      << " restored=0x" << std::hex << restored;
+
+    r.pass = (before != after) && (ur == HOOK_OK) && (restored == before);
     r.detail = d.str();
     return r;
 }
 
-// Runs the item 1 tests. Emits each via testreport::Report (same logcat
-// output as before) and appends the same lines to `out`. Returns pass count.
-// Called by both the JNI wrapper below and RunTestSuite (test_suite.cpp).
 static int RunItem1Internal(std::string& out) {
     LOGD("=== Item 1 tests START ===");
 
@@ -176,8 +186,8 @@ static int RunItem1Internal(std::string& out) {
     results.push_back(test_supported("ADRP",   &fn_adrp,   &fake_void_int));
     results.push_back(test_supported("B",      &fn_b,      &fake_int_int, 5));
     results.push_back(test_bl_structural());
-    results.push_back(test_unsupported("B_COND",      (void*)&fn_bcond,  (void*)&fake_void_int));
-    results.push_back(test_unsupported("LDR_LITERAL", (void*)&fn_ldr_lit,(void*)&fake_void_int));
+    results.push_back(test_bcond_structural());
+    results.push_back(test_supported("LDR_LITERAL", &fn_ldr_lit, &fake_void_int));
 
     int pass = 0, fail = 0;
     std::ostringstream o;

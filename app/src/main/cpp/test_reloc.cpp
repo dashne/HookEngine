@@ -3,7 +3,7 @@
 // Every function in arm64_reloc.cpp exercised individually:
 //   ClassifyInsn    — canonical + boundary instruction words
 //   EncodeBranch    — range/sign/alignment
-//   EmitRelocated   — all 8 kinds across cap boundaries
+//   EmitRelocated   — all 9 kinds across cap boundaries
 
 #include <jni.h>
 #include <android/log.h>
@@ -17,6 +17,8 @@ namespace {
 
     constexpr uint32_t kStpX29X30 = 0xA9BF7BFDu;
     constexpr uint32_t kLdpX29X30 = 0xA8C17BFDu;
+    constexpr uint32_t kStpX16X17 = 0xA9BF47F0u;
+    constexpr uint32_t kLdpX16X17 = 0xA8C147F0u;
 
     int64_t decode_adr_offset(uint32_t insn) {
         uint32_t immlo = (insn >> 29) & 3;
@@ -32,11 +34,31 @@ namespace {
         return ((int64_t)(int32_t)imm26) << 2;
     }
 
+    int64_t decode_bcond_offset(uint32_t insn) {
+        uint32_t imm19 = (insn >> 5) & 0x7FFFF;
+        if (imm19 & (1u << 18)) imm19 |= 0xFFF80000;
+        return ((int64_t)(int32_t)imm19) << 2;
+    }
+
+    int64_t decode_tbz_offset(uint32_t insn) {
+        uint32_t imm14 = (insn >> 5) & 0x3FFF;
+        if (imm14 & (1u << 13)) imm14 |= 0xFFFFC000;
+        return ((int64_t)(int32_t)imm14) << 2;
+    }
+
     uint32_t make_adr(int rd, int64_t offset) {
         uint32_t imm21 = (uint32_t)(offset & 0x1FFFFF);
         uint32_t immlo = imm21 & 3;
         uint32_t immhi = (imm21 >> 2) & 0x7FFFF;
         return 0x10000000u | (immlo << 29) | (immhi << 5) | (uint32_t)rd;
+    }
+
+    // Precompute the expected "B <target>" from `from` to `to` for the
+    // two-insn conditional relocation tests. Returns the raw insn word.
+    uint32_t enc_b(uint64_t from, uint64_t to) {
+        int64_t off = (int64_t)(to - from);
+        int64_t imm = off >> 2;
+        return 0x14000000u | (uint32_t)(imm & 0x03FFFFFFu);
     }
 
 } // namespace
@@ -150,6 +172,7 @@ static int run_emit_tests() {
         if (ok) pass++;
     };
 
+    // ── NORMAL ──────────────────────────────────────────────────────
     {
         uint32_t out[4] = {0};
         int n = EmitRelocated(0xD503201Fu, 0x1000, 0x2000, out, 4);
@@ -161,6 +184,8 @@ static int run_emit_tests() {
         int n = EmitRelocated(0xD503201Fu, 0x1000, 0x2000, out, 0);
         check("reloc_emit_normal_cap0", n == 0, "cap=0 rejected");
     }
+
+    // ── B ───────────────────────────────────────────────────────────
     {
         uint32_t out[4] = {0};
         int n = EmitRelocated(0x14000004u, 0x1000, 0x2000, out, 4);
@@ -168,6 +193,8 @@ static int run_emit_tests() {
         char d[80]; snprintf(d, sizeof d, "n=%d off=%lld", n, (long long)off);
         check("reloc_emit_b", n == 1 && off == -0xFF0, d);
     }
+
+    // ── BL ──────────────────────────────────────────────────────────
     {
         uint32_t out[4] = {0};
         int n = EmitRelocated(0x94000004u, 0x1000, 0x2000, out, 4);
@@ -182,6 +209,8 @@ static int run_emit_tests() {
         int n = EmitRelocated(0x94000004u, 0x1000, 0x2000, out, 2);
         check("reloc_emit_bl_cap2", n == 0, "cap=2 rejected");
     }
+
+    // ── ADRP ────────────────────────────────────────────────────────
     {
         uint32_t out[4] = {0};
         uint32_t adrp = 0xB0000000u;
@@ -191,6 +220,8 @@ static int run_emit_tests() {
                              n, (unsigned long long)off);
         check("reloc_emit_adrp", n == 1 && off == -0xF000, d);
     }
+
+    // ── ADR (short and long) ────────────────────────────────────────
     {
         uint32_t out[4] = {0};
         uint32_t adr = make_adr(1, 8);
@@ -200,36 +231,152 @@ static int run_emit_tests() {
         check("reloc_emit_adr_short", n == 1 && off == 8, d);
     }
     {
-
-            uint32_t out[4] = {0};
-            uint32_t adr = make_adr(1, 0x80000);
-            int n = EmitRelocated(adr, 0x0, 0x400000, out, 4);
+        uint32_t out[4] = {0};
+        uint32_t adr = make_adr(1, 0x80000);
+        int n = EmitRelocated(adr, 0x0, 0x400000, out, 4);
         char d[80]; snprintf(d, sizeof d, "n=%d [0]=0x%08x [1]=0x%08x",
                              n, out[0], out[1]);
         bool op_adrp = (out[0] & 0x9F000000u) == 0x90000000u;
         bool op_add  = (out[1] & 0xFFC00000u) == 0x91000000u;
         check("reloc_emit_adr_long", n == 2 && op_adrp && op_add, d);
     }
+
+    // ── B.cond — inverted skip + B target ───────────────────────────
+    // Original: 0x54000000 = b.eq, imm19=0 (target = orig_pc = 0x1000).
+    // Relocate from new_pc=0x2000.
+    // out[0] = b.ne skip +8 = 0x54000041
+    // out[1] = B from new_pc+4 (0x2004) to 0x1000 = 0x17FFFBFF
     {
         uint32_t out[4] = {0};
         int n = EmitRelocated(0x54000000u, 0x1000, 0x2000, out, 4);
-        check("reloc_emit_bcond_rejected", n == 0, "B.cond rejected");
+        bool n_ok = (n == 2);
+        bool skip_ok = (out[0] == 0x54000041u);
+        bool b_ok    = (out[1] == 0x17FFFBFFu);
+        bool decoded_ok = (decode_branch_offset(out[1]) == (int64_t)0x1000 - (int64_t)0x2004);
+        char d[128];
+        snprintf(d, sizeof d, "n=%d [0]=0x%08x skip=%d [1]=0x%08x b=%d dec=%d",
+                 n, out[0], skip_ok ? 1 : 0, out[1], b_ok ? 1 : 0, decoded_ok ? 1 : 0);
+        check("reloc_emit_bcond_two_insns", n_ok && skip_ok && b_ok && decoded_ok, d);
     }
+    // Original = b.ne +0 (0x54000001). Inverted = b.eq skip +8.
+    {
+        uint32_t out[4] = {0};
+        int n = EmitRelocated(0x54000001u, 0x1000, 0x2000, out, 4);
+        bool n_ok = (n == 2);
+        bool skip_ok = (out[0] == 0x54000040u);   // b.eq skip 8
+        bool b_ok    = (out[1] == 0x17FFFBFFu);   // B 0x2004 -> 0x1000
+        char d[128];
+        snprintf(d, sizeof d, "n=%d [0]=0x%08x [1]=0x%08x",
+                 n, out[0], out[1]);
+        check("reloc_emit_bcond_ne_inverts_to_eq", n_ok && skip_ok && b_ok, d);
+    }
+    {
+        uint32_t out[1] = {0};
+        int n = EmitRelocated(0x54000000u, 0x1000, 0x2000, out, 1);
+        check("reloc_emit_bcond_cap1", n == 0, "cap=1 rejected");
+    }
+
+    // ── CBZ / CBNZ ──────────────────────────────────────────────────
+    // Original: 0x34000000 = cbz w0, imm19=0 (target = 0x1000).
+    // out[0] = cbnz w0 skip +8 = 0x35000040
     {
         uint32_t out[4] = {0};
         int n = EmitRelocated(0x34000000u, 0x1000, 0x2000, out, 4);
-        check("reloc_emit_cbz_rejected", n == 0, "CBZ rejected");
+        bool n_ok = (n == 2);
+        bool skip_ok = (out[0] == 0x35000040u);
+        bool b_ok = (out[1] == 0x17FFFBFFu);
+        char d[128];
+        snprintf(d, sizeof d, "n=%d [0]=0x%08x skip=%d [1]=0x%08x b=%d",
+                 n, out[0], skip_ok ? 1 : 0, out[1], b_ok ? 1 : 0);
+        check("reloc_emit_cbz_two_insns", n_ok && skip_ok && b_ok, d);
     }
+    // CBNZ X0 (0xB5000000) inverts to CBZ X0
+    {
+        uint32_t out[4] = {0};
+        int n = EmitRelocated(0xB5000000u, 0x1000, 0x2000, out, 4);
+        bool skip_ok = (out[0] == 0xB4000040u);
+        char d[64]; snprintf(d, sizeof d, "n=%d [0]=0x%08x", n, out[0]);
+        check("reloc_emit_cbnz_inverts_to_cbz", n == 2 && skip_ok, d);
+    }
+
+    // ── TBZ / TBNZ ──────────────────────────────────────────────────
+    // Original: 0x36000000 = tbz w0, #0, imm14=0 (target = 0x1000).
+    // out[0] = tbnz w0, #0, skip +8 = 0x37000040
     {
         uint32_t out[4] = {0};
         int n = EmitRelocated(0x36000000u, 0x1000, 0x2000, out, 4);
-        check("reloc_emit_tbz_rejected", n == 0, "TBZ rejected");
+        bool n_ok = (n == 2);
+        bool skip_ok = (out[0] == 0x37000040u);
+        bool b_ok = (out[1] == 0x17FFFBFFu);
+        char d[128];
+        snprintf(d, sizeof d, "n=%d [0]=0x%08x skip=%d [1]=0x%08x b=%d",
+                 n, out[0], skip_ok ? 1 : 0, out[1], b_ok ? 1 : 0);
+        check("reloc_emit_tbz_two_insns", n_ok && skip_ok && b_ok, d);
     }
+    // TBNZ inverts to TBZ
     {
         uint32_t out[4] = {0};
-        int n = EmitRelocated(0x18000040u, 0x1000, 0x2000, out, 4);
-        check("reloc_emit_ldr_rejected", n == 0, "LDR literal rejected");
+        int n = EmitRelocated(0x37000000u, 0x1000, 0x2000, out, 4);
+        bool skip_ok = (out[0] == 0x36000040u);
+        char d[64]; snprintf(d, sizeof d, "n=%d [0]=0x%08x", n, out[0]);
+        check("reloc_emit_tbnz_inverts_to_tbz", n == 2 && skip_ok, d);
     }
+
+    // ── LDR literal ─────────────────────────────────────────────────
+    // 0x18000000 = ldr w0, imm19=0, target = orig_pc = 0x1000.
+    // Expected:
+    //   out[0] = stp x16, x17, [sp, #-16]! = 0xA9BF47F0
+    //   out[1] = adrp x16, page(0x1000) from PC 0x2004 = 0xF0FFFFF0
+    //   out[2] = ldr w0, [x16, #0] = 0xB9400200
+    //   out[3] = ldp x16, x17, [sp], #16 = 0xA8C147F0
+    {
+        uint32_t out[4] = {0};
+        int n = EmitRelocated(0x18000000u, 0x1000, 0x2000, out, 4);
+        char d[160];
+        snprintf(d, sizeof d, "n=%d [0]=0x%08x [1]=0x%08x [2]=0x%08x [3]=0x%08x",
+                 n, out[0], out[1], out[2], out[3]);
+        bool ok = (n == 4)
+                  && (out[0] == kStpX16X17)
+                  && (out[1] == 0xF0FFFFF0u)
+                  && (out[2] == 0xB9400200u)
+                  && (out[3] == kLdpX16X17);
+        check("reloc_emit_ldr_four_insns", ok, d);
+    }
+    // LDR X0 variant -> uses 64-bit LDR form (0xF9400000 base)
+    {
+        uint32_t out[4] = {0};
+        int n = EmitRelocated(0x58000000u, 0x1000, 0x2000, out, 4);
+        bool ldr_ok = (out[2] == 0xF9400200u);
+        char d[80]; snprintf(d, sizeof d, "n=%d [2]=0x%08x", n, out[2]);
+        check("reloc_emit_ldr_x_variant", n == 4 && ldr_ok, d);
+    }
+    // LDRSW variant
+    {
+        uint32_t out[4] = {0};
+        int n = EmitRelocated(0x98000000u, 0x1000, 0x2000, out, 4);
+        bool ldr_ok = (out[2] == 0xB9800200u);
+        char d[80]; snprintf(d, sizeof d, "n=%d [2]=0x%08x", n, out[2]);
+        check("reloc_emit_ldrsw_variant", n == 4 && ldr_ok, d);
+    }
+    // LDR W16 rejected (would clobber our scratch)
+    {
+        uint32_t out[4] = {0};
+        int n = EmitRelocated(0x18000010u, 0x1000, 0x2000, out, 4);
+        check("reloc_emit_ldr_rt16_rejected", n == 0, "LDR into x16 rejected");
+    }
+    // LDR W17 rejected
+    {
+        uint32_t out[4] = {0};
+        int n = EmitRelocated(0x18000011u, 0x1000, 0x2000, out, 4);
+        check("reloc_emit_ldr_rt17_rejected", n == 0, "LDR into x17 rejected");
+    }
+    // LDR W0 with cap < 4 rejected
+    {
+        uint32_t out[3] = {0};
+        int n = EmitRelocated(0x18000000u, 0x1000, 0x2000, out, 3);
+        check("reloc_emit_ldr_cap3", n == 0, "cap=3 rejected");
+    }
+
     return pass;
 }
 

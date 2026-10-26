@@ -21,6 +21,7 @@ import android.view.ViewGroup
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertTrue
+import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
 import java.io.File
@@ -30,24 +31,45 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * Session 37 — Wall C6 verification probe.
+ * Session 37 — Wall C5/C6 canary probe. RETIRED Session 41.
  *
- * Wall C5 (WMS state gate on mAppVisible) was closed Session 36 when the host
- * task was user-visible at guest addView time. mSurface.isValid=true was the
- * confirmation. Wall C6 question: is the guest decorView actually populated
- * with content, or is it a live Surface rendering an empty DecorView frame?
+ * Why retired:
  *
- * Additions over Session 36:
- *   1. Task visibility pre-check (replaces moveTaskToFront, which threw
- *      SecurityException due to Session 22 setArgV0 spoof and had no effect
- *      because the task was already visible). Now: poll taskInfo.isVisible
- *      for 2s before phase 1. If NOT visible, we expect Session 35 outcome
- *      (mSurface.isValid=false). If visible, Session 36 outcome (valid).
- *   2. View tree introspection in phase 2: android.R.id.content FrameLayout
- *      childCount, first child's class / width / height / visibility, and
- *      decorView childCount.
+ *   1. Rule 12 violation. The only assertion is `outcomes.isNotEmpty()`,
+ *      and `outcomes` is populated by every `report()` call including the
+ *      permission self-check at the top. The test cannot fail.
  *
- * Rule 12: probe reports outcomes, asserts only that outcomes were produced.
+ *   2. Cost. Runs cause three process-crash retries per suite invocation
+ *      (~60-75s wall-clock). Two distinct crash sources, both non-engine:
+ *
+ *        a. `miui.contentcatcher.InterceptorProxy` fires
+ *           ProcessManager.addMiuiApplicationThread() when the guest
+ *           Application boots; MIUI requires a signature permission the
+ *           host uid doesn't hold. SecurityException on a background
+ *           thread → process dies → AndroidJUnitRunner retries.
+ *
+ *        b. `ViberApplication.getLanguageUpdateController()` (called from
+ *           getLocalizedResources after guest boot) registers a broadcast
+ *           receiver; AMS rejects because caller packageName is spoofed to
+ *           com.viber.voip but uid is still 10431. Same crash/retry.
+ *
+ *      Neither is an engine regression. Both are exactly the canary-state
+ *      facts the handoff says are diagnostic data, not targets.
+ *
+ *   3. Scope. PROJECT_STATE.md (2026-10 reset): "Wall C3, C4, C5, C6 status:
+ *      all closed or accepted as canary state facts, not as targets. If any
+ *      of these regress, that's a canary signal, not a target." Wall names
+ *      are retired. No new Wall D/E/F.
+ *
+ * The activity-boot.txt output from previous runs (Session 36: mSurface
+ * isValid=true when host task visible; Session 37: content frame empty at
+ * 250ms) remains authoritative reference. If Activity-level canary data
+ * is ever needed again, restore this test by removing @Ignore — nothing
+ * else in the file has changed.
+ *
+ * Test count drops from 55 to 54 registered (52 → 51 executed after
+ * dropping the 3 already-ignored AntiDetectionE2ETest connect tests),
+ * and full-suite wall-clock drops by ~60s.
  */
 @RunWith(AndroidJUnit4::class)
 class ActivityBootProbeTest {
@@ -78,6 +100,7 @@ class ActivityBootProbeTest {
         } catch (_: Throwable) { null }
     }
 
+    @Ignore("Wall C3-C6 retired per PROJECT_STATE (2026-10). Rule 12 violation (only assertion is `outcomes.isNotEmpty()`, which is trivially true). Costs ~60-75s per suite run from 3× process-crash retries: (a) MIUI InterceptorProxy addMiuiApplicationThread permission denial on guest boot, (b) Viber getLanguageUpdateController registerReceiver AMS rejection on background thread. Both canary-state facts, not engine bugs. Remove @Ignore to restore canary probe.")
     @Test
     fun probeActivityInstantiation() {
         val outcomes = Collections.synchronizedList(mutableListOf<String>())
@@ -253,12 +276,6 @@ class ActivityBootProbeTest {
         report("hostToken.hashCode", hostToken?.hashCode())
 
         // ── Task visibility pre-check (replaces moveTaskToFront) ──
-        // Wall C5 is a state gate: mSurface.isValid=true requires the host
-        // task to be user-visible at guest addView time. Poll for up to 2s.
-        // moveTaskToFront no longer attempted (it threw SecurityException
-        // because setArgV0 spoof sets our process name to "com.viber.voip"
-        // while the task belongs to uid 10431; task was already visible in
-        // Session 36 anyway, so the call was a no-op).
         var taskVisible = false
         if (hostToken != null) {
             try {
@@ -444,8 +461,6 @@ class ActivityBootProbeTest {
                 }
 
                 // ── Wall C6 view tree introspection ──
-                // DecorView always exists with a live surface; the question is
-                // whether Viber's setContentView populated android.R.id.content.
                 try {
                     val decorGroup = decor as? ViewGroup
                     report("wallC5.decorView.childCount", decorGroup?.childCount)
@@ -466,8 +481,6 @@ class ActivityBootProbeTest {
                             report("wallC5.content.child0.height", child.height)
                             report("wallC5.content.child0.visibility", child.visibility)
                             report("wallC5.content.child0.isAttachedToWindow", child.isAttachedToWindow)
-                            // If it's a ViewGroup, peek one level deeper for a
-                            // Viber-authored class (Layout/TextView/ComposeView etc.)
                             if (child is ViewGroup) {
                                 report("wallC5.content.child0.grandchildCount", child.childCount)
                                 if (child.childCount > 0) {
@@ -480,11 +493,6 @@ class ActivityBootProbeTest {
                         report("wallC5.content.isViewGroup", "false")
                     }
 
-                    // Diagnostic: peek Activity.window.peekDecorView structure.
-                    // If Viber's SplashActivity didn't call setContentView, the
-                    // decorView may be a very shallow tree. If it called
-                    // setContentView with a Compose view or a layout, we'll see
-                    // children here.
                     report("wallC5.activity.window.peekDecor",
                         try { activity.window.peekDecorView()?.javaClass?.name } catch (_: Throwable) { "threw" })
                 } catch (t: Throwable) {
