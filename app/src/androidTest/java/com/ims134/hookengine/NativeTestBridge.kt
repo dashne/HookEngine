@@ -106,11 +106,6 @@ object NativeTestBridge {
     external fun regInspectSnapshot(target: Long): LongArray?
 
     // ─── Feature 2.1 / 2.2 / 2.3 — memory read / write / scan ────────
-    //
-    // All three operations validate against /proc/self/maps. Unmapped
-    // regions return null (read/scan) or HOOK_TARGET_INVALID (write).
-    // MemWrite mprotects each page to RW, writes, and restores the orig
-    // prot — Rule 10 preserved.
     external fun getMemTestBufAddr(): Long
     external fun getMemTestRoPageAddr(): Long
     external fun memTestResetRoPage()
@@ -120,6 +115,14 @@ object NativeTestBridge {
     external fun memScan(start: Long, len: Long,
                          pattern: ByteArray, mask: ByteArray?,
                          maxOut: Int): LongArray?
+
+    // ─── Feature 2.5 — full maps enumeration ────────────────────────
+    external fun memEnumMapsAllCount(): Int
+    external fun memEnumMapsFiltered(prot_mask: Int, maxEntries: Int): LongArray?
+    external fun memEnumMapsPathContains(substr: String): Int
+    external fun memEnumMapsDebugDump(): String
+    external fun memFindRegionContaining(addr: Long): LongArray?
+
 
     // ─── Feature 1.4 — ArtMethod entry/exit trace ───────────────────
     external fun traceAttach0(method: java.lang.reflect.Method): Int

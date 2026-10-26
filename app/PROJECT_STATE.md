@@ -172,12 +172,12 @@ Those are research-grade instrumentation frameworks, distinct from a hook engine
 
 Viber boot under the engine is a **regression canary**, not a target. Every session ends with `GuestLoadTest` green (`outcome=booted-viber-order`, providers ≥14, no new FATAL). If the canary breaks, an engine feature broke — fix the engine feature, then continue. Viber UI, Viber functionality, Viber network — not in scope, not pursued, not tracked.
 
-**IMPORTANT measurement note:** the canary must be measured from a **fresh process** — a run where `GuestLoadTest` is the only test invoked. Running `GuestLoadTest` inside the full suite (position 50 of 102) has `elapsedMs=16000+` and `providersSucceeded=3` because 49 test classes have already fragmented the process — `FileProvider` and other providers time out. That is **not** the canary measurement. The canary is: `adb shell am instrument -w -r -e class com.ims134.hookengine.GuestLoadTest ...`. Fresh process. Baseline: `elapsedMs ~1700ms`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise).
+**IMPORTANT measurement note:** the canary must be measured from a **fresh process** — a run where `GuestLoadTest` is the only test invoked. Running `GuestLoadTest` inside the full suite (position 50 of 108) has `elapsedMs=16000+` and `providersSucceeded=3` because 49 test classes have already fragmented the process — `FileProvider` and other providers time out. That is **not** the canary measurement. The canary is: `adb shell am instrument -w -r -e class com.ims134.hookengine.GuestLoadTest ...`. Fresh process. Baseline: `elapsedMs ~1700ms`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise).
 
 
 # PROJECT STATE
 
-Last updated: **Session 49 close (2026-10-27)**. Supersedes Session-48-close version. Sessions 41–49 landed on disk and are on-device verified (98 tests executed, 0 failed at Session 49 close). **Category 1 (Hook mechanisms) COMPLETE at 9/9.** Category 2 at 6/7 — only 2.5 (maps enumeration) and 2.8 (backtrace) remain. Session 50 target: Feature 2.5.
+Last updated: **Session 50 close (2026-10-27)**. Supersedes Session-49-close version. Sessions 41–50 landed on disk and are on-device verified (104 tests executed, 0 failed at Session 50 close). **Category 1 (Hook mechanisms) COMPLETE at 9/9.** **Category 2 (Memory primitives) at 6/7** — only 2.8 backtrace remains (scheduled for Session 53). Session 51 target: Feature 3.4 ServiceManager lookup interception.
 
 ---
 
@@ -210,13 +210,13 @@ The target is defined by the **feature inventory** below — not by any particul
 
 Sessions 1–14 built the primitive foundation. Sessions 15–40 did **not** deepen the engine — they built a container around it (dual-Application boot, GuestClassLoader, LoadedApk manipulation, WMS probes). That detour consumed 26 sessions and produced one engine port (`nativeInit`, S38). The container is now the canary; its further development is out of scope.
 
-Sessions 41–49 resumed engine work and delivered **eleven** verified primitives — the entire Category 1 plus register inspection and memory ops. **Category 1 is complete.** Category 2 is 6/7.
+Sessions 41–50 resumed engine work and delivered **fourteen** verified primitives — the entire Category 1 plus Category 2 except backtrace. **Category 1 is complete.** Category 2 is 6/7.
 
 ---
 
 ## Current verified state
 
-**Engine primitives (verified on-device, all green at Session 49 close):**
+**Engine primitives (verified on-device, all green at Session 50 close):**
 - Inline hook: 9 ARM64 instruction kinds. Verified by RelocTest (49 assertions).
 - GOT hook: 26 sites, works.
 - ArtMethod hook: works (native methods, non-fast-JNI only).
@@ -227,6 +227,7 @@ Sessions 41–49 resumed engine work and delivered **eleven** verified primitive
 - SVC instruction hooking: BRK-magic + SIGTRAP handler. Verified by SvcHookTest (6 tests).
 - Register state inspection: full ARM64 GP + SP + NZCV + Q register capture. PROBE and PASSTHRU modes. Verified by RegInspectTest (6 tests).
 - Memory read / write / scan: `/proc/self/maps`-validated; MemWrite mprotects each page to RW, writes, restores orig (Rule 10 preserved). Verified by MemoryOpsTest (6 tests).
+- **Full maps enumeration: MemEnumMaps, MemEnumMapsFilter, MemFindRegionContaining; per-entry {start, end, prot, offset, dev major/minor, inode, path}. Verified by MapsEnumTest (6 tests).**
 - Dynamic runtime attach: works with alignment/mapped/exec guards. Verified by DynamicAttachTest (6 tests).
 - Hidden-API bypass: works via thread-attached reflection.
 - `IPCThreadState::transact` inline hook: works.
@@ -263,15 +264,15 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 
 | # | Feature | Status |
 |---|---|---|
-| 2.1 | Read memory at arbitrary address | ✅ **S49** |
-| 2.2 | Write memory (page-prot safe) | ✅ **S49** |
-| 2.3 | Scan memory for pattern | ✅ **S49** |
+| 2.1 | Read memory at arbitrary address | ✅ |
+| 2.2 | Write memory (page-prot safe) | ✅ |
+| 2.3 | Scan memory for pattern | ✅ |
 | 2.4 | Allocate memory near target | ✅ |
-| 2.5 | Enumerate maps | ⚠️ → **S50 target** |
-| 2.7 | Register state inspection at hook site | ✅ **S48** |
-| 2.8 | Backtrace from hook site | ❌ |
+| 2.5 | Enumerate maps | ✅ **S50** |
+| 2.7 | Register state inspection at hook site | ✅ |
+| 2.8 | Backtrace from hook site | ❌ → **S53** |
 
-**Category 2: 6/7.** 2.5 is ⚠️ because `/proc/self/maps` is read by nearly every primitive internally (ValidateRange, ReadProt, MemoryOps, RegInspect, SvcHook, etc.) but is **not** exposed as a structured public API. Session 50 adds that API.
+**Category 2: 6/7.** 2.8 backtrace scheduled for Session 53.
 
 ### Category 3 — IPC / kernel boundary
 
@@ -280,10 +281,10 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 | 3.1 | Binder transact interception | ✅ |
 | 3.2 | AIDL prelude parse | ✅ |
 | 3.3 | AIDL reply rewrite | ✅ |
-| 3.4 | ServiceManager lookup interception | ❌ |
+| 3.4 | ServiceManager lookup interception | ❌ → **S51 target** |
 | 3.5 | Property read/write interception | ✅ |
-| 3.6 | Signal handling override | ❌ |
-| 3.7 | Native ServiceManager addition | ❌ |
+| 3.6 | Signal handling override | ❌ → **S52 target** |
+| 3.7 | Native ServiceManager addition | ❌ → **S58** |
 
 ### Category 4 — Class loading / code isolation
 
@@ -352,15 +353,15 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 
 ### Totals
 
-- **✅ verified complete:** ~35 features (whole Category 1 + 2.1/2.2/2.3/2.4/2.7)
+- **✅ verified complete:** ~36 features
 - **⚠️ partial:** ~7 features
-- **❌ not started:** ~20 features
+- **❌ not started:** ~19 features
 
 **Engine completion requires ~25 more sessions.**
 
 ---
 
-## Engine roadmap — Session 50 to Session 75
+## Engine roadmap — Session 51 to Session 75
 
 ### Phase A — Foundation (Sessions 41–44) — CLOSED
 ### Phase B — Hook mechanism depth (Sessions 45–48) — CLOSED (Category 1 9/9)
@@ -370,10 +371,10 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 | Session | Feature | Status / Exit |
 |---|---|---|
 | 49 | 2.1 / 2.2 / 2.3 Memory read / write / scan | ✅ `MemoryOpsTest` |
-| **50** | **2.5 Full maps enumeration** | **next — `MapsEnumTest`** |
-| 51 | 3.4 ServiceManager lookup interception | `ServiceManagerTest` |
+| 50 | 2.5 Full maps enumeration | ✅ `MapsEnumTest` |
+| **51** | **3.4 ServiceManager lookup interception** | **next — `ServiceManagerTest`** |
 | 52 | 3.6 Signal handling override | `SignalOverrideTest` |
-| 53 | 2.8 Backtrace from hook site | `BacktraceTest` |
+| 53 | 2.8 Backtrace from hook site | `BacktraceTest` — **closes Category 2** |
 
 After S53: **Category 2 complete. Category 3 (except 3.7) complete.**
 
@@ -418,17 +419,17 @@ Viber is used for **one purpose**: verify that the engine primitives still work 
 - `booted-viber-order` + no new FATAL + providers ≥14 = canary green
 - Any new FATAL, any boot regression, any provider count drop = canary red
 
-**Canary state at Session 49 close (fresh process):** green. `outcome=booted-viber-order`, `elapsedMs=1692`, `providersSucceeded=14` / `providersFailed=1` (MlKit noise).
+**Canary state at Session 50 close (fresh process):** green. `outcome=booted-viber-order`, `elapsedMs=1676`, `providersSucceeded=14` / `providersFailed=1` (MlKit noise).
 
-**Measurement discipline:** canary must be measured from fresh process — `-e class com.ims134.hookengine.GuestLoadTest` as the only class. In-suite readings (~position 50/102) are process-fragmented and not the canary.
+**Measurement discipline:** canary must be measured from fresh process — `-e class com.ims134.hookengine.GuestLoadTest` as the only class. In-suite readings (~position 50/108) are process-fragmented and not the canary.
 
 ---
 
-## Test suite state (as of Session 49 close)
+## Test suite state (as of Session 50 close)
 
-**Executed:** 98 · **Registered:** 102 · **Ignored:** 4 · **Failed:** 0
+**Executed:** 104 · **Registered:** 108 · **Ignored:** 4 · **Failed:** 0
 
-Registered test classes (post-S49):
+Registered test classes (post-S50):
 
 | Class | Tests | Status |
 |---|---|---|
@@ -455,149 +456,173 @@ Registered test classes (post-S49):
 | ReturnModTest | 6 | ✅ S46 |
 | SvcHookTest | 6 | ✅ S47 |
 | RegInspectTest | 6 | ✅ S48 |
-| **MemoryOpsTest** | **6** | **✅ S49** |
+| MemoryOpsTest | 6 | ✅ S49 |
+| **MapsEnumTest** | **6** | **✅ S50** |
 | GuestLoadTest | 1 | ✅ (canary) |
 | ActivityBootProbeTest | 1 | 🔒 ignored |
 | IntegrationTest | 1 | ✅ |
 | Diagnostic probes | several | non-gating |
 
 **Test count history:**
-- S40: 51 · S41: 51 · S42: 57 · S43: 63 · S44: 68 · S45: 74 · S46: 80 · S47: 86 · S48: 92
-- S49 close: **98** (+6 MemoryOpsTest)
-- S50 target: 104 (+6 MapsEnumTest)
+- S40: 51 · S41: 51 · S42: 57 · S43: 63 · S44: 68 · S45: 74 · S46: 80 · S47: 86 · S48: 92 · S49: 98
+- S50 close: **104** (+6 MapsEnumTest)
+- S51 target: 110 (+6 ServiceManagerTest)
 
 ---
 
-## Session 50 first actions (authoritative)
+## Session 51 first actions (authoritative)
 
-1. Confirm Session 49 commit landed (`git log --oneline -3`).
-2. Write Feature 2.5 — full maps enumeration. New API shape:
-    - `MemEnumMaps(MemMapEntry* out, size_t max_entries, size_t* out_count)` returns an array of structs `{ uintptr_t start; uintptr_t end; int prot; uint64_t offset; uint32_t dev_major; uint32_t dev_minor; uint64_t inode; char path[256]; }` — matches `/proc/self/maps` fields 1:1.
-    - `MemEnumMapsFilter(int prot_mask, MemMapEntry* out, size_t max_entries, size_t* out_count)` — filtered variant.
-    - `MemFindRegionContaining(uintptr_t addr, MemMapEntry* out)` — single-entry lookup.
+1. Confirm Session 50 commit landed (`git log --oneline -3`).
+2. Write Feature 3.4 — ServiceManager lookup interception.
 3. Build + install (Rule 14).
-4. `am instrument` MapsEnumTest. Expect `OK (6 tests)`.
-5. Full suite. Expect `OK (104 tests)`.
+4. `am instrument` ServiceManagerTest. Expect `OK (6 tests)`.
+5. Full suite. Expect `OK (110 tests)`.
 6. Canary from fresh process. Expect `outcome=booted-viber-order`, `providersSucceeded ≥ 14`.
-7. Commit, mark 2.5 → ✅. **Category 2 at 7/7 except 2.8 backtrace** (which S53 handles).
+7. Commit, mark 3.4 → ✅.
 
-### Session 50 planning note
+### Session 51 planning note
 
-**Feature 2.5 scope:** the current `/proc/self/maps` walk is duplicated across at least 5 call sites (`InlineHooker.cpp::ReadPageProt`, `elf_hooker.cpp::ReadPageProt`, `Hooks.cpp::ReadPageProt`, `MemoryOps.cpp::MemGetPageProt`, `JavaHook.cpp::ReadProt`, plus inline copies in `ChainHook.cpp`, `ReturnMod.cpp`, `SvcHook.cpp`, `RegInspect.cpp`). Session 50 exposes a structured API **and** leaves the existing call sites alone — moving every caller to `MemFindRegionContaining` would be a large refactor with high regression risk; Session 50 delivers the API, and a future "cleanup" session (if needed) can consolidate callers.
+**Feature 3.4 scope:** hook `android::IServiceManager::getService` (and possibly `checkService`) so that `ServiceManager.getService("xxx")` returns a synthetic binder or a rewritten name.
 
-**Six tests:**
-1. `MemEnumMaps` returns ≥ 10 entries (any real process has this many).
-2. Every returned entry has `start < end` and 4-byte alignment.
-3. At least one entry has `prot & PROT_EXEC` (the loaded .so's code page).
-4. At least one entry has `path` containing `libhookengine.so` (our own library).
-5. `MemFindRegionContaining` of a known fixture (`g_memtest_buf`) returns an entry with `start <= buf && buf < end`.
-6. `MemEnumMapsFilter(PROT_EXEC, ...)` returns fewer entries than unfiltered and all have PROT_EXEC.
+Design candidates:
 
-**Known constraints:**
-- `/proc/self/maps` line format: `start-end perms offset dev inode pathname`. Path may be empty (anonymous). Device is hex `major:minor` as a single field `\x` separated.
-- Path length capped at 256 bytes. Truncate if longer.
-- `MAP_ENTRIES_MAX = 512` (typical process has 100-300 entries; 512 is safe margin).
-- No stubs, no naked asm. Pure C++. Simplest of the remaining Category 2 sessions.
-- **No `uninstallAll` extension needed** — this is stateless, no slots.
+1. **Inline-hook `IServiceManager::getService` in libbinder.so.** Hook the impl entry: `ServiceManagerShim::getService(String16)`. Read the requested name from x0, then either pass through to `_orig`, return a synthetic binder (from the service registry populated by 3.7), or rewrite to `_orig(overridden_name)`.
 
----
+2. **Binder-transact level hook (reuse `Hook_Transact`).** Intercept Binder transactions against the ServiceManager handle (handle == 0). Read `data` to extract the method code + service name. This reuses the existing `IPCThreadState::transact` hook. Cleaner integration with the existing primitive, but ties the feature to the parcel format.
 
-## Rules of engagement (unchanged, still authoritative)
+3. **Inline-hook the `__getService` call site in `libbinder_ndk.so` / `libbinder.so`.** Multiple call sites, not a single function.
 
-- Target is the engine feature inventory, not ApplicationProxy coverage.
-- Viber is canary only. **Canary must be measured from fresh process**.
-- Every session advances at least one ⚠️/❌/🔧 → ✅.
-- Verification-first: verify any prior-session unverified code before writing new code.
-- Rule 5 (behavior match) — partial disclosure for structural ports.
-- Rule 12: test assertions must be able to fail.
-- Rule 14: every test-run instruction includes `./gradlew` + `adb install -r -t` on **both** APKs.
-- Rule 15: engine is native.
-- Rule 7 (decomp-first) when wire format / symbol / field layout is uncertain.
-- **No `am instrument` output = no session close.**
-- Deferred items stay deferred: `handleJHMethod` (S18), tnFIN code-36 byte rewrite (S12), clone-app features.
+**Session 51 will start with option 1** — the cleanest match for what 3.4 specifies ("hook getService, checkService, addService") and it exercises the previously-verified inline-hook machinery. If `IServiceManager::getService` turns out to be fast-JNI or optimized away (unlikely — it's a native method on the C++ side), we fall back to option 2 which reuses verified infrastructure.
 
----
+**Scope caution:** `ServiceManager.getService()` under the hood on Android 15+ uses `IBinder` and `checkService`. The transact codes: `GET_SERVICE_TRANSACTION = 1`, `CHECK_SERVICE_TRANSACTION = 2`, `ADD_SERVICE_TRANSACTION = 3`. The request parcel layout is `[String16 name]` after the interface token. If option 1 lands cleanly, the API shape will be:
 
-## Hard-won facts (canonical reference)
+```cpp
+extern "C" HookResult ServiceManagerAttachOverride(const char* name, jobject syntheticBinderOrNull);
+extern "C" HookResult ServiceManagerDetachOverride(const char* name);
+extern "C" HookResult ServiceManagerAttachRewrite(const char* from, const char* to);
+extern "C" HookResult ServiceManagerDetachRewrite(const char* from);
 
-Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–49:
+For the JNI side, the test can just verify that ServiceManager.getService("test_synthetic") returns null (or a magic binder) after ServiceManagerAttachOverride("test_synthetic", null) — a Rule-12-safe check because it fails if the hook didn't fire.
 
-**SYS_getpid / SYS_getuid via `syscall()` bypass both inline and GOT hooks.** (S33, verified S34.)
+Known constraint to watch: ServiceManager.getService may go through caching (SystemServiceRegistry caches results). A test that calls twice could see stale values. Test must call with a name that's definitely not cached ("com.ims134.test.synthetic_" + random).
 
-**AttributionSource layout differs by construction path.** (S32/33, verified S34.)
+Rules of engagement (unchanged, still authoritative)
+Target is the engine feature inventory, not ApplicationProxy coverage.
 
-**`Process.myUid()` returning spoofed 10000 propagates into ApplicationInfo.uid.** (S32, verified S34.)
+Viber is canary only. Canary must be measured from fresh process.
 
-**`mSurface.isValid()` gated on `mAppVisible` gated on host task visibility.** (S36/37.)
+Every session advances at least one ⚠️/❌/🔧 → ✅.
 
-**MIUI ProcessManager threads are background, non-blocking.** (S35+.)
+Verification-first: verify any prior-session unverified code before writing new code.
 
-**Full ARM64 relocation handles 9 kinds.** (S41.)
+Rule 5 (behavior match) — partial disclosure for structural ports.
 
-**`AttachRuntime` adds alignment/mapped/exec guards.** (S42.)
+Rule 12: test assertions must be able to fail.
 
-**ChainHook stub page layout (32-byte slots).** (S43.)
+Rule 14: every test-run instruction includes ./gradlew + adb install -r -t on both APKs.
 
-**`visibility("hidden")` on naked-asm-called functions** required for adrp+add. (S43, S46, S48.)
+Rule 15: engine is native.
 
-**Feature 1.8 — per-slot predicates, `nullptr` = unconditional fire.** (S45.)
+Rule 7 (decomp-first) when wire format / symbol / field layout is uncertain.
 
-**Feature 1.9 — post-call modifier with shadow trampoline.** (S46.)
+No am instrument output = no session close.
 
-**Feature 1.6 — BRK encoding is `0xD4200000 | (imm16 << 5)`, NOT `0xD4200000 | imm16`.** (S47.)
+Deferred items stay deferred: handleJHMethod (S18), tnFIN code-36 byte rewrite (S12), clone-app features.
 
-**Feature 1.6 — SVC mechanism (verified on-device).** (S47.)
+Hard-won facts (canonical reference)
+Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–50:
 
-**Feature 2.7 — Register state inspection mechanism (verified on-device S48).**
-- 784-byte frame, per-slot naked stub, dispatcher memcpy into `g_snapshots[slot]`, mode flag + trampoline overwritten into frame[32]/frame[33], restore branches on x16 flag.
-- **MRS NZCV returns flags in bits 31:28, not 3:0.** Per ARM ARM DDI 0487 C5.2.53. Raw value stored; use `(nzcv >> 28) & 0xF` to read flags.
-- **`-3` as int32 zero-extends to `0x00000000FFFFFFFD` in u64.** Compare against `0xFFFFFFFDL`, not `-3L`.
-- x17 clobbered by InstallInlineHookEx relay (stub address captured, not caller's x17). x16 accurate. Both IP0/IP1 scratch.
+SYS_getpid / SYS_getuid via syscall() bypass both inline and GOT hooks. (S33, verified S34.)
 
-**Feature 2.1 / 2.2 / 2.3 — MemoryOps mechanism (verified on-device S49).**
-- `MemRead(addr, out, len)` — `ValidateRange(addr, len, PROT_READ)` walks `/proc/self/maps` once, refuses on any unmapped or non-readable page with `HOOK_TARGET_INVALID`. Then `memcpy(out, addr, len)`.
-- `MemWrite(addr, data, len)` — same `ValidateRange` records orig prot per page; mprotect each to `orig | PROT_WRITE`; `memcpy`; `__builtin___clear_cache`; mprotect back to orig. If any mprotect in step 2 fails, rolls back already-modified pages before returning `HOOK_MPROTECT_FAILED`. **Rule 10 preserved on every path.**
-- `MemScan(start, len, pattern, mask, plen, out, max_out, out_count)` — `ValidateRange(PROT_READ)` on whole region; per-byte masked match `(hay[i+j] & mask[j]) == (pattern[j] & mask[j])`; mask == null = full mask. Refuses unmapped region, allows partial matches to overflow `out_addrs` silently (still counts all).
-- `MEMOPS_MAX_PAGES = 8` — MemWrite refuses ranges spanning >8 pages (bounds mprotect rollback loop). Longer writes must be chunked.
-- `MemProbeReadable` / `MemProbeWritable` = ValidateRange without touching memory.
-- `MemGetPageProt(page, out)` = public maps-walk query (used by MemoryOpsTest for Rule 10 verification).
-- **Header doc updated post-verification** — clarified that MemRead's validation is entry-only and a racing unmap can SIGSEGV; MemWrite is not signal-safe; `__builtin___clear_cache` on data pages is a no-op.
-- **Zero stubs, zero naked asm, zero slots.** Stateless. No `uninstallAll` extension needed.
+AttributionSource layout differs by construction path. (S32/33, verified S34.)
 
-**Test-fixture declaration order in `native-lib.cpp` matters.** (S45 on-disk fix.)
+Process.myUid() returning spoofed 10000 propagates into ApplicationInfo.uid. (S32, verified S34.)
 
-**Kotlin `Long` literal must fit in `Long.MAX_VALUE`.** (S47.)
+mSurface.isValid() gated on mAppVisible gated on host task visibility. (S36/37.)
 
-**Fast-JNI constraint on ArtMethod hooks.** (S44.)
+MIUI ProcessManager threads are background, non-blocking. (S35+.)
 
-**JNI symbol name-mangling.** (S43.)
+Full ARM64 relocation handles 9 kinds. (S41.)
 
-**Chained assignment of heterogeneous function pointers.** (S44.)
+AttachRuntime adds alignment/mapped/exec guards. (S42.)
 
-**`findstr` on binary `.so` returns empty.** (S43.)
+ChainHook stub page layout (32-byte slots). (S43.)
 
-**Verifying an APK rebuild deployed.** (S43.)
+visibility("hidden") on naked-asm-called functions required for adrp+add. (S43, S46, S48.)
 
-**`ActivityBootProbeTest` retired.** (S41.)
+Feature 1.8 — per-slot predicates, nullptr = unconditional fire. (S45.)
 
-**Canary crash suppressor.** (S41.)
+Feature 1.9 — post-call modifier with shadow trampoline. (S46.)
 
-**Canary measurement discipline.** (S46.)
+Feature 1.6 — BRK encoding is 0xD4200000 | (imm16 << 5), NOT 0xD4200000 | imm16. (S47.)
 
-**Phantom S42 batch warning.** 6.2 = ❌, 7.1 = ⚠️.
+Feature 1.6 — SVC mechanism (verified on-device). (S47.)
 
----
+Feature 2.7 — Register state inspection mechanism (verified on-device S48). 784-byte frame, per-slot naked stub, dispatcher memcpy into g_snapshots[slot]. MRS NZCV returns flags in bits 31:28, not 3:0 (ARM ARM DDI 0487 C5.2.53). -3 as int32 zero-extends to 0x00000000FFFFFFFD in u64. x17 clobbered by InstallInlineHookEx relay (stub address captured, not caller's x17). x16 accurate. Both IP0/IP1 scratch.
 
-## The blunt version
+Feature 2.1 / 2.2 / 2.3 — MemoryOps mechanism (verified on-device S49). MemRead / MemWrite / MemScan validate against /proc/self/maps; MemWrite mprotects each page to RW, writes, restores orig (Rule 10 preserved on every path). MEMOPS_MAX_PAGES = 8. __builtin___clear_cache on data pages is a no-op. No stubs, no slots — stateless.
 
-Category 1 — Hook mechanisms — closed Session 47 at 9/9. Sessions 48–49 opened and are nearly closing Category 2:
-- 48: register inspection
-- 49: memory read / write / scan
+Feature 2.5 — Maps enumeration mechanism (verified on-device S50).
 
-Sessions 41–49 shipped nine primitives, all on-device verified with fail-able tests. 98 executed tests, 0 failed. Canary green throughout.
+MemEnumMaps / MemEnumMapsFilter / MemFindRegionContaining with MemMapEntry { uintptr_t start; uintptr_t end; int prot; uint64_t offset; uint32_t dev_major; uint32_t dev_minor; uint64_t inode; char path[256]; }.
 
-Session 50 ships maps enumeration (2.5), closing all of Category 2 except 2.8 backtrace. Session 51 opens Category 3's remaining gaps (3.4 ServiceManager lookup), 52 (3.6 Signal handling), 53 (2.8 Backtrace — closes both 2.8 and Category 2).
+MAPS_MAX_ENTRIES = 8192 — this is critical. The instrumentation process on this ROM genuinely has >1024 entries (Viber components + ML Kit + ART JIT regions + test APK + app APK). libc.so was past the 1024 cap, causing an earlier enumeration test to fail. Do not tighten this cap. Documented real memory pressure: 300-1500 entries on this class of process.
 
-After S53 both Category 2 and Category 3 (except 3.7) are closed. From there, Phase D (class loading + symbol depth, 54–58) and Phase E (anti-detection, 59–64) have named sessions with named exit tests. Session 75 remains the target.
+sscanf on Bionic drops the trailing pathname even with valid %255[^\n] or %n. Two attempts both parsed the first 7 numeric/perms fields correctly but silently returned n=7 for lines with 8 fields. ParseMapsLine uses manual strtoul walker for every field. strtoul on Bionic behaves per-spec.
+
+fgets line buffer must be 2048+. With MAPS_MAX_ENTRIES = 8192 there can be long lines (ASLR addresses + long paths on ASAN builds), and 1024-byte truncation could split a path.
+
+Diagnostic helper MemEnumDebugDump emits raw+parse pairs for the first 3 lines; useful for future ROM-specific parser debugging.
+
+Test-fixture declaration order in native-lib.cpp matters. (S45 on-disk fix.)
+
+Kotlin Long literal must fit in Long.MAX_VALUE. (S47.)
+
+Fast-JNI constraint on ArtMethod hooks. (S44.)
+
+JNI symbol name-mangling. (S43.)
+
+Chained assignment of heterogeneous function pointers. (S44.)
+
+findstr on binary .so returns empty. (S43.)
+
+Verifying an APK rebuild deployed. (S43.)
+
+ActivityBootProbeTest retired. (S41.)
+
+Canary crash suppressor. (S41.)
+
+Canary measurement discipline. (S46.)
+
+Phantom S42 batch warning. 6.2 = ❌, 7.1 = ⚠️.
+
+The blunt version
+Category 1 — Hook mechanisms — closed Session 47 at 9/9. Category 2 — Memory primitives — closes after Session 53 (2.8 backtrace). Session 50 finished the memory-primitive core: read, write, scan, allocate, enumerate, register inspection.
+
+Sessions 41–50 shipped ten verified primitives, all on-device verified with fail-able tests:
+
+41: full ARM64 relocation (9 kinds)
+
+42: dynamic attach
+
+43: hook chaining
+
+44: ArtMethod trace
+
+45: conditional hook
+
+46: return-value modification
+
+47: SVC instruction hooking
+
+48: register state inspection
+
+49: memory read / write / scan
+
+50: full maps enumeration
+
+104 executed tests, 0 failed. Canary green throughout. Three test-failure rounds in Session 50 (path parser, buffer cap, buffer size) produced the real-world lesson that this class of instrumentation process can exceed 1024 maps entries — documented, capped generously at 8192, won't recur.
+
+Session 51 opens Category 3 with Feature 3.4 ServiceManager lookup interception. Session 52 opens 3.6 Signal handling. Session 53 closes both Category 2 (via 2.8 backtrace) and 3.6. After S53: Categories 1, 2 and most of 3 complete. Phase D (class loading + symbol depth, 54–58) and Phase E (anti-detection, 59–64) remain. Session 75 is the target.
 
 If a future session can't state a specific ⚠️/❌/🔧 → ✅ transition in one sentence, it's not a session.

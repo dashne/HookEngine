@@ -25,6 +25,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         SvcHook.cpp
         RegInspect.cpp
         MemoryOps.cpp
+        MapsEnum.cpp
         ApplicationProxy.cpp
         GuestBoot.cpp
         test_item1.cpp

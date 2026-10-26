@@ -24,6 +24,7 @@
 #include "SvcHook.h"
 #include "RegInspect.h"
 #include "MemoryOps.h"
+#include "MapsEnum.h"
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -1476,15 +1477,6 @@ Java_com_ims134_hookengine_NativeTestBridge_traceResetCounters(JNIEnv*, jobject)
 }
 
 // ─── Feature 2.1 / 2.2 / 2.3 — MemoryOps fixtures + JNI bridges ─────
-//
-// g_memtest_buf[256] is filled once: bytes 0..99 = 0,1,2,...,99;
-// bytes 100..107 = magic {CA FE BA BE 13 37 42 99};
-// bytes 108..255 = 108,109,...,255.
-//
-// g_memtest_ro_page is a dedicated mmap page set to PROT_READ. The write
-// test proves MemWrite's mprotect save/restore on a page that starts
-// non-writable — Rule 10 preserved end-to-end.
-
 extern "C" uint8_t g_memtest_buf[256] = {0};
 static std::once_flag g_memtest_buf_init;
 
@@ -1620,5 +1612,100 @@ Java_com_ims134_hookengine_NativeTestBridge_memScan(
         }
     }
     free(found);
+    return arr;
+}
+
+// ─── Feature 2.5 — Maps enumeration fixtures + JNI bridges ──────────
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_memEnumMapsAllCount(JNIEnv*, jobject) {
+    MemMapEntry* entries = (MemMapEntry*)calloc(MAPS_MAX_ENTRIES, sizeof(MemMapEntry));
+    if (!entries) return -1;
+    size_t count = 0;
+    HookResult r = MemEnumMaps(entries, MAPS_MAX_ENTRIES, &count);
+    free(entries);
+    return (r == HOOK_OK) ? (jint)count : -1;
+}
+
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_memEnumMapsFiltered(
+        JNIEnv* env, jobject, jint prot_mask, jint maxEntries) {
+    if (!env || maxEntries <= 0 || maxEntries > MAPS_MAX_ENTRIES) return nullptr;
+    MemMapEntry* entries = (MemMapEntry*)calloc((size_t)maxEntries, sizeof(MemMapEntry));
+    if (!entries) return nullptr;
+
+    size_t count = 0;
+    HookResult r = MemEnumMapsFilter((int)prot_mask, entries, (size_t)maxEntries, &count);
+    if (r != HOOK_OK) { free(entries); return nullptr; }
+
+    jlongArray arr = env->NewLongArray((jsize)(count * 3));
+    if (!arr) { free(entries); return nullptr; }
+
+    if (count > 0) {
+        jlong* vals = (jlong*)malloc(count * 3 * sizeof(jlong));
+        if (vals) {
+            for (size_t i = 0; i < count; i++) {
+                vals[i*3+0] = (jlong)entries[i].start;
+                vals[i*3+1] = (jlong)entries[i].end;
+                vals[i*3+2] = (jlong)entries[i].prot;
+            }
+            env->SetLongArrayRegion(arr, 0, (jsize)(count*3), vals);
+            free(vals);
+        }
+    }
+    free(entries);
+    return arr;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_memEnumMapsDebugDump(JNIEnv* env, jobject) {
+    if (!env) return nullptr;
+    char buf[8192];
+    size_t used = 0;
+    HookResult r = MemEnumDebugDump(buf, sizeof(buf) - 1, &used);
+    if (r != HOOK_OK) {
+        if (used == 0) snprintf(buf, sizeof(buf), "MemEnumDebugDump failed");
+        used = strlen(buf);
+    }
+    buf[used] = '\0';
+    return env->NewStringUTF(buf);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_memEnumMapsPathContains(
+        JNIEnv* env, jobject, jstring jsubstr) {
+    if (!env || !jsubstr) return -1;
+    const char* substr = env->GetStringUTFChars(jsubstr, nullptr);
+    if (!substr) return -1;
+
+    MemMapEntry* entries = (MemMapEntry*)calloc(MAPS_MAX_ENTRIES, sizeof(MemMapEntry));
+    if (!entries) { env->ReleaseStringUTFChars(jsubstr, substr); return -1; }
+
+    size_t count = 0;
+    HookResult r = MemEnumMaps(entries, MAPS_MAX_ENTRIES, &count);
+
+    int matches = 0;
+    if (r == HOOK_OK) {
+        for (size_t i = 0; i < count; i++) {
+            if (strstr(entries[i].path, substr)) matches++;
+        }
+    }
+    free(entries);
+    env->ReleaseStringUTFChars(jsubstr, substr);
+    return (jint)matches;
+}
+
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_memFindRegionContaining(
+        JNIEnv* env, jobject, jlong addr) {
+    if (!env || !addr) return nullptr;
+    MemMapEntry e = {};
+    HookResult r = MemFindRegionContaining((uintptr_t)addr, &e);
+    if (r != HOOK_OK) return nullptr;
+
+    jlongArray arr = env->NewLongArray(4);
+    if (!arr) return nullptr;
+    jlong vals[4] = {(jlong)e.start, (jlong)e.end, (jlong)e.prot, (jlong)e.offset};
+    env->SetLongArrayRegion(arr, 0, 4, vals);
     return arr;
 }
