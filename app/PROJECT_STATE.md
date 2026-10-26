@@ -1,4 +1,6 @@
-Last verified build: Session 23, verified on device 2026-10-26. OK (1 test) on GuestLoadTest. outcome=booted-viber-order, onCreated=true, providers=14/15 (MLKit env-only failure since Session 19a). Wall A (Viber DI "unknown component class ii") swallowed — bb2 set, providers work. Wall B (IStorageManager code 30 callingPackage UID mismatch) CLOSED — callingPackage rewrite verified 3 runs on-device. Milestone 3 verified: 60s post-boot clean, no FATAL/signal/ANR, active background IPC from Viber Engine threads. Coverage 14/37 (denominator corrected from 90 in Session 20 — reference registers 37 natives, not 90).
+Last verified build: Session 24, decision-only session (no code change). Session 23 verification carries forward: OK (1 test) on GuestLoadTest, outcome=booted-viber-order, onCreated=true, providers=14/15 (MLKit env-only failure since Session 19a). Wall A and Wall B CLOSED. Milestone 3 verified: 60s post-boot clean, no FATAL/signal/ANR, active background IPC from Viber Engine threads at 3.5s and 60s post-boot. **Milestone 3 accepted; "Viber boot" chapter closed per Session 24 Option 1.** Coverage 14/37 (denominator corrected from 90 in Session 20 — reference registers 37 natives, not 90). Session 25 starts a new project: operator picks between milestone 4 (Activity UI, ~3–6 weeks) and milestone 5 (functional — network/register/message, months) at Session 25 open.
+
+Session 24 closed 2026-10-26: **Scoping session. Option 1 chosen — milestone 3 accepted, "Viber boot" chapter closed.** Operator delegated the decision ("you are leader"); Session 23 handoff's Option 1 recommendation stands. Rationale: Wall A and Wall B are clean, verifiable wins; milestone 3 is verified 3× on-device by the same methodology that found both walls; starting milestone 4 in the same mental session as closing milestone 3 mixes two different cost domains. **Zero code changes this session.** Session 22 + 23 commit remains at HEAD (already landed — verified by operator). Coverage 14/37 unchanged (milestone 3 was integration depth, not new method ports). Test suite 52 registered = 49 pass + 3 ignored unchanged. Session 25 starts the next project with fresh scope: operator picks between milestone 4 (Activity lifecycle, ~3–6 weeks) and milestone 5 (functional — network/register/message, months) at Session 25 open. Neither is started here.
 
 Session 23 closed 2026-10-26: Wall B closed with `ParcelRewriter_TryRewriteStorageRequest` — intercepts `IStorageManager` transact prelude on the caller thread, rewrites `callingPackage` string16 from `"com.viber.voip"` (14 chars) to `"com.ims134.hookengine"` (21 chars), grows parcel by +12 bytes, forwards. AMS accepts (uid 10428 owns `com.ims134.hookengine`). Hook installed at `GuestHost.load` entry before guest boot. Verified 3 runs: `STORAGE rewrite fired: code=30 userId=0 size=132->144 delta=12` present each time; no `IO_POOL`/`TM:MESSAGES` crash, no `FATAL EXCEPTION`. Milestone 3 verified by 60s probe: no crash in 60s, two background IPackageManager IPC calls observed (code 3 at 3.5s post-boot, code 36 at 60s post-boot) — Viber Engine threads alive and doing work. Coverage 14/37 (unchanged — this was integration depth, not new method ports). Test suite unchanged: 52 registered = 49 pass + 3 ignored.
 
@@ -34,6 +36,7 @@ Completed:
 - Session 16: `:remote` flake characterized as AMS state (not a code crash); retry-with-backoff mitigation added; pass line confirmed as `OK (N tests)` (my Session 15 "run finished: is authoritative" claim was wrong — both are valid; see Device-test-signal section).
 - Session 22: Wall A RESOLVED — Viber DI `unknown component class ii` swallowed via JNI-safe exception capture. `Process.setArgV0` reflection fallback works. `PatchActivityThreadState` patches mBoundApplication.processName + appInfo + mInitialApplication. Providers 8/15 → 14/15. LoadedApk path with mClassLoader/mResources pre-set skips `NETWORK_STACK` wall.
 - Session 23: Wall B CLOSED — `ParcelRewriter_TryRewriteStorageRequest` intercepts `IStorageManager` transact prelude on caller thread, rewrites callingPackage string16 `com.viber.voip` → `com.ims134.hookengine` (+12 byte delta), AMS accepts. Hook installed at `GuestHost.load` entry before guest boot. 3 runs verified: `STORAGE rewrite fired: code=30 size=132->144 delta=12`. No IO_POOL/TM:MESSAGES crash. Milestone 3 verified via 60s probe: clean, active background IPC from Viber Engine threads.
+- Session 24: milestone 3 accepted, "Viber boot" chapter closed (Option 1). Zero code change. Scoping decision only.
 
 Pending:
 - Mission #1 Phase A: tnFIN code 36 byte-rewrite (Session 12+, deferred pending target need or decomp).
@@ -41,7 +44,7 @@ Pending:
 - Mission #1 Phase A: nativeInit full config.
 - Mission #1 Phase A: nativeOnLoad full DEX extract.
 - `IntegrationTest.selftestReportIsComplete` retry recovery: not yet observed firing (no flake caught post-mitigation). Observed pattern 3 pass / 2 fail (Sessions 13–16). If a future run logs `startService attempt N failed`, that is the verification signal.
-- Session 23 milestone 4 scoping decision (Activity lifecycle): pending. This is NOT a wall-fix. It's a new architecture layer (~3-6 weeks scope). See Session 24 decisions below.
+- Session 25 milestone 4 vs milestone 5 project pick: open. Operator decides at Session 25 open. Milestone 4 (Activity lifecycle, ~3–6 weeks); milestone 5 (network/register/message, months). See Session 25 decisions below.
 
 ---
 
@@ -428,7 +431,7 @@ Session 18 close for the actual policy.)
 
 ### Current coverage: 14 / 37 (~38%)
 
-Verified via `am instrument -r` in Session 14: `ProxyBridgeSurfaceTest` four tests ran green. Session 15 + 16 did not move the number. Session 22 moved it from 14 "usable methods" to "usable under real guest" but did not add ports — Wall A and Wall B were integration-depth work, not new methods. Session 23 closed Wall B; also integration-depth, not new ports. Honest no-growth on the coverage counter; large growth on the "usable" dimension.
+Verified via `am instrument -r` in Session 14: `ProxyBridgeSurfaceTest` four tests ran green. Session 15 + 16 did not move the number. Session 22 moved it from 14 "usable methods" to "usable under real guest" but did not add ports — Wall A and Wall B were integration-depth work, not new methods. Session 23 closed Wall B; also integration-depth, not new ports. Session 24 was scoping-only. Honest no-growth on the coverage counter; large growth on the "usable" dimension.
 
 **Delivered (matches reference):**
 | Method | Ours | Status |
@@ -484,7 +487,7 @@ Verified via `am instrument -r` in Session 14: `ProxyBridgeSurfaceTest` four tes
 
 1. **Every session opens with the mission header.** No exceptions.
 2. **DualHost integration is out of scope until Phase A complete.** When Phase A is done, re-evaluate; DualHost may still wait for Phase B. (Amended Session 18: DualHost integration unblocked; reference reproduction is pull-driven.)
-3. **Coverage number in every message.** 14/37 now. Must be higher every session, with the honest exception noted when decomp blocks the only path. Sessions 11, 12, 15, 16, 17, 22, 23 all did not grow it; all stated so openly.
+3. **Coverage number in every message.** 14/37 now. Must be higher every session, with the honest exception noted when decomp blocks the only path. Sessions 11, 12, 15, 16, 17, 22, 23, 24 all did not grow it; all stated so openly.
 4. **Every method shipped must have a test.**
 5. **Do not declare a method "done" unless it matches the reference's behavior**, not just its signature.
 6. **Session-by-session commit discipline.** One method (or one logical group) per commit, tests green at every commit.
@@ -1507,6 +1510,7 @@ Each of these has its own set of walls. It's been done by containers like Virtua
 - Session 17: **52 registered = 49 pass + 3 ignored** (`OK (49 tests)` — stale-APK fix, retry code verified on device, not exercised)
 - Session 22: **52 registered = 49 pass + 3 ignored** (unchanged; GuestLoadTest observed green throughout)
 - Session 23: **52 registered = 49 pass + 3 ignored** (unchanged; GuestLoadTest runs as 1 test, outcome=data assertion. No test file outside GuestLoadTest.kt touched. BinderTransactE2ETest / BinderTransactHookTest / AidlCodeProbeTest / Session11ProbeTest / Session11Code36ReplyTest unchanged by the new storage rewrite call site — it's guarded by iface token match.)
+- Session 24: **52 registered = 49 pass + 3 ignored** (unchanged; scoping session, no code touched).
 
 Coverage history:
 - Session 7: 10 / 90 (~11%) — historical denominator, corrected in Session 20
@@ -1524,60 +1528,51 @@ Coverage history:
 - Sessions 19+20: **14 / 37** — denominator corrected. `JNI_OnLoad` decomp shows `RegisterNatives(proxy, table, 0x25)` = 37, not 90. ApplicationProxy native boot delivered; provider wall named.
 - Session 22: **14 / 37** — unchanged, Wall A closed, providers 8/15 → 14/15. Integration depth up.
 - Session 23: **14 / 37** — unchanged, Wall B closed (3 runs verified), milestone 3 verified (60s probe clean, active background IPC). Integration depth up. Session 24 is a scoping decision, not a wall-fix.
+- Session 24: **14 / 37** — unchanged, scoping session (Option 1). Milestone 3 accepted. "Viber boot" chapter closed. No code touched.
 
 ---
 
-## What Session 24 must do FIRST
+## What Session 25 must do FIRST
 
-Session 23 closed Wall B. Milestone 3 verified. Session 24 opens with a **scoping decision**, not a wall-fix.
+Session 24 closed milestone 3 and the "Viber boot" chapter (Option 1). Session 25 starts a **new project**. The operator picks at Session 25 open — no default, no auto-pick:
 
-### Step 0 — read `PROJECT_STATE.md` Session 23 section, then pick one
+1. **Milestone 4 — Activity lifecycle (UI).** `Instrumentation.newActivity()` + `Activity.attach()` + `Window` creation via `WindowManagerImpl` + `ActivityTaskManager.startActivity` with a spoofed `ComponentName` AMS accepts + task stack. **~3–6 weeks of sessions.** Commits Viber's UI as a goal. Kotlin workarounds forbidden (Rule 15) — each item must be a native port when the reference has a native, or Kotlin only when the reference is Kotlin.
+2. **Milestone 5 — Functional (network / register / message).** Skip milestone 4. Test whether Viber's engine path actually requires an Activity to exist. **Months.** Not recommended — the dependency of engine on Activity existence is unproven either way, and without milestone 4 proven you may discover the engine gates on it after committing the milestone 5 scope.
 
-The three options in Session 23's scoping section:
+### Step 0 — read `PROJECT_STATE.md` Session 24 section, then pick 4 or 5
 
-1. **Accept milestone 3, close the "Viber boot" chapter.** Commit Session 22 + 23 as clean wins. Do not start milestone 4 in Session 24 — treat it as a fresh project scoped to a separate milestone.
-2. **Probe milestone 4's first wall.** `Instrumentation.newActivity()` + `Activity.attach()` attempt against Viber's launcher Activity. Same wall-fix methodology. Expect `ActivityThread.mInstrumentation` null, `WindowManager` rejection, or `ActivityTaskManager` component-not-found. Budget: 3–6 weeks of sessions.
-3. **Functional scope (milestone 5).** Network, register, message. Months of work.
-
-Recommendation: Option 1. Wall A and Wall B are clean wins. Milestone 3 is verified. Don't mix milestone 4 scoping with milestone 3 close.
-
-### Step 0a — commit block (if Option 1)
+Confirmation before opening Session 25:
 
 ```powershell
 cd H:\Mobiles\AndroidProject\2027\hookEngine
+git log --oneline -5
+# Expect: Session 24: milestone 3 accepted, Viber boot chapter closed... at HEAD
+#         Session 23: Wall B CLOSED ... at HEAD~1
+#         Session 22: Wall A ... at HEAD~2
 git status --short
-# Expect modified: CppParcelRewriter.cpp, BinderTransactHook.cpp,
-#                  GuestHost.kt, GuestLoadTest.kt, PROJECT_STATE.md
+# Expect: empty
 
-git add app\src\main\cpp\CppParcelRewriter.cpp `
-        app\src\main\cpp\BinderTransactHook.cpp `
-        app\src\main\java\com\ims134\hookengine\GuestHost.kt `
-        app\src\androidTest\java\com\ims134\hookengine\GuestLoadTest.kt `
-        app\PROJECT_STATE.md
+If either fails, Session 25 does not open until resolved.
 
-git commit -m "Session 23: Wall B CLOSED — IStorageManager code 30 callingPackage rewrite verified 3 runs; milestone 3 verified (60s probe clean, active background IPC). Wall A retained (14/15 providers)."
-git push origin master
-git log --oneline -3
-git status --short
-# Should be empty
-Step 1 — if Option 2 (milestone 4 probe)
-Do not commit Session 22/23 yet. Session 24 opens by attempting to launch Viber's launcher Activity. First wall-naming session, not a wall-fix session.
+Session 25 must NOT do
+Do not decomp-guess milestone 4. Activity lifecycle is a well-documented container-app pattern; follow the reference architecture exactly rather than reverse-engineering com.viber.voip.MainActivity bytecode.
 
-Session 24 must NOT do
-Do not add PmSpoof synthesis additions. Wall A was not a PackageManager lookup; Wall B was IStorageManager. Neither was PmSpoof-fixable. Any future wall that does surface a PmSpoof path should be named first, not guessed at.
+Do not run a "cleanup pass" on PROJECT_STATE.md Sessions 7–21 narratives. Historical. Leave them.
 
-Do not re-tune Thread.sleep in GuestLoadTest. 60s is enough. Milestone 3 verified. Another 5-minute sleep is not new information.
+Do not re-tune Thread.sleep in GuestLoadTest. 60s is enough. Milestone 3 verified.
 
-Do not decomp-guess milestone 4. Activity lifecycle is a well-documented container-app pattern; follow the reference architecture exactly rather than trying to reverse-engineer com.viber.voip.MainActivity bytecode.
+Do not re-open Wall A, Wall B, or milestone 3 verification. All closed. Re-opening them is not "due diligence," it is refusing to accept evidence.
 
-Do not run a "cleanup pass" on PROJECT_STATE.md sections from Sessions 7-21. Historical narratives are historical; leave them. Update only the header, current-session section, hard-won facts, test count history, coverage history, and this "what Session N must do" section.
+Do not add PmSpoof synthesis additions unless a real wall names it. Neither Wall A nor Wall B was PmSpoof-fixable. Any future wall that surfaces a PmSpoof path must be named first, not guessed at.
 
-Rules of engagement (restated, for the record)
-Every session opens with the mission header.
+Do not touch handleJHMethod. Parked indefinitely per operator (Session 18). Stub, spec, scaffolding stay on disk untouched.
+
+Rules of engagement (unchanged — restated for continuity)
+Every session opens with the mission header. No exceptions.
 
 DualHost integration may proceed at any coverage level. Reference reproduction is best-effort per method: a specific reference method is decomp'd and ported when a logged integration failure names it, not before. Rule 5 (match behavior, not signature) and Rule 7 (no speculative decomp) both stand. Integration drives coverage; coverage no longer gates integration.
 
-Coverage number in every message. 14/37 now. Must be higher every session, with the exception stated openly when decomp blocks all growth. Sessions 11, 12, 15, 16, 17, 18, 19+20, 22, 23 all failed this rule honestly; that is the enforcement, not a habit.
+Coverage number in every message. 14/37 now. Must be higher every session, with the exception stated openly when decomp or scoping blocks all growth. Sessions 11, 12, 15, 16, 17, 18, 19+20, 22, 23, 24 all failed this rule honestly; that is the enforcement, not a habit.
 
 Every method shipped must have a test.
 
@@ -1585,7 +1580,7 @@ Do not declare a method "done" unless it matches the reference's behavior.
 
 Session-by-session commit discipline. Green or the session is not done. Commit after every green milestone.
 
-IDA-first when wire format, symbol contract, or field layout is uncertain. Session 11: guessed synthetic format → OOM; guessed real offset → SIGABRT. Session 15: formalized this into HANDLEJHMETHOD_DECOMP_SPEC.md so handleJHMethod implementation cannot start on guesswork.
+IDA-first when wire format, symbol contract, or field layout is uncertain.
 
 Any jobject-touching JNI call on a caller thread with a JIT BinderProxy.transact frame above it crashes on this ROM. Hook at C++ layer or offload to fresh attached thread.
 
@@ -1595,13 +1590,13 @@ Reply parcel's mData is read-only post-transact. Never write into it. Swap the p
 
 Kotlin object instance fields are not static. Use @JvmStatic accessors.
 
-Test assertions must be able to fail. Session 15's AntiDetectionE2ETest fix: three tests were silently passing on bind() EPERM — marked @Ignore with reason pointing at real substitution coverage. Session 16's retry in IntegrationTest preserves fail-on-three-attempts (throws AssertionError with the original SecurityException as cause). Retry only masks transient AMS state; it does not hide real failures.
+Test assertions must be able to fail. Session 15's AntiDetectionE2ETest fix and Session 16's retry in IntegrationTest preserve fail-on-exhaustion — Rule 12 stands.
 
 Handoffs deliver whole-file replacements or well-delimited contiguous-block replacements with locate-by/replace-with patterns. Every handoff must include: (a) change summary per file, (b) paste content, (c) verify-before-commit checklist, (d) explicit git add + git commit -m "..." block.
 
 Every test-run instruction must include ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest followed by adb install -r -t on both APKs, before any am instrument call. Local build output timestamps are not proof of device state. Only adb install returning Success is.
 
-Engine behavior is implemented in native code. Kotlin/Java in app/src/main is limited to: JNI surface declarations, DualApplication (Android-mandated entry class), and Kotlin proxies that already predate the port (PmSpoof, ParcelRewriter, BinderTransactHook, ClassLoaderBridge, GuestHost harness). Integration failures that map to a reference native method (nativeInit, nativeFNLN, per-signature hook family, nativeOnLoad, handleJHMethod) must be ported natively — not patched in Kotlin. Kotlin workarounds for missing native methods are forbidden even when they "work."
+Engine behavior is implemented in native code. Kotlin/Java in app/src/main is limited to: JNI surface declarations, DualApplication (Android-mandated entry class), and Kotlin proxies that already predate the port (PmSpoof, ParcelRewriter, BinderTransactHook, ClassLoaderBridge, GuestHost harness). Integration failures that map to a reference native method must be ported natively — not patched in Kotlin. Kotlin workarounds for missing native methods are forbidden even when they "work."
 
 Session 18 — DualHost pivot, Viber Application boots — 2026-10-25
 (This section is preserved as the narrative of the pivot session — see Session 18 close section above for its formal record. Duplicated here to preserve the original file structure at the end.)
@@ -1611,3 +1606,32 @@ GuestHost.kt, GuestClassLoader.kt, GuestLoadTest.kt — described in the Session
 
 Coverage: 14/90 (unchanged)
 No new reference methods ported. Pivot validated. Rule 3 exception stated openly: pivot is strategic realignment, not coverage growth.
+
+
+---
+
+## Verify-before-commit
+
+```powershell
+cd H:\Mobiles\AndroidProject\2027\hookEngine
+
+# 1. File size sanity — should be larger than the pre-Session-24 file
+Get-ChildItem .\app\PROJECT_STATE.md | Select-Object Length
+
+# 2. Session 24 header present
+Select-String -Path .\app\PROJECT_STATE.md -Pattern 'Session 24 closed 2026-10-26'
+
+# 3. Old "What Session 24 must do FIRST" gone; new "What Session 25 must do FIRST" present
+(Select-String -Path .\app\PROJECT_STATE.md -Pattern '## What Session 24 must do FIRST').Count  # expect 0
+(Select-String -Path .\app\PROJECT_STATE.md -Pattern '## What Session 25 must do FIRST').Count  # expect 1
+
+# 4. Coverage history has Session 24 line
+Select-String -Path .\app\PROJECT_STATE.md -Pattern 'Session 24: \*\*14 / 37\*\*'
+
+# 5. Test count history has Session 24 line
+Select-String -Path .\app\PROJECT_STATE.md -Pattern 'Session 24: \*\*52 registered = 49 pass \+ 3 ignored\*\*'
+
+# 6. Both session narratives present (Session 23 close, Session 24 close)
+Select-String -Path .\app\PROJECT_STATE.md -Pattern 'Session 23 closed 2026-10-26'
+Select-String -Path .\app\PROJECT_STATE.md -Pattern 'Session 24 closed 2026-10-26'
+
