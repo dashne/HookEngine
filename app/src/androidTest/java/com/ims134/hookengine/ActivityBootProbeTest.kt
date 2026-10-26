@@ -204,56 +204,10 @@ class ActivityBootProbeTest {
                 report("preAttach.mApplication", try { activity.application?.javaClass?.name } catch (t: Throwable) { "threw ${t.javaClass.simpleName}" })
                 report("preAttach.mWindow", try { activity.window?.javaClass?.name } catch (t: Throwable) { "threw ${t.javaClass.simpleName}" })
 
-                // ── 6c. attach — required before onCreate ──
-                // Instrumentation.newActivity does not call attach.
-                // Build args by parameter type (API 37 signature is long).
-                val attachM = Activity::class.java.declaredMethods.firstOrNull {
-                    it.name == "attach" && it.parameterCount > 5 && !it.isSynthetic
-                }
-                if (attachM == null) {
-                    report("attach.method", "not found")
-                    Activity::class.java.declaredMethods.filter { it.name == "attach" }.forEach { m ->
-                        report("attach.candidate", "${m.parameterCount}: ${m.parameterTypes.joinToString(",") { it.simpleName }}")
-                    }
-                    return@post
-                }
-                attachM.isAccessible = true
-                report("attach.paramCount", attachM.parameterCount)
-                report("attach.paramTypes", attachM.parameterTypes.joinToString(",") { it.simpleName })
-
-                val attachArgs = attachM.parameterTypes.map { pt ->
-                    when {
-                        pt == Context::class.java -> guestCtx
-                        pt == atCls -> at
-                        pt == Instrumentation::class.java -> instrumentation
-                        pt == IBinder::class.java -> null
-                        pt == Int::class.javaPrimitiveType || pt == java.lang.Integer::class.java -> 0
-                        pt == Application::class.java -> guestApp
-                        pt == Intent::class.java -> intent
-                        pt == ActivityInfo::class.java -> launcher
-                        pt == CharSequence::class.java -> launcher.name
-                        pt == Activity::class.java -> null
-                        pt == String::class.java -> null
-                        pt == android.content.res.Configuration::class.java -> null
-                        pt == android.view.Window::class.java -> null
-                        pt == Boolean::class.javaPrimitiveType || pt == java.lang.Boolean::class.java -> false
-                        pt == ComponentName::class.java -> ComponentName(guestPkg, launcher.name)
-                        pt == Bundle::class.java -> null
-                        else -> null
-                    }
-                }.toTypedArray()
-
-                try {
-                    attachM.invoke(activity, *attachArgs)
-                    report("attach.result", "success")
-                } catch (t: Throwable) {
-                    val cause = (t as? java.lang.reflect.InvocationTargetException)?.targetException ?: t
-                    report("attach.threw", "${cause.javaClass.name}: ${cause.message}")
-                    report("attach.stack", cause.stackTraceToString().lines().take(25).joinToString(" | "))
-                    return@post
-                }
-
-                // ── 6d. Activity state AFTER attach ──
+                // ── 6c. Activity state AFTER newActivity ──
+                // newActivity calls Activity.attach internally (Session 26
+                // stack trace: Instrumentation.newActivity(1446) →
+                // Activity.attach(9482)). No explicit attach needed.
                 report("postAttach.mBase", try { activity.baseContext?.javaClass?.name } catch (t: Throwable) { "threw ${t.javaClass.simpleName}" })
                 report("postAttach.mApplication", try { activity.application?.javaClass?.name } catch (t: Throwable) { "threw ${t.javaClass.simpleName}" })
                 report("postAttach.mWindow", try { activity.window?.javaClass?.name } catch (t: Throwable) { "threw ${t.javaClass.simpleName}" })

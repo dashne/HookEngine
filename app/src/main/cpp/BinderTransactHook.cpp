@@ -23,7 +23,7 @@ extern "C" HookResult InstallInlineHookEx(void*, void*, void**, const char*);
 extern "C" HookResult UninstallInlineHook(void*);
 extern "C" bool ParcelRewriter_Init(JNIEnv* env);
 extern "C" bool ParcelRewriter_MatchesRequest(int code, jlong dataPtr);
-extern "C" bool ParcelRewriter_TryRewriteStorageRequest(jlong dataPtr, int code);
+extern "C" bool ParcelRewriter_TryRewriteCallerIdentity(jlong dataPtr, int code);
 
 extern "C" const uint8_t* ParcelRewriter_GetData(jlong parcelPtr);
 extern "C" size_t         ParcelRewriter_GetSize(jlong parcelPtr);
@@ -270,11 +270,11 @@ extern "C" int32_t Hook_Transact(void* self, int32_t handle, uint32_t code,
     if (!_orig_transact) return -1;
 
     // Session 23 — Wall B: rewrite IStorageManager callingPackage BEFORE
-    // forwarding. AMS rejects com.viber.voip (we're uid 10428 = hookengine);
-    // swapping the string16 to com.ims134.hookengine makes AMS accept.
+    // forwarding. Session 27 — Wall C2: rewrite IContentProvider
+    // AttributionSource (uid + packageName) for the same reason.
     // Only for non-oneway transacts with a data parcel. Pure C++, no JNI.
     if (!(flags & 1) && data) {
-        ParcelRewriter_TryRewriteStorageRequest((jlong)data, (int)code);
+        ParcelRewriter_TryRewriteCallerIdentity((jlong)data, (int)code);
     }
 
     bool matched = false;

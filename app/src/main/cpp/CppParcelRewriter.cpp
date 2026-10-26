@@ -11,6 +11,18 @@
 // readInt32 / readString16Inplace are avoided — signature ambiguity on this
 // ROM (IDA shows the no-arg variant decompiled), and manual reads are
 // simpler and correct.
+//
+// Session 23 — Wall B: ParcelRewriter_TryRewriteStorageRequest added to
+// intercept IStorageManager transacts and rewrite callingPackage
+// "com.viber.voip" -> "com.ims134.hookengine" so AMS accepts.
+//
+// Session 28 — Wall C2: function renamed to ParcelRewriter_TryRewriteCallerIdentity
+// and extended to intercept IContentProvider transacts. Rewrites
+// AttributionSource uid 10000 -> 10428 and packageName
+// "com.viber.voip" -> "com.ims134.hookengine". Layout on API 37 is
+// empirically different from AOSP: leading int32 (92) precedes uid;
+// tag field comes between pid and packageName. Preserved on attempt 1;
+// toggle CP_REWRITE_UPDATE_LEADING_INT32 for attempt 2 if server rejects.
 
 #include <jni.h>
 #include <android/log.h>
@@ -20,6 +32,15 @@
 #include <cstring>
 #include <cstddef>
 #include <cstdlib>
+
+// Session 28 — API 37 AttributionSource layout has an unexplained leading
+// int32 (value 92) before uid. If the server validates it as a length,
+// preserving it causes a mismatch after the pkg rewrite grows the buffer.
+// Attempt 1 preserves it. If server rejects after "CP rewrite fired" logs,
+// flip to 1 and rebuild for attempt 2.
+#ifndef CP_REWRITE_UPDATE_LEADING_INT32
+#define CP_REWRITE_UPDATE_LEADING_INT32 0
+#endif
 
 #define TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
@@ -238,24 +259,10 @@ extern "C" bool ParcelRewriter_MatchesRequest(int code, jlong dataPtr) {
     return ok;
 }
 
-// ─── Session 23 — Wall B: storage callingPackage rewrite ─────────────
-//
-// AMS rejects IStorageManager.* transactions when the request's
-// callingPackage doesn't match the process's real uid. Viber's JNI Engine
-// threads call Environment.getExternalStorageDirectory(), which routes to
-// IStorageManager.getVolumeList(userId, "com.viber.voip", flags). Our real
-// uid is 10428 (com.ims134.hookengine); "com.viber.voip" doesn't own it →
-// SecurityException → IO_POOL-1 / TM:MESSAGES fatal.
-//
-// Fix: on any IStorageManager transact whose first post-userId string16 is
-// "com.viber.voip", rebuild the request with that string16 swapped to
-// "com.ims134.hookengine" (our real package), growing the buffer by 12
-// bytes. AMS accepts uid 10428 + "com.ims134.hookengine". The reply
-// (VolumeInfo[]) doesn't need rewriting — Viber only cares about the paths
-// which are identical for any app in /storage/emulated/0.
-//
-// Pure C++ — no JNI on the caller thread (Rule 8).
-extern "C" bool ParcelRewriter_TryRewriteStorageRequest(jlong dataPtr, int code) {
+// ─── Session 28 — Wall C2 (IContentProvider) + Wall B (IStorageManager) ──
+// Renamed from TryRewriteStorageRequest. Handles both AIDL interfaces.
+// Pure C++, no JNI on caller thread (Rule 8).
+extern "C" bool ParcelRewriter_TryRewriteCallerIdentity(jlong dataPtr, int code) {
     if (!g_ready || !g_data || !g_dataSize || !g_getPos) return false;
     if (!dataPtr) return false;
 
@@ -277,83 +284,187 @@ extern "C" bool ParcelRewriter_TryRewriteStorageRequest(jlong dataPtr, int code)
 
         static const char16_t kStorageIface[] = u"android.os.storage.IStorageManager";
         constexpr size_t kStorageIfaceLen = sizeof(kStorageIface)/sizeof(char16_t) - 1;
-        if (ifaceLen != kStorageIfaceLen ||
-            memcmp(iface, kStorageIface, kStorageIfaceLen * sizeof(char16_t)) != 0) break;
+        static const char16_t kContentProviderIface[] = u"android.content.IContentProvider";
+        constexpr size_t kContentProviderIfaceLen = sizeof(kContentProviderIface)/sizeof(char16_t) - 1;
 
-        // IStorageManager method — read userId, then callingPackage string16.
-        int32_t userId = 0;
-        if (!SafeReadInt32(parcel, &userId)) break;
-
-        size_t cpLen = 0;
-        const char16_t* cp = SafeReadString16(parcel, &cpLen);
-        if (!cp) break;
-
+        // Common rewrite constants (both branches).
         static const char16_t kOld[] = u"com.viber.voip";
         static const char16_t kNew[] = u"com.ims134.hookengine";
         constexpr size_t kOldLen = sizeof(kOld)/sizeof(char16_t) - 1;  // 14
         constexpr size_t kNewLen = sizeof(kNew)/sizeof(char16_t) - 1;  // 21
-
-        if (cpLen != kOldLen ||
-            memcmp(cp, kOld, kOldLen * sizeof(char16_t)) != 0) {
-            // Iface matched but callingPackage wasn't com.viber.voip. Log
-            // so we can see any unexpected package name in logcat.
-            char ascii[64] = {0};
-            size_t n = cpLen < 63 ? cpLen : 63;
-            for (size_t i = 0; i < n; i++) ascii[i] = (char)cp[i];
-            LOGD("STORAGE iface matched but callingPackage='%s' (code=%d)", ascii, code);
-            break;
-        }
-
-        // Rewrite. Layout:
-        //   old: [len=14][28b content][2b null][2b pad]  = 36 bytes
-        //   new: [len=21][42b content][2b null][0b pad]  = 48 bytes
-        //   delta = +12, everything after shifts.
-        const uint8_t* pData = g_data(parcel);
-        if (!pData) break;
-        ptrdiff_t cpOffset = (const uint8_t*)cp - pData;
-        if (cpOffset < 4) break;
-        size_t oldStringStart = (size_t)(cpOffset - 4);
-
         constexpr size_t kOldTotal = 4 + 2*kOldLen + 2 + 2;  // 36
         constexpr size_t kNewTotal = 4 + 2*kNewLen + 2 + 0;  // 48
         constexpr size_t kDelta    = kNewTotal - kOldTotal;  // 12
 
-        size_t dataSize = g_dataSize(parcel);
-        if (dataSize < oldStringStart + kOldTotal) break;
+        if (ifaceLen == kStorageIfaceLen &&
+            memcmp(iface, kStorageIface, kStorageIfaceLen * sizeof(char16_t)) == 0) {
+            // ── IStorageManager branch (Session 23, Wall B) ──
+            // Unchanged from Session 23. Handles getVolumeList and siblings.
 
-        size_t newSize = dataSize + kDelta;
-        uint8_t* newBuf = (uint8_t*)malloc(newSize);
-        if (!newBuf) break;
+            int32_t userId = 0;
+            if (!SafeReadInt32(parcel, &userId)) break;
 
-        // prefix
-        memcpy(newBuf, pData, oldStringStart);
-        // new string16
-        *(int32_t*)(newBuf + oldStringStart) = (int32_t)kNewLen;
-        memcpy(newBuf + oldStringStart + 4, kNew, kNewLen * sizeof(char16_t));
-        *(char16_t*)(newBuf + oldStringStart + 4 + kNewLen * sizeof(char16_t)) = 0;
-        // suffix (no padding needed for kNew: 48 is 4-byte aligned)
-        memcpy(newBuf + oldStringStart + kNewTotal,
-               pData + oldStringStart + kOldTotal,
-               dataSize - oldStringStart - kOldTotal);
+            size_t cpLen = 0;
+            const char16_t* cp = SafeReadString16(parcel, &cpLen);
+            if (!cp) break;
 
-        // Swap buffer in parcel. Parcel field offsets (IDA-verified):
-        //   +8  mData       void*
-        //   +16 mDataSize   size_t
-        //   +24 mDataCapacity size_t
-        void** dataField = (void**)((uint8_t*)parcel + 8);
-        uint8_t* oldBuf  = (uint8_t*)*dataField;
-        *dataField = newBuf;
-        *(size_t*)((uint8_t*)parcel + 16) = newSize;
-        *(size_t*)((uint8_t*)parcel + 24) = newSize;
-        if (oldBuf) free(oldBuf);
+            if (cpLen != kOldLen ||
+                memcmp(cp, kOld, kOldLen * sizeof(char16_t)) != 0) {
+                char ascii[64] = {0};
+                size_t n = cpLen < 63 ? cpLen : 63;
+                for (size_t i = 0; i < n; i++) ascii[i] = (char)cp[i];
+                LOGD("STORAGE iface matched but callingPackage='%s' (code=%d)", ascii, code);
+                break;
+            }
 
-        // Restore position (shift if past string).
-        size_t newPos = (saved > oldStringStart) ? (saved + kDelta) : saved;
-        SafeSetPos(parcel, newPos);
+            const uint8_t* pData = g_data(parcel);
+            if (!pData) break;
+            ptrdiff_t cpOffset = (const uint8_t*)cp - pData;
+            if (cpOffset < 4) break;
+            size_t oldStringStart = (size_t)(cpOffset - 4);
 
-        LOGD("STORAGE rewrite fired: code=%d userId=%d size=%zu->%zu delta=%zu",
-             code, userId, dataSize, newSize, kDelta);
-        rewritten = true;
+            size_t dataSize = g_dataSize(parcel);
+            if (dataSize < oldStringStart + kOldTotal) break;
+
+            size_t newSize = dataSize + kDelta;
+            uint8_t* newBuf = (uint8_t*)malloc(newSize);
+            if (!newBuf) break;
+
+            memcpy(newBuf, pData, oldStringStart);
+            *(int32_t*)(newBuf + oldStringStart) = (int32_t)kNewLen;
+            memcpy(newBuf + oldStringStart + 4, kNew, kNewLen * sizeof(char16_t));
+            *(char16_t*)(newBuf + oldStringStart + 4 + kNewLen * sizeof(char16_t)) = 0;
+            memcpy(newBuf + oldStringStart + kNewTotal,
+                   pData + oldStringStart + kOldTotal,
+                   dataSize - oldStringStart - kOldTotal);
+
+            void** dataField = (void**)((uint8_t*)parcel + 8);
+            uint8_t* oldBuf  = (uint8_t*)*dataField;
+            *dataField = newBuf;
+            *(size_t*)((uint8_t*)parcel + 16) = newSize;
+            *(size_t*)((uint8_t*)parcel + 24) = newSize;
+            if (oldBuf) free(oldBuf);
+
+            size_t newPos = (saved > oldStringStart) ? (saved + kDelta) : saved;
+            SafeSetPos(parcel, newPos);
+
+            LOGD("STORAGE rewrite fired: code=%d userId=%d size=%zu->%zu delta=%zu",
+                 code, userId, dataSize, newSize, kDelta);
+            rewritten = true;
+
+        } else if (ifaceLen == kContentProviderIfaceLen &&
+                   memcmp(iface, kContentProviderIface, kContentProviderIfaceLen * sizeof(char16_t)) == 0) {
+            // ── IContentProvider branch (Session 28, Wall C2) ──
+            // Empirical AttributionSource layout on API 37 (from Session 27
+            // dump 5c000000 10270000 10270000 00000000 0e000000 63006f00...):
+            //   [+0]  int32   leading prefix (92) — purpose unknown, PRESERVE
+            //   [+4]  int32   uid          ← rewrite target
+            //   [+8]  int32   pid
+            //   [+12] int32   tag length (0)
+            //   [+16] int32   pkg length (14)
+            //   [+20] chars   pkg chars UTF-16
+            //   [+48] u16     null
+            //   [+50] u16     pad
+            //   [+52] ...     suffix (next chain, permission owner, ...)
+
+            size_t aSStart = g_getPos(parcel);
+            size_t dataSize = g_dataSize(parcel);
+            const uint8_t* pData = g_data(parcel);
+            if (!pData || aSStart + 20 > dataSize) break;
+
+            int32_t leading = 0;
+            if (!SafeReadInt32(parcel, &leading)) break;
+            int32_t uid = 0;
+            if (!SafeReadInt32(parcel, &uid)) break;
+            int32_t pid = 0;
+            if (!SafeReadInt32(parcel, &pid)) break;
+            (void)pid;
+            int32_t tagLen = 0;
+            if (!SafeReadInt32(parcel, &tagLen)) break;
+            (void)tagLen;
+
+            size_t cpLen = 0;
+            const char16_t* cp = SafeReadString16(parcel, &cpLen);
+            if (!cp) {
+                char hexbuf[512];
+                int hpos = snprintf(hexbuf, sizeof(hexbuf),
+                                    "CP iface matched but pkg read failed aS=%zu bytes: ", aSStart);
+                size_t dumpLen = (dataSize - aSStart < 32) ? (dataSize - aSStart) : 32;
+                for (size_t i = 0; i < dumpLen && hpos < 460; i++) {
+                    hpos += snprintf(hexbuf + hpos, sizeof(hexbuf) - hpos,
+                                     "%02x", pData[aSStart + i]);
+                }
+                LOGD("%s", hexbuf);
+                break;
+            }
+
+            char ascii[64] = {0};
+            size_t n = cpLen < 63 ? cpLen : 63;
+            for (size_t i = 0; i < n; i++) ascii[i] = (char)cp[i];
+
+            if (uid != 10000 || cpLen != kOldLen ||
+                memcmp(cp, kOld, kOldLen * sizeof(char16_t)) != 0) {
+                LOGD("CP iface matched uid=%d pkg='%s' — not rewriting (code=%d)",
+                     uid, ascii, code);
+                break;
+            }
+
+            constexpr size_t kUidOffsetInAS     = 4;
+            constexpr size_t kPkgLenOffsetInAS  = 16;
+            constexpr size_t kSuffixStartInAS   = kPkgLenOffsetInAS + kOldTotal;  // 16 + 36 = 52
+
+            size_t pkgLenOffset = aSStart + kPkgLenOffsetInAS;
+            size_t suffixStart  = aSStart + kSuffixStartInAS;
+            if (dataSize < suffixStart) break;
+
+            size_t newSize = dataSize + kDelta;
+            uint8_t* newBuf = (uint8_t*)malloc(newSize);
+            if (!newBuf) break;
+
+            // 1. Copy everything up to and including the leading int32.
+            memcpy(newBuf, pData, aSStart + kUidOffsetInAS);
+
+            // 2. Optionally update the leading int32 (attempt 2 toggle).
+#if CP_REWRITE_UPDATE_LEADING_INT32
+            *(int32_t*)(newBuf + aSStart) = *(const int32_t*)(pData + aSStart) + (int32_t)kDelta;
+#endif
+
+            // 3. Rewrite uid.
+            *(int32_t*)(newBuf + aSStart + kUidOffsetInAS) = 10428;
+
+            // 4. Copy pid + tag length (bytes [+8..+16), 8 bytes unchanged).
+            memcpy(newBuf + aSStart + 8, pData + aSStart + 8, kPkgLenOffsetInAS - 8);
+
+            // 5. Write new pkg string16 at [+16].
+            *(int32_t*)(newBuf + pkgLenOffset) = (int32_t)kNewLen;
+            memcpy(newBuf + pkgLenOffset + 4, kNew, kNewLen * sizeof(char16_t));
+            *(char16_t*)(newBuf + pkgLenOffset + 4 + kNewLen * sizeof(char16_t)) = 0;
+
+            // 6. Copy suffix shifted by delta.
+            memcpy(newBuf + pkgLenOffset + kNewTotal,
+                   pData + suffixStart,
+                   dataSize - suffixStart);
+
+            // 7. Swap buffer.
+            void** dataField = (void**)((uint8_t*)parcel + 8);
+            uint8_t* oldBuf  = (uint8_t*)*dataField;
+            *dataField = newBuf;
+            *(size_t*)((uint8_t*)parcel + 16) = newSize;
+            *(size_t*)((uint8_t*)parcel + 24) = newSize;
+            if (oldBuf) free(oldBuf);
+
+            size_t newPos = (saved >= aSStart) ? (saved + kDelta) : saved;
+            SafeSetPos(parcel, newPos);
+
+            LOGD("CP rewrite fired: code=%d uid=10000->10428 pkg='%s'->'com.ims134.hookengine' "
+                 "size=%zu->%zu delta=%zu leading=%d(%s)",
+                 code, ascii, dataSize, newSize, kDelta, leading,
+                 CP_REWRITE_UPDATE_LEADING_INT32 ? "updated" : "preserved");
+            rewritten = true;
+
+        } else {
+            break;
+        }
     } while (0);
 
     if (!rewritten) {
