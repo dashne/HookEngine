@@ -24,7 +24,8 @@ struct ChainSlot {
     void*          trampoline = nullptr;
     int            handler_count = 0;
     int            stub_slot = -1;
-    ChainHandlerFn handlers[MAX_HANDLERS_PER_CHAIN] = {nullptr};
+    ChainHandlerFn   handlers[MAX_HANDLERS_PER_CHAIN]   = {nullptr};
+    ChainPredicateFn predicates[MAX_HANDLERS_PER_CHAIN] = {nullptr};
 };
 
 static ChainSlot       g_chains[MAX_CHAINS];
@@ -56,13 +57,9 @@ static bool            g_stub_init_ok = false;
 // Helper reads target_id from x9 slot (u64 index 9), invokes handlers with
 // pointer to x0..x7 (u64 index 0), writes trampoline to u64 index 38.
 //
-// visibility("hidden") on chain_dispatch_helper is REQUIRED — the adrp+add
-// in the naked asm below emits R_AARCH64_ADR_PREL_PG_HI21 and
-// R_AARCH64_ADD_ABS_LO12_NC relocations that the PIC linker refuses to
-// resolve directly against a preemptible (exported) symbol. hidden visibility
-// makes the symbol non-preemptible within this DSO, letting the linker fix
-// up the page offset at link time. Same pattern as g_adrp_value in
-// test_item1.cpp.
+// visibility("hidden") on chain_dispatch_helper is REQUIRED — see header
+// comment in the original Session 43 code. Same pattern as g_adrp_value
+// in test_item1.cpp.
 extern "C" __attribute__((visibility("hidden"))) void chain_dispatch_helper(uint64_t* saved_frame);
 
 extern "C" __attribute__((naked)) void chain_dispatch_naked() {
@@ -107,13 +104,14 @@ extern "C" __attribute__((naked)) void chain_dispatch_naked() {
             );
 }
 
-// ─── Helper (C++) ───────────────────────────────────────────────────────
+// ─── Helper (C++) — Feature 1.8 adds per-slot predicate gating ─────────
 extern "C" __attribute__((visibility("hidden"))) void chain_dispatch_helper(uint64_t* saved) {
     uint64_t slot_id = saved[9];            // x9 slot
     uint64_t* xregs  = &saved[0];           // x0..x7
     uint64_t* tramp_slot = &saved[38];      // byte offset 304
 
-    ChainHandlerFn local[MAX_HANDLERS_PER_CHAIN];
+    ChainHandlerFn   local_handlers[MAX_HANDLERS_PER_CHAIN];
+    ChainPredicateFn local_preds[MAX_HANDLERS_PER_CHAIN];
     int n = 0;
     void* tramp = nullptr;
     {
@@ -122,22 +120,32 @@ extern "C" __attribute__((visibility("hidden"))) void chain_dispatch_helper(uint
             if (s.active && s.stub_slot == (int)slot_id) {
                 n = s.handler_count;
                 tramp = s.trampoline;
-                for (int i = 0; i < n; i++) local[i] = s.handlers[i];
+                for (int i = 0; i < n; i++) {
+                    local_handlers[i] = s.handlers[i];
+                    local_preds[i]    = s.predicates[i];
+                }
                 break;
             }
         }
     }
     // Handlers run outside the mutex — prevents re-entrant deadlock if a
     // handler calls into another chained target.
+    //
+    // Per-slot gating: if a predicate is set, evaluate it. false → skip
+    // handler body and entry-callback. nullptr → unconditional fire
+    // (identical to pre-1.8 behavior). Even when all handlers are
+    // skipped, orig runs via the trampoline and the caller observes the
+    // real return value.
     for (int i = 0; i < n; i++) {
-        if (local[i]) local[i](xregs);
+        if (!local_handlers[i]) continue;
+        if (local_preds[i] && !local_preds[i](xregs)) continue;
+        local_handlers[i](xregs);
     }
     *tramp_slot = (uint64_t)tramp;
 }
 
 // ─── Stub page (pre-filled once, never rewritten) ───────────────────────
 //
-// One stub per slot. Slot N has target_id = N baked in at init.
 // Layout (32 bytes):
 //   +0  : ldr x16, [pc, #0x10]   ; dispatcher
 //   +4  : ldr x9,  [pc, #0x14]   ; target_id = slot index
@@ -207,6 +215,11 @@ static bool ChainValidateTarget(void* target) {
 
 // ─── Public API ─────────────────────────────────────────────────────────
 extern "C" HookResult ChainAttach(void* target, ChainHandlerFn handler, void** outTrampoline) {
+    return ChainAttachCond(target, nullptr, handler, outTrampoline);
+}
+
+extern "C" HookResult ChainAttachCond(void* target, ChainPredicateFn predicate,
+                                      ChainHandlerFn handler, void** outTrampoline) {
     if (!target || !handler) return HOOK_INTERNAL_ERROR;
     if (!ChainValidateTarget(target)) return HOOK_TARGET_INVALID;
 
@@ -216,9 +229,12 @@ extern "C" HookResult ChainAttach(void* target, ChainHandlerFn handler, void** o
     for (auto& s : g_chains) {
         if (s.active && s.target == target) {
             if (s.handler_count >= MAX_HANDLERS_PER_CHAIN) return HOOK_INTERNAL_ERROR;
-            s.handlers[s.handler_count++] = handler;
+            s.handlers[s.handler_count]   = handler;
+            s.predicates[s.handler_count] = predicate;
+            s.handler_count++;
             if (outTrampoline) *outTrampoline = s.trampoline;
-            LOGD("ChainAttach: %p += handler (count=%d)", target, s.handler_count);
+            LOGD("ChainAttachCond: %p += handler (count=%d pred=%p)",
+                 target, s.handler_count, (void*)predicate);
             return HOOK_OK;
         }
     }
@@ -236,7 +252,7 @@ extern "C" HookResult ChainAttach(void* target, ChainHandlerFn handler, void** o
     void* tramp = nullptr;
     HookResult r = InstallInlineHookEx(target, stub_addr, &tramp, "chain");
     if (r != HOOK_OK) {
-        LOGE("ChainAttach: InstallInlineHookEx failed r=%d", (int)r);
+        LOGE("ChainAttachCond: InstallInlineHookEx failed r=%d", (int)r);
         return r;
     }
 
@@ -244,11 +260,13 @@ extern "C" HookResult ChainAttach(void* target, ChainHandlerFn handler, void** o
     slot->target = target;
     slot->trampoline = tramp;
     slot->handler_count = 1;
-    slot->handlers[0] = handler;
+    slot->handlers[0]   = handler;
+    slot->predicates[0] = predicate;
     slot->stub_slot = idx;
 
     if (outTrampoline) *outTrampoline = tramp;
-    LOGD("ChainAttach: %p slot=%d tramp=%p (new chain)", target, idx, tramp);
+    LOGD("ChainAttachCond: %p slot=%d tramp=%p (new chain pred=%p)",
+         target, idx, tramp, (void*)predicate);
     return HOOK_OK;
 }
 
@@ -265,8 +283,14 @@ extern "C" HookResult ChainDetach(void* target, ChainHandlerFn handler) {
         }
         if (found < 0) return HOOK_NOT_HOOKED;
 
-        for (int i = found; i < s.handler_count - 1; i++) s.handlers[i] = s.handlers[i + 1];
+        // Shift both handlers and predicates together to keep 1:1 pairing.
+        for (int i = found; i < s.handler_count - 1; i++) {
+            s.handlers[i]   = s.handlers[i + 1];
+            s.predicates[i] = s.predicates[i + 1];
+        }
         s.handler_count--;
+        s.handlers[s.handler_count]   = nullptr;
+        s.predicates[s.handler_count] = nullptr;
 
         if (s.handler_count == 0) {
             HookResult r = UninstallInlineHook(target);
@@ -305,5 +329,9 @@ extern "C" void ChainResetAll() {
         s.trampoline = nullptr;
         s.handler_count = 0;
         s.stub_slot = -1;
+        for (int i = 0; i < MAX_HANDLERS_PER_CHAIN; i++) {
+            s.handlers[i]   = nullptr;
+            s.predicates[i] = nullptr;
+        }
     }
 }

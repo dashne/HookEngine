@@ -924,6 +924,44 @@ static std::atomic<int> g_chain_last_x0_1{0};
 static std::atomic<int> g_chain_last_x0_2{0};
 static std::atomic<int> g_chain_order_first{-1};
 
+// ─── Feature 1.8 — Conditional hook fixtures ────────────────────────
+//
+// Predicates are called by the chain dispatcher BEFORE the paired handler
+// with a read-only view of x0..x7 at the target site. Returning false
+// skips the handler (no entry callback, no body). Even when all handlers
+// are skipped, the chain still falls through to the trampoline — the
+// original function executes and returns its real value.
+//
+// These declarations MUST appear above chainReset (which resets the two
+// atomics) and above the JNI bridges (which return the fixture addresses).
+extern "C" HookResult ChainAttachCond(void* target, bool (*predicate)(const uint64_t*),
+                                      void (*handler)(const uint64_t*), void** outTramp);
+
+static std::atomic<int> g_pred_calls{0};
+static std::atomic<int> g_pred_last_x0{-999};
+
+extern "C" bool chain_pred_accept_all(const uint64_t* xregs) {
+    g_pred_calls.fetch_add(1);
+    g_pred_last_x0.store((int)(int32_t)xregs[0]);
+    return true;
+}
+extern "C" bool chain_pred_reject_all(const uint64_t* xregs) {
+    g_pred_calls.fetch_add(1);
+    g_pred_last_x0.store((int)(int32_t)xregs[0]);
+    return false;
+}
+extern "C" bool chain_pred_x0_is_10(const uint64_t* xregs) {
+    g_pred_calls.fetch_add(1);
+    g_pred_last_x0.store((int)(int32_t)xregs[0]);
+    return (int32_t)xregs[0] == 10;
+}
+extern "C" bool chain_pred_x0_is_20(const uint64_t* xregs) {
+    g_pred_calls.fetch_add(1);
+    g_pred_last_x0.store((int)(int32_t)xregs[0]);
+    return (int32_t)xregs[0] == 20;
+}
+// ─── end Feature 1.8 fixtures ────────────────────────────────────────
+
 extern "C" void chain_handler_1(const uint64_t* xregs) {
     g_chain_calls_1.fetch_add(1);
     g_chain_last_x0_1.store((int)(int32_t)xregs[0]);
@@ -992,6 +1030,41 @@ Java_com_ims134_hookengine_NativeTestBridge_chainReset(JNIEnv*, jobject) {
     g_chain_last_x0_1.store(0);
     g_chain_last_x0_2.store(0);
     g_chain_order_first.store(-1);
+    g_pred_calls.store(0);
+    g_pred_last_x0.store(-999);
+}
+
+// ─── Feature 1.8 — Conditional hook JNI bridges ─────────────────────
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getChainPredAcceptAllAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&chain_pred_accept_all;
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getChainPredRejectAllAddr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&chain_pred_reject_all;
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getChainPredX0Is10Addr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&chain_pred_x0_is_10;
+}
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_getChainPredX0Is20Addr(JNIEnv*, jobject) {
+    return (jlong)(uintptr_t)&chain_pred_x0_is_20;
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_chainAttachCond(
+        JNIEnv*, jobject, jlong target, jlong predicate, jlong handler) {
+    return (jint)ChainAttachCond((void*)(uintptr_t)target,
+                                 (bool (*)(const uint64_t*))(uintptr_t)predicate,
+                                 (void (*)(const uint64_t*))(uintptr_t)handler, nullptr);
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_chainPredCalls(JNIEnv*, jobject) {
+    return g_pred_calls.load();
+}
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_chainPredLastX0(JNIEnv*, jobject) {
+    return g_pred_last_x0.load();
 }
 
 // ─── Feature 1.4 — ArtMethod entry/exit trace fixtures + JNI bridges ─

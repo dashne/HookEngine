@@ -175,7 +175,7 @@ Viber boot under the engine is a **regression canary**, not a target. Every sess
 
 # PROJECT STATE
 
-Last updated: Session 40 close (2026-10-26). Supersedes all prior versions. **The target has been reset. Read "What this project is" and "What this project is NOT" before anything else.**
+Last updated: **Session 45 close (2026-10-26)**. Supersedes Session-40-close version. Sessions 41–45 have landed on disk and are on-device verified (74 tests executed, 0 failed at Session 45 close). This document reflects that state.
 
 ---
 
@@ -214,34 +214,38 @@ Coverage growth in that period: **one port** — `nativeInit` at Session 38. Eve
 
 **That is not a resumption of engine work. That is a detour.** The container built in Sessions 15–40 is now the canary. Its continued function is required (regression coverage). Its further development is out of scope.
 
+Sessions 41–45 resumed engine work:
+- **S41** verified Feature 1.1 — full ARM64 relocation (9 kinds).
+- **S42** shipped Feature 1.5 — dynamic runtime attach by computed address.
+- **S43** shipped Feature 1.7 — hook chaining (ordered multi-handler).
+- **S44** shipped Feature 1.4 — ArtMethod entry/exit trace.
+- **S45** shipped Feature 1.8 — conditional hook (per-handler predicate gating).
+
+Session 46 target: Feature 1.9 — return-value modification, closing Category 1 (except 1.6).
+
 ---
 
 ## Current verified state
 
-**Engine primitives (verified on-device):**
-- Inline hook: works, but only for `NORMAL` / `B` / `BL` / `ADR` / `ADRP` — the other four ARM64 kinds are rejected. Session 41 code (written, unverified) closes this.
+**Engine primitives (verified on-device, all green at Session 45 close):**
+- Inline hook: works for all 9 ARM64 instruction kinds — `NORMAL`, `B`, `BL`, `ADR`, `ADRP`, `B.cond`, `CBZ/CBNZ`, `TBZ/TBNZ`, `LDR-literal`. Verified by RelocTest (1 test, 49 assertions).
 - GOT hook: 26 sites, works.
 - ArtMethod hook: works (native methods, non-fast-JNI only).
+- ArtMethod entry/exit trace: works on framework natives (`Binder.getCallingUid`, `Binder.getCallingPid`). Verified by ArtMethodTraceTest (5 tests).
+- Hook chaining: works. Dispatcher runs N handlers in registration order; ordered, all fire. Verified by ChainHookTest (6 tests).
+- Conditional hook: works. Predicate gates whether the paired handler fires; false → handler skipped, original still returns real value. Per-handler granularity across different handlers on same target. Verified by ConditionalHookTest (6 tests).
+- Dynamic runtime attach: works. `AttachRuntime` adds alignment/mapped/exec guards on top of the raw path. Verified by DynamicAttachTest (6 tests).
 - Hidden-API bypass: works via thread-attached reflection.
 - `IPCThreadState::transact` inline hook: works.
 - AIDL prelude rewrite: works on 4 interfaces.
 - `nativeCNVM`: decomp-verified, 4 tests green.
-- `nativeInit` (structural): **verified on-device** Session 38 — `so=43 dex=14 rc=0` via `NativeInitTest`. First coverage growth since Session 14.
-
-**Engine primitives (written, NOT yet on-device verified):**
-- Session 39: `nativeOnLoad` (2-param alias), `is64Bit`, `nativeGetCpuABI` explicit ports; `IsStatusPath` extended to `/proc/*/task/*/status`.
-- Session 40: `IsMountsPath` + `ShouldFilterMountLine` for `/proc/mounts` etc.
-- Session 41: full ARM64 relocation (9 kinds, was 5).
-- Session 42: hook registry with per-guest tags + `ElfSymbols` utility.
-
-**These six code changes are on disk. None have run their test on-device.** Session 41's first action is to run them in sequence.
+- `nativeInit` (structural): verified on-device Session 38 — `so=43 dex=14 rc=0` via `NativeInitTest`.
 
 **Container / canary (verified on-device):**
 - Viber boots: `outcome=booted-viber-order`, providers 14/15 (MlKit noise), JNI engine survives 60s with background IPC.
 - SplashActivity: instantiated, `onCreate`/`onStart`/`onResume` all run.
 - WMS accepts token + allocates Surface when host task visible (`mSurface=Surface(isValid=true)`, Session 36).
 - Content frame empty at 250 ms (Session 37) — splash state, not a wall.
-- `am instrument` re-runs show task-visibility flake (S35 vs S36 vs S37).
 
 **Canary function:** if `GuestLoadTest` returns `outcome != "?"` and no new FATAL, engine primitives still work in a real integration scenario. If the canary breaks, an engine primitive broke. That is the canary's only job.
 
@@ -255,15 +259,17 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 
 | # | Feature | Status |
 |---|---|---|
-| 1.1 | Inline hook at any ARM64 instruction | 🔧 S41 (9 kinds) |
+| 1.1 | Inline hook at any ARM64 instruction | ✅ |
 | 1.2 | GOT/PLT symbol hook | ✅ |
 | 1.3 | ArtMethod hook (replace) | ✅ |
-| 1.4 | ArtMethod entry/exit trace (pre + post, no replace) | ❌ |
-| 1.5 | Dynamic runtime attach by computed address | ❌ |
+| 1.4 | ArtMethod entry/exit trace (pre + post, no replace) | ✅ |
+| 1.5 | Dynamic runtime attach by computed address | ✅ |
 | 1.6 | SVC instruction hooking (bypass libc) | ❌ |
-| 1.7 | Hook chaining (ordered multi-handler) | ❌ |
-| 1.8 | Conditional hook (register inspection at site) | ❌ |
-| 1.9 | Return-value modification (post-call trampoline) | ❌ |
+| 1.7 | Hook chaining (ordered multi-handler) | ✅ |
+| 1.8 | Conditional hook (register inspection at site) | ✅ |
+| 1.9 | Return-value modification (post-call trampoline) | ❌ → **S46 target** |
+
+**Category 1: 7/9 complete.** 1.6, 1.9 remaining. Category closes after Session 46 (1.9) once 1.6 also lands.
 
 ### Category 2 — Memory primitives
 
@@ -321,8 +327,8 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 
 | # | Feature | Status |
 |---|---|---|
-| 6.1 | Hook registry | 🔧 S42 |
-| 6.2 | Per-guest tags | 🔧 S42 |
+| 6.1 | Hook registry | ✅ |
+| 6.2 | Per-guest tags | ❌ (phantom S42 batch — never shipped; see Hard-won facts) |
 | 6.3 | Atomic install / uninstall | ✅ |
 | 6.4 | Deferred-free under contention | ✅ |
 | 6.5 | Rollback on partial failure | ✅ |
@@ -335,7 +341,7 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 
 | # | Feature | Status |
 |---|---|---|
-| 7.1 | ELF symbol resolution | 🔧 S42 |
+| 7.1 | ELF symbol resolution (unified API) | ⚠️ (scattered ad-hoc implementations: `elf_hooker.cpp`, `HiddenApi.cpp`, `BinderProbe.cpp`, `CppParcelRewriter.cpp`; unified `FindExportAnyLib` never shipped) |
 | 7.2 | .dynsym walk | ✅ |
 | 7.3 | .symtab walk | ✅ |
 | 7.4 | GNU + SysV hash support | ✅ |
@@ -348,7 +354,7 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 |---|---|---|
 | 8.1 | Per-hook execution counter | ✅ |
 | 8.2 | Per-hook argument logging | ⚠️ |
-| 8.3 | Runtime hook inspection | 🔧 S42 |
+| 8.3 | Runtime hook inspection | ✅ (via `RegistrySnapshot` in `HookRegistry.h` / `HookRegistry.cpp`) |
 | 8.4 | Regression test suite | ✅ |
 | 8.5 | Reloc test suite | ✅ |
 | 8.6 | Anti-detection test suite | ✅ |
@@ -356,89 +362,84 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 
 ### Totals
 
-- **✅ verified complete:** ~24 features
-- **🔧 written, unverified:** ~8 features (S39–S42 batch)
+- **✅ verified complete:** ~29 features
 - **⚠️ partial:** ~8 features
-- **❌ not started:** ~27 features
+- **❌ not started:** ~24 features
 
-**Engine completion requires ~35 sessions** (Categories 1–8 fully ✅). **Not** dependent on Viber state, **not** dependent on ApplicationProxy coverage, **not** dependent on Activity UI.
+**Engine completion requires ~30 more sessions** (Categories 1–8 fully ✅). **Not** dependent on Viber state, **not** dependent on ApplicationProxy coverage, **not** dependent on Activity UI.
 
 ---
 
-## Engine roadmap — Session 41 to Session 75
+## Engine roadmap — Session 46 to Session 75
 
-### Phase A — Foundation verified (Sessions 41–44, 4 sessions)
+### Phase A — Foundation verified (Sessions 41–44) — **CLOSED**
 
-| Session | Work | Exit criteria |
+| Session | Feature | Status |
 |---|---|---|
-| **41** | Verify S38–S40 batch (nativeInit, nativeOnLoad, is64Bit, nativeGetCpuABI, nativeDNPO status TID, mounts filter). Run all tests. Fix any red. | All prior-batch tests green + canary green |
-| **42** | Verify S41 batch (full ARM64 relocation). Run RelocTest. Fix if red. | RelocTest 44 assertions green + canary green |
-| **43** | Verify S42 batch (hook registry tags, ELF symbols). Run both tests. Fix if red. | 6 tests green + canary green |
-| **44** | Feature 1.5 — dynamic attach by computed address. | `DynamicAttachTest` green + canary green |
+| 41 | 1.1 Inline hook 9 kinds | ✅ |
+| 42 | 1.5 Dynamic attach | ✅ |
+| 43 | 1.7 Hook chaining | ✅ |
+| 44 | 1.4 ArtMethod trace | ✅ |
 
-After S44: foundation is real and verified end-to-end. Session 41 is "catch up on the pending batch," not new work.
+### Phase B — Hook mechanism depth (Sessions 45–48)
 
-### Phase B — Hook mechanism depth (Sessions 45–50, 6 sessions)
+| Session | Feature | Status / Exit |
+|---|---|---|
+| 45 | 1.8 Conditional hook | ✅ `ConditionalHookTest` (6 tests) |
+| **46** | **1.9 Return-value modification** | **next — `ReturnModTest`** |
+| 47 | 2.7 Register state inspection | `RegInspectTest` |
+| 48 | 2.8 Backtrace from hook site | `BacktraceTest` |
+
+After S48: **Category 1 (except 1.6) complete. Category 2 (except 2.1–2.3) complete.**
+
+### Phase C — Memory + kernel boundary (Sessions 49–53)
 
 | Session | Feature | Exit |
 |---|---|---|
-| 45 | 1.4 ArtMethod entry/exit tracing | `MethodTraceTest` |
-| 46 | 1.7 Hook chaining (ordered handlers) | `HookChainTest` |
-| 47 | 1.8 Conditional hook (register inspection) | `ConditionalHookTest` |
-| 48 | 1.9 Return-value modification | `ReturnModTest` |
-| 49 | 2.7 Register state inspection | `RegInspectTest` |
-| 50 | 2.8 Backtrace from hook site | `BacktraceTest` |
+| 49 | 1.6 SVC instruction hooking | `SvcHookTest` |
+| 50 | 2.1 / 2.2 / 2.3 Memory read / write / scan | `MemoryOpsTest` |
+| 51 | 2.5 Full maps enumeration | `MapsEnumTest` |
+| 52 | 3.4 ServiceManager lookup interception | `ServiceManagerTest` |
+| 53 | 3.6 Signal handling override | `SignalOverrideTest` |
 
-After S50: **Category 1 (except 1.6) complete. Category 2 (except 2.1–2.3) complete.**
+After S53: **Category 1 complete. Category 2 complete. Category 3 (except 3.7) complete.**
 
-### Phase C — Memory + kernel boundary (Sessions 51–55, 5 sessions)
-
-| Session | Feature | Exit |
-|---|---|---|
-| 51 | 2.1 / 2.2 / 2.3 Memory read / write / scan | `MemoryOpsTest` |
-| 52 | 2.5 Full maps enumeration | `MapsEnumTest` |
-| 53 | 1.6 SVC instruction hooking | `SvcHookTest` |
-| 54 | 3.4 ServiceManager lookup interception | `ServiceManagerTest` |
-| 55 | 3.6 Signal handling override | `SignalOverrideTest` |
-
-After S55: **Category 1 complete. Category 2 complete. Category 3 (except 3.7) complete.**
-
-### Phase D — Class loading + symbol depth (Sessions 56–60, 5 sessions)
+### Phase D — Class loading + symbol depth (Sessions 54–58)
 
 | Session | Feature | Exit |
 |---|---|---|
-| 56 | 4.2 Native `nativeFNLN` (Rule 15 debt closure) | `NativeFnlnTest` |
-| 57 | 4.3 Dynamic DEX loading | `DexLoadTest` |
-| 58 | 4.4 DEX merging at runtime | `DexMergeTest` |
-| 59 | 7.6 PLT stub resolution | `PltResolveTest` |
-| 60 | 3.7 Native ServiceManager addition | `SmAddTest` |
+| 54 | 4.2 Native `nativeFNLN` (Rule 15 debt closure) | `NativeFnlnTest` |
+| 55 | 4.3 Dynamic DEX loading | `DexLoadTest` |
+| 56 | 4.4 DEX merging at runtime | `DexMergeTest` |
+| 57 | 7.6 PLT stub resolution | `PltResolveTest` |
+| 58 | 3.7 Native ServiceManager addition | `SmAddTest` |
 
-After S60: **Category 3 complete. Category 4 complete. Category 7 complete.**
+After S58: **Category 3 complete. Category 4 complete. Category 7 complete.**
 
-### Phase E — Anti-detection completion (Sessions 61–66, 6 sessions)
-
-| Session | Feature | Exit |
-|---|---|---|
-| 61 | 5.10 ADB detect blocking | `AdbDetectTest` |
-| 62 | 5.11 Debugger detect (JDWP + full status) | `DebuggerDetectTest` |
-| 63 | 5.12 Emulator detect blocking | `EmulatorDetectTest` |
-| 64 | 5.13 Test-keys / custom build detect | `BuildPropTest` |
-| 65 | 5.14 /proc/net/tcp blocking | `NetTcpTest` |
-| 66 | 5.15 /proc/self/cmdline + 5.16 syscall/stack filter | `CmdlineStackTest` |
-
-After S66: **Category 5 complete.**
-
-### Phase F — Polish + close (Sessions 67–75, up to 9 sessions)
+### Phase E — Anti-detection completion (Sessions 59–64)
 
 | Session | Feature | Exit |
 |---|---|---|
-| 67 | 6.8 Signal-safe uninstall | `SignalSafeUninstallTest` |
-| 68 | 8.7 Profiling (CPU / memory per hook) | `HookProfileTest` |
-| 69–73 | Address any ⚠️ partials surfaced by prior phases | Depends on outcomes |
+| 59 | 5.10 ADB detect blocking | `AdbDetectTest` |
+| 60 | 5.11 Debugger detect (JDWP + full status) | `DebuggerDetectTest` |
+| 61 | 5.12 Emulator detect blocking | `EmulatorDetectTest` |
+| 62 | 5.13 Test-keys / custom build detect | `BuildPropTest` |
+| 63 | 5.14 /proc/net/tcp blocking | `NetTcpTest` |
+| 64 | 5.15 /proc/self/cmdline + 5.16 syscall/stack filter | `CmdlineStackTest` |
+
+After S64: **Category 5 complete.**
+
+### Phase F — Polish + close (Sessions 65–75)
+
+| Session | Feature | Exit |
+|---|---|---|
+| 65 | 6.8 Signal-safe uninstall | `SignalSafeUninstallTest` |
+| 66 | 8.7 Profiling (CPU / memory per hook) | `HookProfileTest` |
+| 67–73 | Address any ⚠️ partials surfaced by prior phases | Depends on outcomes |
 | 74 | Full engine regression run + `PROJECT_STATE.md` final close | All suites + canary green |
 | 75 | Reserved for any decomp-blocked item that survives to end | Depends |
 
-**Total: Sessions 41–75, ~35 sessions.** Coverage of ApplicationProxy natives is **not part of the exit criteria**. The engine's exit criteria are Categories 1–8 fully ✅.
+**Total: Sessions 46–75, ~30 sessions.** Coverage of ApplicationProxy natives is **not part of the exit criteria**. The engine's exit criteria are Categories 1–8 fully ✅.
 
 ---
 
@@ -450,7 +451,7 @@ Viber is used for **one purpose**: verify that the engine primitives still work 
 - `booted-viber-order` + no new FATAL + providers ≥14 = canary green
 - Any new FATAL, any boot regression, any provider count drop = canary red = an engine primitive broke
 
-**Canary state at Session 40 close:** green. `outcome=booted-viber-order`, `onCreated=true`, providers 14/15 (MlKit noise), no crash in 60s, background IPC observed.
+**Canary state at Session 45 close:** green. `outcome=booted-viber-order`, `onCreated=true`, providers 14/15 (MlKit noise), no crash in 60s, background IPC observed.
 
 **What the canary does NOT test:**
 - Viber UI visibility (Wall C4/C5/C6 outcome was "surface valid, content empty")
@@ -460,252 +461,138 @@ Viber is used for **one purpose**: verify that the engine primitives still work 
 
 **Canary failure protocol:** canary goes red → identify which engine primitive broke → fix that primitive → canary green → continue. Do not add canary-specific features. Do not chase Viber walls.
 
-**Wall C3, C4, C5, C6 status:** all closed or accepted as *canary state facts*, not as targets. Wall C4 (token steal) works. Wall C5 (surface allocation) works when task visible. Wall C6 (empty content at 250ms) — canary data, not a wall. If any of these regress, that's a canary signal, not a target.
+**Wall C3, C4, C5, C6 status:** all closed or accepted as *canary state facts*, not as targets. Wall names retired — no new Wall D/E/F.
 
 ---
 
-## What the `X/37` coverage counter is now
+## Test suite state (as of Session 45 close)
 
-**Retained as documentation, not as progress metric.** At Session 40 close:
+**Executed:** 74 · **Registered:** 78 · **Ignored:** 4 (1 × `ActivityBootProbeTest` + 3 × `AntiDetectionE2ETest` connect tests) · **Failed:** 0
 
-- 15/37 ApplicationProxy natives verified on-device (Session 38 confirmed `nativeInit`)
-- 17/37 claimed counting written-but-unverified S39–S40 (nativeOnLoad, nativeAMRHook)
+Registered test classes:
 
-Actual verified: **15/37**. Claimed if S39–S42 tests pass: 17/37.
+| Class | Tests | Status |
+|---|---|---|
+| NativeItemTest | 5 | ✅ |
+| ProcessHooksTest | 4 | ✅ |
+| RegressionTest | 5 | ✅ |
+| RelocTest | 1 (49 assertions) | ✅ S41 |
+| ProxyBridgeSurfaceTest | 4 | ✅ |
+| NativeInitTest | 2 | ✅ S39 |
+| AbiProbeTest | 2 | ✅ S39 |
+| ThreadStatusProbeTest | 1 | ✅ S39 |
+| MountsProbeTest | 2 | ✅ S40 |
+| AntiDetectionTest | 1 | ✅ |
+| AntiDetectionE2ETest | 4 (1 live + 3 ignored) | ✅ |
+| PmSpoofTest | 4 | ✅ |
+| ClassLoaderBridgeTest | 3 | ✅ |
+| DualApplicationTest | 2 | ✅ |
+| BinderTransactE2ETest | 9 | ✅ |
+| BinderTransactHookTest | 2 | ✅ |
+| DynamicAttachTest | 6 | ✅ S42 |
+| ChainHookTest | 6 | ✅ S43 |
+| ArtMethodTraceTest | 5 | ✅ S44 |
+| ConditionalHookTest | 6 | ✅ S45 |
+| GuestLoadTest | 1 | ✅ (canary) |
+| ActivityBootProbeTest | 1 | 🔒 ignored |
+| IntegrationTest | 1 | ✅ |
+| Diagnostic probes | several | non-gating |
 
-**The counter does not grow the engine.** If a future session ports `nativeJH*` and canary stays green, that's engine work. If a future session ports it and canary turns red, that's engine work that broke something. Either way, engine feature ✅ matters more than counter movement.
-
-The counter will not be the subject of any future session narrative. Sessions 15–40's endless coverage debates — that era is closed.
+**Test count history:**
+- S40 close: 51 executed
+- S41 close: 51 executed (rewrote internals — no new class)
+- S42 close: 57 executed (+6 DynamicAttachTest)
+- S43 close: 63 executed (+6 ChainHookTest)
+- S44 close: 68 executed (+5 ArtMethodTraceTest)
+- S45 close: **74 executed** (+6 ConditionalHookTest)
+- S46 target: 80 executed (+6 ReturnModTest)
 
 ---
 
-## Session 41 first actions (authoritative)
+## Session 46 first actions (authoritative)
 
-Session 41 opens with **verification, not new work**. Six code files exist on disk from Sessions 39–42 that have never run their tests. Verify them before any new code is written.
+1. **Step 0** — confirm Session 45 commit landed (`git log --oneline -5` should show the S45 commit at top).
+2. **Step 1** — write Feature 1.9 (return-value modification). New `ReturnMod.h` / `ReturnMod.cpp` + `ReturnModTest.kt`. Surface: `AttachRetMod(target, modifier_fn, out_trampoline)` where modifier is `uint64_t (*)(const uint64_t* x0_x7, uint64_t orig_ret)`. Trampoline must be able to route through a post-call site that captures x0 (return value), calls the modifier, and returns the (possibly modified) x0.
+3. **Step 2** — build + install (Rule 14).
+4. **Step 3** — `am instrument` ReturnModTest. Expect `OK (6 tests)`.
+5. **Step 4** — full suite. Expect `OK (80 tests)`.
+6. **Step 5** — canary. Expect `outcome=booted-viber-order`, providers ≥14, no new FATAL.
+7. **Step 6** — commit, mark Feature 1.9 → ✅, close Category 1 (except 1.6).
 
-**Step 1 — Build and install** (Rule 14):
+---
 
-```powershell
-cd H:\Mobiles\AndroidProject\2027\hookEngine
-./gradlew :app:assembleDebug :app:assembleDebugAndroidTest
-adb install -r -t app\build\outputs\apk\debug\app-debug.apk
-adb install -r -t app\build\outputs\apk\androidTest\debug\app-debug-androidTest.apk
+## Rules of engagement (unchanged, still authoritative)
 
-Step 2 — Run pending tests in order. After each, log run finished: line:
+- Target is the engine feature inventory, not ApplicationProxy coverage.
+- Viber is canary only. Its state is diagnostic, not a milestone. No new Viber walls.
+- Every session advances at least one ⚠️/❌/🔧 → ✅.
+- Verification-first: if a prior session left unverified code on disk, verify before writing new code.
+- Rule 5 (behavior match) — partial disclosure for structural ports: `Rule 5 partial: <reason>` in commit.
+- Rule 12: test assertions must be able to fail.
+- Rule 14: every test-run instruction includes `./gradlew` + `adb install -r -t` on **both** APKs.
+- Rule 15: engine is native. Kotlin/Java in `app/src/main` limited to JNI surface, `DualApplication`, and pre-port Kotlin proxies.
+- Rule 7 (decomp-first) when wire format / symbol / field layout is uncertain.
+- **No `am instrument` output = no session close.** Session is not done until `run finished: N tests, 0 failed` appears in the paste.
+- Deferred items stay deferred: `handleJHMethod` (S18), tnFIN code-36 byte rewrite (S12), clone-app features.
 
-# 2a. S39 batch
-adb logcat -c
-adb shell am instrument -w -r `
-  -e class com.ims134.hookengine.NativeInitTest,com.ims134.hookengine.AbiProbeTest,com.ims134.hookengine.ThreadStatusProbeTest `
-  com.ims134.hookengine.test/androidx.test.runner.AndroidJUnitRunner
-# Expect: run finished: 5 tests, 0 failed
+---
 
-# 2b. S40 batch
-adb logcat -c
-adb shell am instrument -w -r `
-  -e class com.ims134.hookengine.MountsProbeTest `
-  com.ims134.hookengine.test/androidx.test.runner.AndroidJUnitRunner
-# Expect: run finished: 2 tests, 0 failed
+## Hard-won facts (canonical reference)
 
-# 2c. S41 batch (full ARM64 relocation)
-adb logcat -c
-adb shell am instrument -w -r `
-  -e class com.ims134.hookengine.RelocTest `
-  com.ims134.hookengine.test/androidx.test.runner.AndroidJUnitRunner
-# Expect: run finished: 1 tests, 0 failed with 44 assertions
+Facts from Sessions 1–40 retained verbatim (inline hook ROM rules, Parcel layout, AIDL wire format, hidden-API bypass via AttachCurrentThread, Viber Wall A/B/C findings, MLKit noise, canary workflow). Not repeated here for brevity.
 
-# 2d. S42 batch (hook registry tags + ELF symbols)
-adb logcat -c
-adb shell am instrument -w -r `
-  -e class com.ims134.hookengine.HookRegistryTagTest,com.ims134.hookengine.ElfSymbolsTest `
-  com.ims134.hookengine.test/androidx.test.runner.AndroidJUnitRunner
-# Expect: run finished: 6 tests, 0 failed
-Step 3 — Full suite regression.
+Additions from Sessions 33–45:
 
-powershell
-adb logcat -c
-adb shell am instrument -w -r `
-  com.ims134.hookengine.test/androidx.test.runner.AndroidJUnitRunner
-# Expect: OK (N tests) or run finished: N tests, 0 failed
-Step 4 — Viber canary.
+**SYS_getpid / SYS_getuid via `syscall()` bypass both inline and GOT hooks.** `getpid()` from libhookengine returns spoofed `g_virtualPid` (10000) because the `Fake_getpid` inline hook fires for every caller including libhookengine. Same for `getuid()` via getuid/geteuid hooks. Any engine-internal code that needs real kernel values must use `syscall(SYS_getpid)` / `syscall(SYS_getuid)`. (Session 33, verified Session 34.)
 
-powershell
-adb logcat -c
-adb shell am instrument -w -r `
-  -e class com.ims134.hookengine.GuestLoadTest `
-  com.ims134.hookengine.test/androidx.test.runner.AndroidJUnitRunner
-adb shell run-as com.ims134.hookengine cat files/guest-boot.txt
-# Expect: outcome=booted-viber-order, providersSucceeded >= 14
-# Expect: no new FATAL in `adb logcat -d AndroidRuntime:E *:F`
-Step 5 — Commit verification outcome.
+**AttributionSource layout differs by construction path.** Own-pkg AttributionSource (`[leading][pid][uid][tagLen][pkgLen][pkg]`), Viber-context AttributionSource (`[leading][uid][pid][tagLen][pkgLen][pkg]`). The rewriter resolves layout by pkg and writes to the correct slot per shape. Not AOSP behavior; not documented. (Session 32/33, verified Session 34.)
 
-If all green: single commit noting all pending tests verified + engine foundation locked.
+**`Process.myUid()` returning spoofed 10000 propagates into ApplicationInfo.uid**, which propagates into every AttributionSource constructed from that ApplicationInfo. `ApplicationProxy.cpp`'s `GetMyUid` must use `syscall(SYS_getuid)`, not `Process.myUid()`. (Session 32, verified Session 34.)
 
-If red: fix in-session. Do not advance to Session 44's new work (feature 1.5) until the batch is fully green.
+**`mSurface.isValid()` is gated on `mAppVisible`** which is gated on host task visibility. Under `am instrument`, task is usually not user-visible at guest `addView` time → `mSurface.isValid=false`. Session 36's success was because prior run left the task visible. Not a fixed-state behavior; it's a state precondition. Viber canary unaffected (canary doesn't call addView).
 
-Rules of engagement (revised for engine-first)
-Every session opens with the engine-feature header, not the ApplicationProxy coverage header. Format: Session N | Phase X | Feature Y.Z — <name> | status.
+**`Activity.attach` sets `mBase` to `ContextThemeWrapper`, not the raw `ContextImpl`.** Standard androidx AppCompatActivity theme wrapping. Expected.
 
-The target is the engine feature inventory. Coverage counter is documentation, not a metric.
+**MIUI ProcessManager threads are background, non-blocking.** Thread-24/Thread-26 FATAL on `ProcessManager.addMiuiApplicationThread` does not kill the process; main thread continues. Canary green despite the background FATAL. Do not chase.
 
-Viber is canary. Runs at session close. Its state is diagnostic, not a milestone. Wall names like "Wall A / B / C" are retired — no new walls are named, no walls are closed as targets.
+**Full ARM64 relocation handles 9 kinds.** Original 5 (`NORMAL`, `B`, `BL`, `ADR`, `ADRP`) + 4 new (`B_COND`, `CBZ_CBNZ`, `TBZ_TBNZ`, `LDR_LITERAL`). B.cond → inverted-cond skip + B target (2 insns). CBZ/CBNZ → inverted + B target (2 insns). TBZ/TBNZ → inverted + B target (2 insns). LDR literal → `stp x16,x17` + `adrp x16` + `ldr rt` + `ldp x16,x17` (4 insns), rejects rt==16/17. (Session 41, verified on-device.)
 
-Every session advances at least one ⚠️/❌/🔧 → ✅. If it doesn't, it isn't a session — it's a probe, and probes are prohibited as session deliverables.
+**`AttachRuntime` adds validation the raw path never had.** Refuses misaligned (addr & 3 != 0), unmapped, non-executable target page, non-executable replacement. All refusals return `HOOK_TARGET_INVALID`. "Computed address" is enforced structurally — the target is obtained *only* as a jlong from a JNI bridge; Kotlin never sees the symbol name. (Session 42, verified on-device.)
 
-Verification-first. Any session that opens with written-but-unverified code from a prior session must verify that code before adding new code.
+**ChainHook stub page layout (32-byte slots).** `+0 ldr x16,[pc,#0x10]` / `+4 ldr x9,[pc,#0x14]` / `+8 br x16` / `+12 nop` / `+16 dispatcher(8B)` / `+24 target_id(8B)`. The dispatcher (`chain_dispatch_naked`) saves x0-x9, x19-x30, q0-q7 to a 320-byte frame, calls `chain_dispatch_helper`, reads the trampoline back from `[sp,#304]`, restores, and `br x16`. Handlers run outside the chain mutex — prevents re-entrant deadlock if a handler calls into another chained target. (Session 43, verified on-device.)
 
-Deferred work is honored. handleJHMethod parked (Session 18). tnFIN code 36 byte-rewrite parked (Session 12). Clone-app features (filesystem virtualization, AMS registration, etc.) out of scope unless the operator explicitly adds them.
+**`visibility("hidden")` on `chain_dispatch_helper`** is required for the adrp+add in the naked asm — the PIC linker refuses `R_AARCH64_ADR_PREL_PG_HI21` against a preemptible (exported) symbol. Same pattern as `g_adrp_value` in `test_item1.cpp`. (Session 43, verified on-device.)
 
-Rule 5 (behavior match) — partial disclosure for structural ports. When a reference method has no decomp available, a structural port is allowed with Rule 5 partial: <reason> stated in the commit message.
+**Feature 1.8 adds per-slot predicates, `nullptr` = unconditional fire.** `ChainSlot.predicates[MAX_HANDLERS_PER_CHAIN]` is 1:1 paired with `handlers[]`. `ChainAttach` delegates to `ChainAttachCond(target, nullptr, handler, outTrampoline)` so the pre-1.8 API is unchanged. `ChainDetach` shifts both arrays together to preserve pairing. Dispatcher order per slot: `if (local_handlers[i] && (!local_preds[i] || local_preds[i](xregs))) local_handlers[i](xregs);`. Skipping a handler does **not** skip the orig call — the chain still falls through to the trampoline, and the caller always observes the real return value. (Session 45, verified on-device.)
 
-Rule 15 (engine is native). Kotlin/Java in app/src/main limited to JNI surface declarations, DualApplication, and pre-port Kotlin proxies. New engine logic is native.
+**Test-fixture declaration order in `native-lib.cpp` matters.** `chainReset` references `g_pred_calls` / `g_pred_last_x0`; those atomics must be declared **above** `chainReset`. Same for the fixture functions — `getChainPredAcceptAllAddr` etc. reference `chain_pred_accept_all` and need it declared above. The build failure from Session 45 (undeclared identifiers at line 995) was the atomics being placed below `chainReset`. Fix: declare the entire Feature 1.8 fixture block (`extern "C" HookResult ChainAttachCond(...)` + atomics + predicate functions) *before* `chain_handler_1`, and only the JNI bridges after `chainReset`. (Session 45, on-disk fix.)
 
-Test assertions must be able to fail. Rule 12 stands.
+**Fast-JNI constraint on ArtMethod hooks (biggest surprise of S44).** `env->FromReflectedMethod(method)` returns a **fast-JNI dispatch table index** (small int < 0x1000) for app-defined native methods (external fun in Kotlin object, resolved via dlsym) — not a real `ArtMethod*`. `JavaHookInstall` correctly refuses these (validates `data_ >= 0x1000`). Framework natives like `Binder.getCallingUid` are compiled eagerly to a fast stub in `libart.so` — `FromReflectedMethod` returns a real pointer and the hook works. **Implication:** if you need to trace an app-defined native method, ArtMethod hook won't work; use call-site patching, SVC-level hook, or hook `ArtMethod::Invoke` itself. **Test fixtures for ArtMethodTrace must use framework natives** (`Binder.getCallingUid`, `Binder.getCallingPid`) — not custom `external fun` natives. (Session 44, verified on-device.)
 
-Rule 14 (rebuild + install). Every test-run instruction includes ./gradlew + adb install -r -t on both APKs.
+**JNI symbol name-mangling.** Method name `foo_bar` in Kotlin maps to JNI C symbol `Java_..._foo_1bar` — not `Java_..._foo_bar`. The `_` becomes `_1`. Any JNI function whose Java method name contains `_` needs the mangled name in its extern. This bit us on `chainLastX0_1` → `chainLastX0_11`. (Session 43.)
 
-No am instrument output = no session close. Session is not done until run finished: N tests, 0 failed appears in the paste.
+**Chained assignment of heterogeneous function pointers is an error.** `s.onEntry = s.onExit = nullptr;` — error if `onEntry` and `onExit` are different fn-pointer types. Split into two lines. Applies to any struct with heterogeneous function-pointer members. (Session 44.)
 
-Decomp-first when layout or wire format is uncertain. Rule 7 stands.
+**`findstr` on binary `.so` returns empty by default.** `findstr` silently skips files with embedded nulls. To verify a symbol exists in a `.so` on disk, use `llvm-nm -D <file> | findstr <symbol>` (NDK ships `llvm-nm.exe`). To verify on device, `adb shell "run-as <pkg> strings <path>" | findstr <symbol>` — the `|` is **outside** the quotes, so the pipe is Windows-side and `findstr` runs on host. (Session 43.)
 
-BinderProxy.transact-frame jobject crash, dlsym filter, read-only reply parcel, Kotlin object non-static, mParent-vs-decorView, ART capability gate — the hard-won facts from prior sessions remain. See "Hard-won facts" below.
+**Verifying an APK rebuild actually deployed.** After `adb install`, the on-device `.so` must be re-verified: `adb shell "run-as com.ims134.hookengine strings /data/app/com.ims134.hookengine-*/lib/arm64/libhookengine.so" | findstr <new_symbol>`. If empty → install didn't take, or build didn't recompile. `./gradlew :app:clean` is mandatory when a previous compile failed.
 
-Hard-won facts (preserved, extended)
-Facts from Sessions 1–40 retained here. Any prior fact is still authoritative unless explicitly superseded.
+**`ActivityBootProbeTest` cost / retirement.** Runs 3× process-crash retries per suite invocation (MIUI `InterceptorProxy.addMiuiApplicationThread` + Viber `registerReceiver` AMS rejections on background threads). ~60-75s of pure noise. Retired with `@Ignore` (Session 41); its only Rule 12-weak assertion (`outcomes.isNotEmpty()`) is documented as the retirement reason. (Session 41.)
 
-[Preserved as in prior PROJECT_STATE.md — inline hook ROM rules, Parcel layout, AIDL wire format, hidden-API bypass via AttachCurrentThread, Viber-specific findings (Wall A/B/C), MLKit noise, canary workflow. Not repeated here for brevity; the full text from the Session-28-based file section "Hard-won facts (canonical reference)" applies verbatim.]
+**Canary crash suppressor.** `GuestLoadTest` installs a targeted `Thread.setDefaultUncaughtExceptionHandler` in `@Before` that swallows **only** `SecurityException` whose message contains `com.viber.voip` AND matches one of: `addMiuiApplicationThread`, `registerReceiverWithFeature`, `Unknown calling package name`, `is not running in process`. All other throwables propagate → default handler → process kill. Rule 12 preserved. Diagnostics logged at `DualCore.Guest:W`. (Session 41.)
 
-Additions since Session 28:
+**Test count reduction is acceptable.** Session 44 reduced ArtMethodTraceTest from 6 tests to 5 (removed one that was structurally identical to another). Test count discipline is subordinate to Rule 12 (each test must be able to fail meaningfully). Baseline 74 executed at Session 45 close; Session 46 target 80.
 
-SYS_getpid / SYS_getuid via syscall() bypass both inline and GOT hooks. getpid() from libhookengine returns spoofed g_virtualPid (10000) because the Fake_getpid inline hook fires for every caller including libhookengine. Same for getuid() via getuid/geteuid hooks. Any engine-internal code that needs real kernel values must use syscall(SYS_getpid) / syscall(SYS_getuid). (Session 33, verified Session 34.)
+**Phantom S42 batch warning.** The Session 42 handoff claimed to have shipped hook registry tags + `ElfSymbols.h`/`ElfSymbols.cpp`. **None of that exists on disk.** `HookRegistry.h` has no `guest_tag` field. There is no `ElfSymbols.h` / `ElfSymbols.cpp`. Those were never written. Status column reflects reality: 6.2 = ❌, 7.1 = ⚠️. If a future handoff claims a batch is on disk, verify by grepping for the named symbol before trusting it.
 
-AttributionSource layout differs by construction path. Own-pkg AttributionSource ([leading][pid][uid][tagLen][pkgLen][pkg]), Viber-context AttributionSource ([leading][uid][pid][tagLen][pkgLen][pkg]). The rewriter resolves layout by pkg and writes to the correct slot per shape. Not AOSP behavior; not documented. (Session 32/33, verified Session 34.)
+---
 
-Process.myUid() returning spoofed 10000 propagates into ApplicationInfo.uid, which propagates into every AttributionSource constructed from that ApplicationInfo. ApplicationProxy.cpp's GetMyUid must use syscall(SYS_getuid), not Process.myUid(). (Session 32, verified Session 34.)
+## The blunt version
 
-mSurface.isValid() is gated on mAppVisible which is gated on host task visibility. Under am instrument, task is usually not user-visible at guest addView time → mSurface.isValid=false. Session 36's success was because prior run left the task visible. Not a fixed-state behavior; it's a state precondition. Not an engine primitive failure — it's WMS working as designed. Viber canary unaffected (canary doesn't call addView).
+The engine is real and it is growing again. Sessions 41–45 shipped five verified primitives — full ARM64 relocation, dynamic attach, hook chaining, ArtMethod trace, conditional hook — all backed by test classes that run on-device and can fail. That was not container work. That was engine work.
 
-Activity.attach sets mBase to ContextThemeWrapper, not the raw ContextImpl. Standard androidx AppCompatActivity theme wrapping. Expected.
-
-nativeInit structural port verified. so=43 dex=14 rc=0 on Viber APK. DEX extraction via JNI ZipFile walk works for the largest realistic test case. nativeOnLoad alias uses the same helper. (Session 38, verified Session 38.)
-
-MIUI ProcessManager threads are background, non-blocking. Thread-24/Thread-26 FATAL on ProcessManager.addMiuiApplicationThread does not kill the process; main thread continues. Canary green despite the background FATAL. Do not chase.
-
-ApplicationProxy.nativeOnLoad and nativeInit share a C++ helper. Signature: nativeInit(String, String, int) → int, nativeOnLoad(String, String) → int. (Session 39, unverified on-device.)
-
-IsMountsPath filter covers /proc/mounts, /proc/self/mounts, /proc/self/mountinfo, /proc/<pid>/mounts, /proc/<pid>/mountinfo. Filters magisk / supersu / KernelSU / APatch / /data/adb / /sbin/.magisk / /cache/magisk / /debug_ramdisk / overlay-on-system lines. (Session 40, unverified on-device.)
-
-Full ARM64 relocation handles 9 kinds. Original 5 (NORMAL, B, BL, ADR, ADRP) + 4 new (B_COND, CBZ_CBNZ, TBZ_TBNZ, LDR_LITERAL). B.cond → inverted-cond skip + B target (2 insns). CBZ/CBNZ → inverted + B target (2 insns). TBZ/TBNZ → inverted + B target (2 insns). LDR literal → ADRP x17 + LDR (2 insns). (Session 41, unverified on-device.)
-
-Hook registry has per-guest tags. HookHandle.guest_tag[32] field. RegistrySnapshotByTag, RegistryCountByTag, RegistrySetTag, InstallInlineHookExTagged, HookGotEntryExTagged, TagExistingHook. uninstallAllForTag from JNI. (Session 42, unverified on-device.)
-
-ElfSymbols.h / ElfSymbols.cpp — FindExportAnyLib(sym), FindSymbolInLib(lib, sym) via dl_iterate_phdr + GNU + SysV hash walk. Supersedes per-file dynsym scans; new code should call these. (Session 42, unverified on-device.)
-
-Test suite state
-The suite contains both engine tests and canary tests. All rows must be green for a session to close.
-
-Engine tests:
-
-Class	Tests	Status
-NativeItemTest	5	green (engine items 1–5)
-ProcessHooksTest	4	green
-RegressionTest	5	green
-RelocTest	1 (44 assertions)	written-S41, unverified
-ProxyBridgeSurfaceTest	4	green
-NativeInitTest	2	written-S39, unverified
-AbiProbeTest	2	written-S39, unverified
-ThreadStatusProbeTest	1	written-S39, unverified
-MountsProbeTest	2	written-S40, unverified
-HookRegistryTagTest	2	written-S42, unverified
-ElfSymbolsTest	4	written-S42, unverified
-AntiDetectionTest	1	green
-AntiDetectionE2ETest	4	1 green + 3 ignored (loopback EPERM, Rule 12)
-PmSpoofTest	4	green
-ClassLoaderBridgeTest	3	green
-DualApplicationTest	2	green
-BinderTransactE2ETest	9	green
-BinderTransactHookTest	2	green
-Diagnostic / probe tests (not gates):
-ClassLoaderProbeTest, BinderTransactProbeTest, BinderProbeTest, AidlCodeProbeTest, Session11Code36ReplyTest, Session11ProbeTest.
-
-Canary tests:
-
-Class	Tests	Rule
-GuestLoadTest	1	Rule 12 (data, not gate)
-ActivityBootProbeTest	1	Rule 12 (data, not gate)
-IntegrationTest	1	Rule 12 (retry-wrapped)
-Test count history (updated):
-
-Session 14–28: 52 registered
-
-Session 38 (verified green): 52 + 1 (NativeInitTest) = 53
-
-Session 39 (written): +5 (2 Abi + 1 ThreadStatus + 2 NativeInit added — NativeInitTest got 2nd method) → 55
-
-Session 40 (written): +2 (Mounts) → 57
-
-Session 41 (written): Reloc expanded (44 assertions, still 1 test) → 57
-
-Session 42 (written): +6 (2 HookRegistryTag + 4 ElfSymbols) → 63 registered
-
-Actual verified count at Session 40 close: 53. Claimed 63 if all pending tests pass in Session 41.
-
-Coverage history (documented, not progress metric)
-ApplicationProxy natives on-device verified:
-
-S7: 10/90 (historical denominator, superseded)
-
-S14: 14/90 verified (nativeCNVM)
-
-S20: 14/37 (denominator corrected)
-
-S22–S28: 14/37 (Wall A/B/C2 integration only)
-
-S38: 15/37 — nativeInit (verified on-device)
-
-S39: +1 claimed 16/37 (nativeOnLoad) — not yet on-device verified
-
-S40: +1 claimed 17/37 (nativeAMRHook mounts) — not yet on-device verified
-
-Confirmed: 15/37. Pending claim: 17/37 if S39–S40 tests pass in Session 41.
-
-From Session 41 onward, the X/37 counter is not the progress metric. Engine features completed is the metric.
-
-What Session 41 must NOT do
-Do not write new code until the S39–S42 pending batch is verified on-device. The batch is 5 test classes, 15 assertions. It's the entire foundation for Phases A–F. If it doesn't run, nothing built on it runs.
-
-Do not open with a Viber wall probe. Wall C6 was canary data, not a target. No more Wall D, Wall E, Wall F.
-
-Do not touch ApplicationProxy.cpp, CppParcelRewriter.cpp, GuestHost.kt, PmSpoof.kt, DualApplication.kt, MainActivity.kt unless a test failure requires it. S39–S42 code is written; verification, not new writing, is the session.
-
-Do not touch handleJHMethod. Parked (Session 18).
-
-Do not add clone-app features. Filesystem virtualization, per-clone identity, AMS registration, etc. — out of scope unless operator explicitly adds.
-
-Do not advance to feature 1.5 until the batch is verified green. Dynamic attach builds on real relocation, real registry, real symbol resolution. If those aren't on-device verified, dynamic attach is guesswork.
-
-No handoff. Session 41's deliverable is a single commit marking the batch verified (or a fix and re-verify).
-
-Preserved session narratives
-Sessions 1–14 (engine foundation), 15–17 (test infra), 18 (DualHost pivot), 19–20 (ApplicationProxy boot), 22–23 (Wall A / Wall B), 24 (milestone 3 accepted), 25–28 (Wall C1/C2/C3), 29–37 (Wall C3/C4/C5/C6 — all canary-state probes now), 38 (nativeInit ported), 39–42 (engine batch written, unverified).
-
-All are retained below verbatim from the Session-28 base PROJECT_STATE.md as historical record. None of them define the current target.
-
-See "Session 28 closed 2026-10-26" and prior sections for full text. The engine-target narrative begins in this document's "What this project is" section.
-
-The blunt version
-For 26 sessions the project drifted into "get Viber to work." That was container work. It produced a working canary and a lot of diagnostic knowledge, but it did not advance the hook engine beyond Session 14.
-
-Session 38 broke the flatline by porting nativeInit. Sessions 39–42 extended that with nativeOnLoad, ABI ports, extended anti-detect filtering, full ARM64 relocation, and hook registry tagging. None of Sessions 39–42 have been on-device verified. That's Session 41's first job.
-
-From Session 43 onward, the target is unambiguous: the engine feature inventory. Categories 1–8. Fully ✅. Canary green throughout. Session 75 goal.
+Session 46 ships Feature 1.9 (return-value modification) and closes Category 1 (except 1.6). From there, Categories 2–8 all have named sessions with named exit tests. The path to Session 75 is unambiguous.
 
 No more Viber walls. No more "integration depth." No more coverage counter obsession. Engine only. Canary green.
 
 If a future session can't state a specific ⚠️/❌/🔧 → ✅ transition in one sentence, it's not a session.
-
-text
-
----
-
-Run the Session 41 verification batch. Paste the four `run finished:` lines (S39, S40, S41, S42) + full suite + canary. Then Session 43 (feature 1.5 — dynamic attach) is written against verified primitives.

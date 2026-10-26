@@ -46,16 +46,22 @@ object NativeTestBridge {
     external fun chainOrderFirst(): Int
     external fun chainReset()
 
+    // ─── Feature 1.8 — conditional hook ─────────────────────────────
+    //
+    // Attach a handler with an optional predicate. Null predicate (Long=0)
+    // is equivalent to ChainAttach. Predicate is called with a read-only
+    // view of x0..x7 before the handler fires; returns true to fire, false
+    // to skip. Skipping does NOT prevent the original function from
+    // executing — chain still falls through to the trampoline.
+    external fun chainAttachCond(target: Long, predicate: Long, handler: Long): Int
+    external fun getChainPredAcceptAllAddr(): Long
+    external fun getChainPredRejectAllAddr(): Long
+    external fun getChainPredX0Is10Addr(): Long
+    external fun getChainPredX0Is20Addr(): Long
+    external fun chainPredCalls(): Int
+    external fun chainPredLastX0(): Int
+
     // ─── Feature 1.4 — ArtMethod entry/exit trace ───────────────────
-    //
-    // arity parameter selects the wrapper JNI signature:
-    //   0 = int foo()          → traceAttach0
-    //   1 = int foo(int)       → traceAttach1
-    //   2 = int foo(String)    → traceAttach2
-    //   3 = int foo(String,int)→ traceAttach3
-    //
-    // The fixture methods deliberately take a String to avoid ART's
-    // fast-JNI optimization (which rejects all-primitive signatures).
     external fun traceAttach0(method: java.lang.reflect.Method): Int
     external fun traceAttach1(method: java.lang.reflect.Method): Int
     external fun traceAttach2(method: java.lang.reflect.Method): Int
