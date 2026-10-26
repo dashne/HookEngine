@@ -14,6 +14,8 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import android.view.Surface
+import android.view.View
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertTrue
@@ -26,41 +28,39 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * Session 31 (v5) — Wall C4 token steal, permission-verified, crash-logged.
+ * Session 35 — Wall C5 probe.
  *
- * v4 (previous) hit a NEW wall: ACCESS_NETWORK_STATE denial during the
- * MainActivity launch path. Manifest v5 declares INTERNET,
- * ACCESS_NETWORK_STATE, ACCESS_WIFI_STATE. This probe adds:
+ * Session 34 closed Wall C4 (WMS accepted the stolen token, addView returned
+ * success). But immediately after addView, isAttachedToWindow=false,
+ * width/height=0, windowToken=null — because the first Choreographer
+ * traversal (ViewRootImpl.performTraversals → dispatchAttachedToWindow) has
+ * not fired yet. That traversal is the next category of wall (Wall C5).
  *
- *   1. Explicit permission self-check — reports granted/denied for each,
- *      proving whether the manifest rebuild took (Rule 14 protection).
+ * Two-phase structure:
+ *   Phase 1 (main thread): newActivity + lifecycle + token steal + addView,
+ *                          then RETURN so Looper can drain pending
+ *                          Choreographer callbacks and run the traversal.
+ *   Sleep 250 ms on test thread (never on main).
+ *   Phase 2 (main thread): read post-traversal state — isAttachedToWindow,
+ *                          width/height, windowToken, mAttachInfo,
+ *                          ViewRootImpl.mSurface validity.
  *
- *   2. Uncaught exception handler that logs FATAL to a file BEFORE the
- *      process can die from it. If a SecurityException still happens on
- *      main during MainActivity launch, we capture the trace and can
- *      diagnose from activity-boot-uncaught.txt even after am instrument
- *      reports failure or hangs.
+ * If the traversal crashes (Wall C5 — likely IWindowSession identity check,
+ * SurfaceFlinger buffer allocation, or EGL context setup), the FATAL kills
+ * main; phase2Latch never fires; probe times out at 10 s. Wall C5 named by
+ * the FATAL stack in logcat.
  *
- *   3. Pre-warm guard kept — if Settings.Global reads still fail (Wall C2b),
- *      skip MainActivity launch and report AMS-registration verdict cleanly
- *      without risking the process kill path.
- *
- * Four verdicts:
- *   A — preWarm OK, permissions granted, MainActivity launches, token
- *       captured, addView succeeds → Wall C4 operational. Session 32 makes
- *       token handoff portable.
- *   B — addView throws SecurityException → Wall C4-WMS. Session 32 = 1-line
- *       packageName fix.
- *   C — permissions denied → manifest didn't rebuild / install. Rule 14
- *       discipline gap. Reinstall and rerun.
- *   D — preWarm fails → Wall C2b fix insufficient. Report AMS-registration
- *       verdict. No process kill.
+ * Rule 12: probe reports outcomes, asserts only that outcomes were produced.
  */
 @RunWith(AndroidJUnit4::class)
 class ActivityBootProbeTest {
 
     private val ctx get() = InstrumentationRegistry.getInstrumentation().targetContext
     private val tag = "ActivityBoot"
+
+    // Captured in phase 1 for phase 2 reads (post-addView, post-traversal).
+    @Volatile private var guestDecor: View? = null
+    @Volatile private var guestActivity: Activity? = null
 
     private fun findMethod(cls: Class<*>, name: String, vararg params: Class<*>): Method? {
         var c: Class<*>? = cls
@@ -69,11 +69,17 @@ class ActivityBootProbeTest {
                 val m = c.getDeclaredMethod(name, *params)
                 m.isAccessible = true
                 return m
-            } catch (_: NoSuchMethodException) {
-                c = c.superclass
-            }
+            } catch (_: NoSuchMethodException) { c = c.superclass }
         }
         return null
+    }
+
+    private fun reflectRead(obj: Any, name: String): Any? {
+        return try {
+            val f = HiddenApiBridge.reflectGetDeclaredField(obj.javaClass, name) ?: return null
+            if (!HiddenApiBridge.reflectSetAccessible(f)) return null
+            f.get(obj)
+        } catch (_: Throwable) { null }
     }
 
     @Test
@@ -88,26 +94,9 @@ class ActivityBootProbeTest {
         val apk = File(ctx.filesDir, "viber.apk")
         assertTrue("stage viber.apk at ${apk.absolutePath}", apk.exists())
 
-        // ═══════════════════════════════════════════════════════════════
-        // Uncaught handler — logs any FATAL to a file before process dies
-        // ═══════════════════════════════════════════════════════════════
-        val uncaughtFile = File(ctx.filesDir, "activity-boot-uncaught.txt")
-        try { uncaughtFile.writeText("") } catch (_: Throwable) {}
-        val prevHandler = Thread.getDefaultUncaughtExceptionHandler()
-        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
-            try {
-                uncaughtFile.appendText(
-                    "UNCAUGHT thread='${thread.name}' id=${thread.id}\n" +
-                            "exception=${throwable.javaClass.name}: ${throwable.message}\n" +
-                            throwable.stackTraceToString() + "\n\n"
-                )
-            } catch (_: Throwable) {}
-            prevHandler?.uncaughtException(thread, throwable)
-        }
-
-        // ═══════════════════════════════════════════════════════════════
-        // Permission self-check (Rule 14 protection)
-        // ═══════════════════════════════════════════════════════════════
+        // Permission self-check (dumpsys says granted; checkSelfPermission
+        // reports denied via PmSpoof interference — cosmetic, prewarm proves
+        // syscall-level access works).
         val permsToCheck = listOf(
             "android.permission.INTERNET",
             "android.permission.ACCESS_NETWORK_STATE",
@@ -115,19 +104,14 @@ class ActivityBootProbeTest {
         )
         var permDenied = 0
         for (perm in permsToCheck) {
-            val status = try { ctx.checkSelfPermission(perm) } catch (t: Throwable) { -1 }
+            val status = try { ctx.checkSelfPermission(perm) } catch (_: Throwable) { -1 }
             val name = perm.substringAfterLast('.')
-            when (status) {
-                PackageManager.PERMISSION_GRANTED -> report("perm.$name", "granted")
-                PackageManager.PERMISSION_DENIED  -> { report("perm.$name", "denied"); permDenied++ }
-                else -> { report("perm.$name", "unknown($status)"); permDenied++ }
-            }
+            if (status == PackageManager.PERMISSION_GRANTED) report("perm.$name", "granted")
+            else { report("perm.$name", "denied($status)"); permDenied++ }
         }
         report("perm.summary", "denied=$permDenied")
 
-        // ═══════════════════════════════════════════════════════════════
         // Guest boot
-        // ═══════════════════════════════════════════════════════════════
         val loadResult = try {
             GuestHost.load(ctx, apk.absolutePath)
         } catch (t: Throwable) {
@@ -145,21 +129,14 @@ class ActivityBootProbeTest {
         report("guestApp", guestApp.javaClass.name)
         report("guestCtx", guestCtx.javaClass.name)
 
-        // ═══════════════════════════════════════════════════════════════
-        // Pre-warm Settings.Global (Wall C2b protection)
-        // ═══════════════════════════════════════════════════════════════
-        val settingsNames = listOf(
-            "window_animation_scale",
-            "transition_animation_scale",
-            "animator_duration_scale"
-        )
+        // Prewarm (skip-if-correct in rewriter validated Session 34)
+        val settingsNames = listOf("window_animation_scale", "transition_animation_scale", "animator_duration_scale")
         var preWarmOk = 0
         var preWarmFail = 0
         for (name in settingsNames) {
             try {
                 val v = Settings.Global.getInt(ctx.contentResolver, name, -1)
-                report("preWarm.$name", "ok=$v")
-                preWarmOk++
+                report("preWarm.$name", "ok=$v"); preWarmOk++
             } catch (t: Throwable) {
                 val cause = (t as? java.lang.reflect.InvocationTargetException)?.targetException ?: t
                 report("preWarm.$name.threw", "${cause.javaClass.name}: ${cause.message}")
@@ -169,49 +146,37 @@ class ActivityBootProbeTest {
         report("preWarm.summary", "ok=$preWarmOk fail=$preWarmFail")
         val canLaunchHost = (preWarmFail == 0)
 
-        // ═══════════════════════════════════════════════════════════════
-        // Launcher Activity from archive
-        // ═══════════════════════════════════════════════════════════════
+        // Archive
         val pm = ctx.packageManager
         val flags = PackageManager.GET_ACTIVITIES or PackageManager.GET_META_DATA
-        val archive = pm.getPackageArchiveInfo(apk.absolutePath, flags)
-        if (archive == null) { report("archive", "null"); finish(outcomes); return }
-
+        val archive = pm.getPackageArchiveInfo(apk.absolutePath, flags) ?: run {
+            report("archive", "null"); finish(outcomes); return
+        }
         val guestPkg = archive.packageName
         report("guestPkg", guestPkg)
         val activities = archive.activities?.filterNotNull() ?: emptyList()
         report("activityCount", activities.size)
-
         val launcher = activities.firstOrNull { ai ->
-            ai.name?.let { n ->
-                n.contains("MainActivity") || n.contains("SplashActivity") || n.contains("Launcher")
-            } == true
+            ai.name?.let { n -> n.contains("MainActivity") || n.contains("SplashActivity") || n.contains("Launcher") } == true
         } ?: activities.firstOrNull()
         if (launcher == null) { report("launcher", "none"); finish(outcomes); return }
         report("launcher", launcher.name)
-
         val guestAppInfo = archive.applicationInfo?.apply {
             sourceDir = apk.absolutePath
             publicSourceDir = apk.absolutePath
         }
         launcher.applicationInfo = guestAppInfo
 
-        // ═══════════════════════════════════════════════════════════════
-        // Guest classloader + Activity class
-        // ═══════════════════════════════════════════════════════════════
+        // Loader + class
         val guestCL = guestCtx.classLoader
         report("guestCL", guestCL?.javaClass?.name)
-        val activityClass = try {
-            guestCL.loadClass(launcher.name)
-        } catch (t: Throwable) {
+        val activityClass = try { guestCL.loadClass(launcher.name) } catch (t: Throwable) {
             report("loadClass.threw", "${t.javaClass.simpleName}: ${t.message}")
             finish(outcomes); return
         }
         report("activityClass", activityClass.name)
 
-        // ═══════════════════════════════════════════════════════════════
-        // ActivityThread + mInstrumentation
-        // ═══════════════════════════════════════════════════════════════
+        // ActivityThread + Instrumentation
         val atCls = Class.forName("android.app.ActivityThread")
         val curATM = HiddenApiBridge.reflectGetDeclaredMethod(atCls, "currentActivityThread", arrayOf())
         if (curATM == null) { report("currentActivityThread.method", "not found"); finish(outcomes); return }
@@ -232,9 +197,7 @@ class ActivityBootProbeTest {
         report("instrumentation", instrumentation?.javaClass?.name)
         if (instrumentation == null) { finish(outcomes); return }
 
-        // ═══════════════════════════════════════════════════════════════
         // newActivity method
-        // ═══════════════════════════════════════════════════════════════
         val newActivityM = HiddenApiBridge.reflectGetDeclaredMethod(
             Instrumentation::class.java,
             "newActivity",
@@ -253,12 +216,9 @@ class ActivityBootProbeTest {
             component = ComponentName(guestPkg, launcher.name)
         }
 
-        // ═══════════════════════════════════════════════════════════════
-        // Host Activity launch (token source) — guarded by preWarm
-        // ═══════════════════════════════════════════════════════════════
+        // Host Activity launch (token source)
         var hostToken: IBinder? = null
         var hostTokenSource = "<skipped>"
-
         if (canLaunchHost) {
             report("hostLaunch.attempt", "true (pre-warm OK)")
             val mainIntent = Intent(ctx, MainActivity::class.java).apply {
@@ -266,18 +226,12 @@ class ActivityBootProbeTest {
             }
             var startSent = false
             try {
-                ctx.startActivity(mainIntent)
-                startSent = true
-                report("mainIntent.sent", "true")
-            } catch (t: Throwable) {
-                report("mainIntent.threw", "${t.javaClass.name}: ${t.message}")
-            }
+                ctx.startActivity(mainIntent); startSent = true; report("mainIntent.sent", "true")
+            } catch (t: Throwable) { report("mainIntent.threw", "${t.javaClass.name}: ${t.message}") }
 
             if (startSent) {
                 val mActivitiesField = HiddenApiBridge.reflectGetDeclaredField(atCls, "mActivities")
-                if (mActivitiesField == null) {
-                    report("mActivities.field", "not found")
-                } else {
+                if (mActivitiesField != null) {
                     HiddenApiBridge.reflectSetAccessible(mActivitiesField)
                     val deadline = System.currentTimeMillis() + 10_000L
                     var lastSize = -1
@@ -286,15 +240,10 @@ class ActivityBootProbeTest {
                             val map = mActivitiesField.get(at)
                             if (map is Map<*, *>) {
                                 if (map.size != lastSize) {
-                                    report("mActivities.size", map.size)
-                                    lastSize = map.size
+                                    report("mActivities.size", map.size); lastSize = map.size
                                 }
                                 for (key in map.keys) {
-                                    if (key is IBinder) {
-                                        hostToken = key
-                                        hostTokenSource = "ActivityThread.mActivities.key"
-                                        break
-                                    }
+                                    if (key is IBinder) { hostToken = key; hostTokenSource = "mActivities.key"; break }
                                 }
                             }
                         } catch (_: Throwable) {}
@@ -303,221 +252,187 @@ class ActivityBootProbeTest {
                 }
             }
         } else {
-            report("hostLaunch.attempt", "false (pre-warm failed — Wall C2b not fixed)")
-            report("verdict.prelaunch", "Wall C4 = AMS registration required (in-process token source unavailable)")
+            report("hostLaunch.attempt", "false (pre-warm failed)")
         }
-
         report("hostToken.source", hostTokenSource)
         report("hostToken", hostToken)
         report("hostToken.hashCode", hostToken?.hashCode())
-        report("hostToken.class", hostToken?.javaClass?.name)
 
-        // ═══════════════════════════════════════════════════════════════
-        // MAIN THREAD — guest newActivity + lifecycle + token steal + addView
-        // ═══════════════════════════════════════════════════════════════
-        val latch = CountDownLatch(1)
+        // ── Phase 1: main thread — newActivity + lifecycle + steal + addView ──
+        // Return from this block cleanly so Looper can drain pending
+        // Choreographer callbacks and run the first traversal.
+        val phase1Latch = CountDownLatch(1)
         Handler(Looper.getMainLooper()).post {
             try {
-                report("mainThread.name", Thread.currentThread().name)
-                report("mainThread.hasLooper", Looper.myLooper() != null)
-
                 val activity = try {
                     newActivityM.invoke(
-                        instrumentation,
-                        activityClass, guestCtx, null, guestApp, intent,
-                        launcher, launcher.name ?: "title",
-                        null, null, null
+                        instrumentation, activityClass, guestCtx, null, guestApp, intent,
+                        launcher, launcher.name ?: "title", null, null, null
                     ) as? Activity
                 } catch (t: Throwable) {
                     val cause = (t as? java.lang.reflect.InvocationTargetException)?.targetException ?: t
                     report("newActivity.threw", "${cause.javaClass.name}: ${cause.message}")
-                    report("newActivity.stack", cause.stackTraceToString().lines().take(25).joinToString(" | "))
+                    report("newActivity.stack", cause.stackTraceToString().lines().take(20).joinToString(" | "))
                     return@post
                 }
-
                 report("newActivity.result", activity?.javaClass?.name)
-                if (activity == null) {
-                    report("newActivity.null", "returned null without exception")
-                    return@post
-                }
+                if (activity == null) return@post
 
-                report("preAttach.mBase", activity.baseContext?.javaClass?.name)
-                report("preAttach.mApplication", activity.application?.javaClass?.name)
-                report("preAttach.mWindow", activity.window?.javaClass?.name)
-
+                // Lifecycle callbacks (Session 28 stable)
                 val onCreateM = findMethod(activityClass, "onCreate", Bundle::class.java)
-                if (onCreateM == null) {
-                    report("onCreate.method", "not found")
-                } else {
-                    try {
-                        onCreateM.invoke(activity, null as Bundle?)
-                        report("onCreate.result", "success")
-                    } catch (t: Throwable) {
-                        val cause = (t as? java.lang.reflect.InvocationTargetException)?.targetException ?: t
-                        report("onCreate.threw", "${cause.javaClass.name}: ${cause.message}")
-                        report("onCreate.stack", cause.stackTraceToString().lines().take(30).joinToString(" | "))
-                        return@post
-                    }
+                try { onCreateM?.invoke(activity, null as Bundle?); report("onCreate.result", "success") }
+                catch (t: Throwable) {
+                    val cause = (t as? java.lang.reflect.InvocationTargetException)?.targetException ?: t
+                    report("onCreate.threw", "${cause.javaClass.name}: ${cause.message}"); return@post
                 }
-
                 val onStartM = findMethod(activityClass, "onStart")
-                onStartM?.let {
-                    try {
-                        it.invoke(activity)
-                        report("onStart.result", "success")
-                    } catch (t: Throwable) {
-                        val cause = (t as? java.lang.reflect.InvocationTargetException)?.targetException ?: t
-                        report("onStart.threw", "${cause.javaClass.name}: ${cause.message}")
-                        report("onStart.stack", cause.stackTraceToString().lines().take(25).joinToString(" | "))
-                        return@post
-                    }
+                try { onStartM?.invoke(activity); report("onStart.result", "success") }
+                catch (t: Throwable) {
+                    val cause = (t as? java.lang.reflect.InvocationTargetException)?.targetException ?: t
+                    report("onStart.threw", "${cause.javaClass.name}: ${cause.message}"); return@post
                 }
-
                 val onResumeM = findMethod(activityClass, "onResume")
-                onResumeM?.let {
-                    try {
-                        it.invoke(activity)
-                        report("onResume.result", "success")
-                    } catch (t: Throwable) {
-                        val cause = (t as? java.lang.reflect.InvocationTargetException)?.targetException ?: t
-                        report("onResume.threw", "${cause.javaClass.name}: ${cause.message}")
-                        report("onResume.stack", cause.stackTraceToString().lines().take(25).joinToString(" | "))
-                        return@post
-                    }
+                try { onResumeM?.invoke(activity); report("onResume.result", "success") }
+                catch (t: Throwable) {
+                    val cause = (t as? java.lang.reflect.InvocationTargetException)?.targetException ?: t
+                    report("onResume.threw", "${cause.javaClass.name}: ${cause.message}"); return@post
                 }
-
                 report("lifecycle.result", "onCreate+onStart+onResume all succeeded")
 
-                report("preSteal.mToken", try {
-                    val f = HiddenApiBridge.reflectGetDeclaredField(Activity::class.java, "mToken")
-                    HiddenApiBridge.reflectSetAccessible(f)
-                    f?.get(activity)
-                } catch (_: Throwable) { "unreadable" })
-
-                report("preSteal.lp.token", try {
-                    activity.window.attributes.token
-                } catch (_: Throwable) { "unreadable" })
-
+                // Token steal (Session 34 closed Wall C4)
                 if (hostToken != null) {
                     try {
-                        val mTokenField = HiddenApiBridge.reflectGetDeclaredField(Activity::class.java, "mToken")
-                        if (mTokenField != null) {
-                            HiddenApiBridge.reflectSetAccessible(mTokenField)
-                            mTokenField.set(activity, hostToken)
+                        val f = HiddenApiBridge.reflectGetDeclaredField(Activity::class.java, "mToken")
+                        if (f != null) {
+                            HiddenApiBridge.reflectSetAccessible(f)
+                            f.set(activity, hostToken)
                             report("steal.mToken.result", "success")
-                            report("steal.mToken.after", mTokenField.get(activity))
-                        } else {
-                            report("steal.mToken.field", "not found")
                         }
-                    } catch (t: Throwable) {
-                        report("steal.mToken.threw", "${t.javaClass.name}: ${t.message}")
-                    }
-
+                    } catch (t: Throwable) { report("steal.mToken.threw", "${t.javaClass.name}: ${t.message}") }
                     try {
-                        val lp = activity.window.attributes
-                        lp.token = hostToken
+                        activity.window.attributes.token = hostToken
                         report("steal.lp.token.result", "success")
-                        report("steal.lp.token.after", lp.token?.hashCode())
-                    } catch (t: Throwable) {
-                        report("steal.lp.token.threw", "${t.javaClass.name}: ${t.message}")
-                    }
-
+                    } catch (t: Throwable) { report("steal.lp.token.threw", "${t.javaClass.name}: ${t.message}") }
                     try {
                         val win = activity.window
                         var cls: Class<*>? = win.javaClass
                         var f: java.lang.reflect.Field? = null
                         while (cls != null && f == null) {
-                            try {
-                                f = cls.getDeclaredField("mAppToken")
-                            } catch (_: NoSuchFieldException) {
-                                cls = cls.superclass
-                            }
+                            try { f = cls.getDeclaredField("mAppToken") }
+                            catch (_: NoSuchFieldException) { cls = cls.superclass }
                         }
                         if (f != null) {
                             f.isAccessible = true
-                            val before = f.get(win)
                             f.set(win, hostToken)
-                            report("steal.mAppToken.before", before)
                             report("steal.mAppToken.result", "success")
-                        } else {
-                            report("steal.mAppToken.field", "not found")
                         }
-                    } catch (t: Throwable) {
-                        report("steal.mAppToken.threw", "${t.javaClass.name}: ${t.message}")
-                    }
-                } else {
-                    report("steal.skipped", "hostToken null — WMS will reject with BadTokenException")
+                    } catch (t: Throwable) { report("steal.mAppToken.threw", "${t.javaClass.name}: ${t.message}") }
                 }
 
-                report("postSteal.mToken", try {
-                    val f = HiddenApiBridge.reflectGetDeclaredField(Activity::class.java, "mToken")
-                    HiddenApiBridge.reflectSetAccessible(f)
-                    f?.get(activity)
-                } catch (_: Throwable) { "unreadable" })
-
-                report("postSteal.lp.token", try {
-                    activity.window.attributes.token
-                } catch (_: Throwable) { "unreadable" })
-
-                report("postSteal.lp.token.hashCode", try {
-                    activity.window.attributes.token?.hashCode()
-                } catch (_: Throwable) { -1 })
-
-                var wmOk = false
-                var decorOk = false
-                var addViewOk = false
+                // addView — Wall C4 verification carried forward
                 try {
                     val wm = activity.window.windowManager
-                    report("wallC4.wm", wm.javaClass.name)
-                    wmOk = true
-
                     val decor = activity.window.decorView
-                    report("wallC4.decorView", decor.javaClass.name)
-                    decorOk = true
-
                     val lp = activity.window.attributes
-                    report("wallC4.lp", lp?.javaClass?.name)
-                    report("wallC4.lp.type", lp?.type)
-                    report("wallC4.lp.token", lp?.token)
-                    report("wallC4.lp.token.class", lp?.token?.javaClass?.name)
-                    report("wallC4.lp.token.hashCode", lp?.token?.hashCode())
-                    report("wallC4.lp.packageName", lp?.packageName)
-                    report("wallC4.lp.flags", lp?.flags)
-                    report("wallC4.lp.format", lp?.format)
-                    report("wallC4.lp.width", lp?.width)
-                    report("wallC4.lp.height", lp?.height)
-
+                    report("wallC4.lp.token.hashCode", lp.token?.hashCode())
                     wm.addView(decor, lp)
-                    addViewOk = true
                     report("wallC4.addView.result", "success")
-                    report("wallC4.decorView.isAttachedToWindow", decor.isAttachedToWindow)
-                    report("wallC4.decorView.width", decor.width)
-                    report("wallC4.decorView.height", decor.height)
-                    report("wallC4.decorView.visibility", decor.visibility)
-                    report("wallC4.decorView.windowToken", decor.windowToken)
+                    // Capture refs for phase 2 (post-traversal reads)
+                    guestDecor = decor
+                    guestActivity = activity
                 } catch (t: Throwable) {
                     val cause = (t as? java.lang.reflect.InvocationTargetException)?.targetException ?: t
-                    report("wallC4.wmOk", wmOk)
-                    report("wallC4.decorOk", decorOk)
-                    report("wallC4.addViewOk", addViewOk)
                     report("wallC4.threw", "${cause.javaClass.name}: ${cause.message}")
-                    report("wallC4.stack", cause.stackTraceToString().lines().take(30).joinToString(" | "))
+                    report("wallC4.stack", cause.stackTraceToString().lines().take(20).joinToString(" | "))
                 }
-
-                report("note", "token-steal v5 complete")
             } catch (t: Throwable) {
-                report("uncaught", "${t.javaClass.name}: ${t.message}")
-                report("uncaught.stack", t.stackTraceToString().lines().take(25).joinToString(" | "))
+                report("phase1.uncaught", "${t.javaClass.name}: ${t.message}")
             } finally {
-                latch.countDown()
+                phase1Latch.countDown()
             }
         }
 
-        val completed = try {
-            latch.await(90, TimeUnit.SECONDS)
-        } catch (_: InterruptedException) { false }
+        val phase1Done = try { phase1Latch.await(60, TimeUnit.SECONDS) } catch (_: InterruptedException) { false }
+        if (!phase1Done) { report("phase1.timeout", "60s"); finish(outcomes); return }
 
-        if (!completed) report("mainThread.timeout", "90s — main thread dead or blocked")
+        // ── Wait ~250 ms for Choreographer → first traversal ──
+        // Main thread has returned from phase 1. Looper drains and Choreographer
+        // fires ViewRootImpl.performTraversals. If that crashes (Wall C5),
+        // main thread dies; phase 2 latch times out; FATAL visible in logcat.
+        Thread.sleep(250)
+
+        // ── Phase 2: read post-traversal state ──
+        val phase2Latch = CountDownLatch(1)
+        Handler(Looper.getMainLooper()).post {
+            try {
+                val decor = guestDecor
+                val activity = guestActivity
+                if (decor == null || activity == null) {
+                    report("phase2.failed", "no captured references")
+                    return@post
+                }
+
+                report("wallC5.activity.isFinishing", activity.isFinishing)
+                report("wallC5.activity.isDestroyed", activity.isDestroyed)
+                report("wallC5.decorView.isAttachedToWindow", decor.isAttachedToWindow)
+                report("wallC5.decorView.width", decor.width)
+                report("wallC5.decorView.height", decor.height)
+                report("wallC5.decorView.visibility", decor.visibility)
+                report("wallC5.decorView.windowToken", decor.windowToken)
+                report("wallC5.decorView.windowToken.hashCode", decor.windowToken?.hashCode())
+
+                // ViewRootImpl via View.mParent
+                try {
+                    val f = HiddenApiBridge.reflectGetDeclaredField(View::class.java, "mParent")
+                    if (f == null) {
+                        report("wallC5.viewRootImpl", "mParent field not found")
+                    } else {
+                        HiddenApiBridge.reflectSetAccessible(f)
+                        val viewRoot = f.get(decor)
+                        report("wallC5.viewRootImpl", viewRoot?.javaClass?.name)
+                        if (viewRoot != null) {
+                            val surface = reflectRead(viewRoot, "mSurface")
+                            report("wallC5.viewRootImpl.mSurface",
+                                when (surface) {
+                                    is Surface -> "Surface(isValid=${surface.isValid})"
+                                    null -> "null"
+                                    else -> surface.toString()
+                                })
+                            report("wallC5.viewRootImpl.mAdded", reflectRead(viewRoot, "mAdded"))
+                            report("wallC5.viewRootImpl.mFirst", reflectRead(viewRoot, "mFirst"))
+                            report("wallC5.viewRootImpl.mAppVisible", reflectRead(viewRoot, "mAppVisible"))
+                        }
+                    }
+                } catch (t: Throwable) {
+                    report("wallC5.viewRootImpl.threw", "${t.javaClass.simpleName}: ${t.message}")
+                }
+
+                // mAttachInfo via View
+                try {
+                    val f = HiddenApiBridge.reflectGetDeclaredField(View::class.java, "mAttachInfo")
+                    if (f != null) {
+                        HiddenApiBridge.reflectSetAccessible(f)
+                        val ai = f.get(decor)
+                        report("wallC5.mAttachInfo", ai?.javaClass?.name)
+                        if (ai != null) {
+                            report("wallC5.mAttachInfo.mWindowToken", reflectRead(ai, "mWindowToken"))
+                        }
+                    }
+                } catch (t: Throwable) {
+                    report("wallC5.mAttachInfo.threw", "${t.javaClass.simpleName}: ${t.message}")
+                }
+
+                report("wallC5.readComplete", "true")
+            } catch (t: Throwable) {
+                report("phase2.uncaught", "${t.javaClass.simpleName}: ${t.message}")
+            } finally {
+                phase2Latch.countDown()
+            }
+        }
+
+        val phase2Done = try { phase2Latch.await(10, TimeUnit.SECONDS) } catch (_: InterruptedException) { false }
+        if (!phase2Done) report("phase2.timeout", "10s — main thread dead (Wall C5)")
+
         finish(outcomes)
     }
 
