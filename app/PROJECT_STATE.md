@@ -1,50 +1,71 @@
-Last verified build: Session 24, decision-only session (no code change). Session 23 verification carries forward: OK (1 test) on GuestLoadTest, outcome=booted-viber-order, onCreated=true, providers=14/15 (MLKit env-only failure since Session 19a). Wall A and Wall B CLOSED. Milestone 3 verified: 60s post-boot clean, no FATAL/signal/ANR, active background IPC from Viber Engine threads at 3.5s and 60s post-boot. **Milestone 3 accepted; "Viber boot" chapter closed per Session 24 Option 1.** Coverage 14/37 (denominator corrected from 90 in Session 20 — reference registers 37 natives, not 90). Session 25 starts a new project: operator picks between milestone 4 (Activity UI, ~3–6 weeks) and milestone 5 (functional — network/register/message, months) at Session 25 open.
+Last verified build: Session 28, verified on device 2026-10-26. OK (1 test) on ActivityBootProbeTest. Wall A closed (Session 22), Wall B closed (Session 23). Wall C1 closed (Session 26, Looper fix — probe body posted to `Looper.getMainLooper()`). Wall C2 closed (Session 28, IContentProvider AttributionSource rewrite verified — ~40 `CP rewrite fired` lines, all `leading=92(preserved)`, `size=...→+12 delta=12`). Wall C3 named (Session 28, MIUI `ProcessManager.addMiuiApplicationThread` rejected from `Thread-26`, kernel-uid check on 10428, non-blocking background crash, rewritability TBD). Milestone 3 accepted (Session 24, "Viber boot" chapter closed). Milestone 4 in progress: `SplashActivity` instantiated, attached (`mBase=ContextThemeWrapper`, `mApplication=ManifestViberApplication`, `mWindow=PhoneWindow`), `onCreate`+`onStart`+`onResume` all succeeded. Wall C4 (behind `onResume`, likely `IWindowSession.addToDisplayAsUser` or `ActivityTaskManager.startActivity`) not yet reached. Coverage 14/37 unchanged (Sessions 22–28 all integration depth; no new reference methods ported since Session 14 — Rule 3 exception stated openly in every session narrative). Test suite 52 registered = 49 pass + 3 ignored. **Mission #1 remains 14/37. Wall C3 is the first wall in six sessions that may name a reference method port (`nativeInit` or a per-signature hook family member) — Session 29 diagnostic determines.**
 
-Session 24 closed 2026-10-26: **Scoping session. Option 1 chosen — milestone 3 accepted, "Viber boot" chapter closed.** Operator delegated the decision ("you are leader"); Session 23 handoff's Option 1 recommendation stands. Rationale: Wall A and Wall B are clean, verifiable wins; milestone 3 is verified 3× on-device by the same methodology that found both walls; starting milestone 4 in the same mental session as closing milestone 3 mixes two different cost domains. **Zero code changes this session.** Session 22 + 23 commit remains at HEAD (already landed — verified by operator). Coverage 14/37 unchanged (milestone 3 was integration depth, not new method ports). Test suite 52 registered = 49 pass + 3 ignored unchanged. Session 25 starts the next project with fresh scope: operator picks between milestone 4 (Activity lifecycle, ~3–6 weeks) and milestone 5 (functional — network/register/message, months) at Session 25 open. Neither is started here.
+Session 28 closed 2026-10-26: **Wall C2 CLOSED. Wall C3 NAMED. Milestone 4 advances to Activity-lifecycle-proven.**
 
-Session 23 closed 2026-10-26: Wall B closed with `ParcelRewriter_TryRewriteStorageRequest` — intercepts `IStorageManager` transact prelude on the caller thread, rewrites `callingPackage` string16 from `"com.viber.voip"` (14 chars) to `"com.ims134.hookengine"` (21 chars), grows parcel by +12 bytes, forwards. AMS accepts (uid 10428 owns `com.ims134.hookengine`). Hook installed at `GuestHost.load` entry before guest boot. Verified 3 runs: `STORAGE rewrite fired: code=30 userId=0 size=132->144 delta=12` present each time; no `IO_POOL`/`TM:MESSAGES` crash, no `FATAL EXCEPTION`. Milestone 3 verified by 60s probe: no crash in 60s, two background IPackageManager IPC calls observed (code 3 at 3.5s post-boot, code 36 at 60s post-boot) — Viber Engine threads alive and doing work. Coverage 14/37 (unchanged — this was integration depth, not new method ports). Test suite unchanged: 52 registered = 49 pass + 3 ignored.
+Wall C2 (Settings ContentProvider caller identity mismatch) closed by extending the Session 23 rewriter to `IContentProvider`. Function renamed `ParcelRewriter_TryRewriteStorageRequest` → `ParcelRewriter_TryRewriteCallerIdentity`; IStorageManager branch unchanged; new IContentProvider branch. Empirical API 37 AttributionSource layout differs from AOSP: `[+0]=92(preserved) [+4]=uid→10428 [+8]=pid [+12]=tagLen [+16]=pkgLen→21 [+20]=pkgChars [+48]=null [+50]=pad [+52]=suffix`. Total rewrite +12 bytes. Verified: ~40 `CP rewrite fired: code=1/21 uid=10000->10428 pkg='com.viber.voip'->'com.ims134.hookengine' size=...→+12 delta=12 leading=92(preserved)` across the probe. Wall B non-regressed: `STORAGE rewrite fired: code=30 size=132->144 delta=12` still present.
+
+Probe result: `newActivity.result=com.viber.voip.splash.SplashActivity`, `preAttach.mBase=androidx.appcompat.view.ContextThemeWrapper`, `preAttach.mApplication=com.viber.voip.ManifestViberApplication`, `preAttach.mWindow=com.android.internal.policy.PhoneWindow`, `onCreate.result=success`, `onStart.result=success`, `onResume.result=success`. SplashActivity is a live, attached, fully-initialized Activity instance in our process running Viber's own lifecycle callbacks. Every AIDL code path that fired during this (Settings reads, ContentProvider calls, PackageManager synthesis) was caller-identity-rewritten and accepted by the server.
+
+Wall C3 named: `FATAL EXCEPTION: Thread-26` — `SecurityException: Permission Denial: ProcessManager.addMiuiApplicationThread() from pid=21318, uid=10428` at `miui.process.ProcessManagerProxy.addMiuiApplicationThread(ProcessManagerNative.java:657)` ← `miui.process.ProcessManager.addMiuiApplicationThread(ProcessManager.java:343)` ← `miui.contentcatcher.InterceptorProxy.lambda$addMiuiApplication$0(InterceptorProxy.java:123)`. MIUI contentcatcher interceptor spawns `Thread-26` during Activity creation; MIUI's server-side `Binder.getCallingUid()` check rejects because our kernel uid (10428) doesn't own `com.viber.voip`. Non-blocking: main thread continued after the background crash — `onCreate.result=success` at `07:05:40.794`, `onStart.result=success` at `07:05:40.795`, `onResume.result=success` at `07:05:40.811` — the FATAL fired at `07:05:40.748`, 46ms before onCreate returned. **Wall C3 rewritability TBD** — if the `addMiuiApplicationThread` parcel has no caller-identity field, the Wall B/C2 rewrite mechanism can't help. Session 29 diagnostic determines. Root-cause context: `Process.myUid()` returns 10000 in our process (Session 22 log: `FixApplicationInfo: ... uid=10000`), so caller-identity fields carry uid=10000; Wall C3's rejection is on kernel-side `Binder.getCallingUid()` (10428), which is different from any parcel field. Consequence if unfixed: MIUI interceptor doesn't attach to guest UI, downstream MIUI behavior (crash detection, memory management, screenshots) may be degraded for the guest.
+
+Coverage 14/37 unchanged. Test suite 52 registered = 49 pass + 3 ignored unchanged. Mission #1 reconfirmed: **Wall C3 is the first wall in six sessions that may name a reference method port if the fix requires `nativeInit` or a per-signature hook family member.** Session 29 diagnosis is the gate.
+
+Session 27 closed 2026-10-26: **Wall C2 refined, not fixed. Diagnostic dump captured.** First IContentProvider rewrite attempt assumed AOSP layout (`[uid][pid][pkg]`). Actual API 37 layout: `[92][uid][pid][tagLen][pkgLen][pkgChars]`. Read started at `[+0]=uid` — off by 4 bytes, plus another 4 for the tag field. Diagnostic-only: rewriter safely no-op'd on every attempt (`CP iface matched but pkg read failed aS=84 bytes: 5c000000 10270000 10270000 00000000 0e000000 63006f00...`), no partial corruption, no crash. Wall B fix intact (`STORAGE rewrite fired` present). Wall C1 operationally closed. Coverage 14/37 unchanged. Handoff withheld.
+
+Session 26 closed 2026-10-26: **Wall C1 closed, Wall C2 named.** Wall C1 fix (Session 25 diagnosis: `Activity.<init>` needs Looper on caller thread) applied — probe body wrapped in `Handler(Looper.getMainLooper()).post { ... }` with `CountDownLatch` sync. Verified: `mainThread.name=main`, `mainThread.hasLooper=true`. `newActivity` advanced past `SplashActivity.<init>` — no second Looper wall. New wall: `SecurityException: Calling uid: 10428 doesn't match source uid: 10000` at `ContentProviderProxy.call(ContentProviderNative.java:784)` ← `Settings.Global.getInt` ← `PhoneWindow.<init>` (428/440) ← `Activity.attach(9482)` ← `Instrumentation.newActivity(1446)`. Wall C2 = Settings ContentProvider rejects caller identity. Category: Wall B-adjacent (same caller-identity mismatch mechanism, different AIDL interface — `IContentProvider` vs `IStorageManager`). Session 26 corrections: (1) `Instrumentation.newActivity` DOES call `Activity.attach` internally (stack trace proves it) — probe's explicit-attach block was dead code, removed in Session 27; (2) no second Looper wall — one `new Handler()` in `Activity.<init>`, posting to main cleared it. Coverage 14/37 unchanged.
+
+Session 25 closed 2026-10-26: **Milestone 4 first-wall probe. Wall C1 named.** `ActivityBootProbeTest.kt` created: boots Viber via `GuestHost.load`, enumerates 347 activities, picks `com.viber.voip.splash.SplashActivity` as launcher, resolves `ActivityThread.currentActivityThread()` + `mInstrumentation` (= `AndroidJUnitRunner`), calls `Instrumentation.newActivity(...)`. Reached `Class.newInstance()` → `SplashActivity.<init>` → 8-layer androidx chain (`AppCompatActivity` → `FragmentActivity` → `androidx.activity.ComponentActivity` → `androidx.core.app.ComponentActivity` → `android.app.Activity`) → `Activity.<init>(Activity.java:1018)` → `new Handler()` → `RuntimeException: Can't create handler inside thread Thread[Instr: androidx.test.runner.AndroidJUnitRunner,5,main] that has not called Looper.prepare()`. **Wall C1 = Activity.<init> requires Looper on caller thread.** Container-side constraint (framework Handler ctor requires Looper), not Viber-specific. Every Activity on Android throws the same way on a Looper-less thread. Fix deferred to Session 26. Key findings: launcher is SplashActivity of 347 declared activities; SplashActivity class hierarchy is standard androidx; `ActivityThread.currentActivityThread()` and `mInstrumentation` both resolvable via HiddenApiBridge. Coverage 14/37 unchanged.
+
+Session 24 closed 2026-10-26: **Scoping session. Option 1 chosen — milestone 3 accepted, "Viber boot" chapter closed.** Operator delegated the decision. Rationale: Wall A and Wall B are clean verifiable wins; milestone 3 verified 3× by the same methodology that found both walls; starting milestone 4 in the same mental session as closing milestone 3 mixes two cost domains. Zero code changes this session. Session 22 + 23 commit remains at HEAD. Coverage 14/37 unchanged. Test suite 52 registered unchanged. Session 25 starts milestone 4 as a new project.
+
+Session 23 closed 2026-10-26: Wall B closed with `ParcelRewriter_TryRewriteStorageRequest` — intercepts `IStorageManager` transact prelude on the caller thread, rewrites `callingPackage` string16 from `"com.viber.voip"` (14 chars) to `"com.ims134.hookengine"` (21 chars), grows parcel by +12 bytes, forwards. AMS accepts (uid 10428 owns `com.ims134.hookengine`). Hook installed at `GuestHost.load` entry before guest boot. Verified 3 runs: `STORAGE rewrite fired: code=30 userId=0 size=132->144 delta=12` present each time; no `IO_POOL`/`TM:MESSAGES` crash, no `FATAL EXCEPTION`. Milestone 3 verified by 60s probe: no crash in 60s, two background IPackageManager IPC calls observed (code 3 at 3.5s post-boot, code 36 at 60s post-boot) — Viber Engine threads alive and doing work. Coverage 14/37 (unchanged — integration depth). Test suite unchanged: 52 registered = 49 pass + 3 ignored.
 
 Session 22 closed 2026-10-26: Wall A resolved. Viber's `ViberApplication.onCreate` throws `IllegalArgumentException: unknown component class ii` at line 65 (inside `gu4.u`, a class-name registry lookup, not a PackageManager call). Providers had run 14/15 despite the throw — proof the DI (`bb2`) is set at lines 1-64. Fix: swallow the exception in `nativeCreateGuest` with correct JNI semantics — capture throwable ref, `ExceptionClear()`, THEN `FindClass` (previous attempt called `FindClass` with pending exception → JNI abort → SIGABRT). Providers went 8/15 → 14/15 with `Process.setArgV0(guestPkg)` (reflection, hidden on API 37 direct lookup) and `PatchActivityThreadState` (patches `mBoundApplication.processName`, `mBoundApplication.appInfo`, `mInitialApplication` after `makeApplication`). LoadedApk path works with `mClassLoader`/`mResources` pre-populated before `makeApplication`, skipping `canAccessDataDir` → `NETWORK_STACK` wall. Wall B surfaced: `IStorageManager.getVolumeList` rejects `callingPackage="com.viber.voip"` because our UID 10428 doesn't own that package.
 
-Session 16 closed 2026-10-25: `:remote` `startService` flake investigated. Root cause is AMS state — process is marked bad before our first `startService` at IntegrationTest.kt:21 — not a code crash. Passing runs show `:remote` starting cleanly (`attachBaseContext` → `onCreate` → `onStartCommand` → cleanup kill; no FATAL, no signal, no ScopedCheck crash). Failure rate observed across Sessions 13–16: 3 pass / 2 fail. Mitigation: retry-with-backoff (3 attempts, 2s/4s) in `IntegrationTest.selftestReportIsComplete`. Retry recovery path unverified — only the green path executed post-mitigation (`OK (49 tests)`, no `startService attempt` log lines). Not a root-cause fix. Coverage 14/90, unchanged.
+Session 16 closed 2026-10-25: `:remote` `startService` flake investigated. Root cause is AMS state — process is marked bad before our first `startService` at IntegrationTest.kt:21 — not a code crash. Passing runs show `:remote` starting cleanly (`attachBaseContext` → `onCreate` → `onStartCommand` → cleanup kill; no FATAL, no signal, no ScopedCheck crash). Failure rate observed across Sessions 13–16: 3 pass / 2 fail. Mitigation: retry-with-backoff (3 attempts, 2s/4s) in `IntegrationTest.selftestReportIsComplete`. Retry recovery path unverified — only the green path executed post-mitigation. Coverage 14/90, unchanged.
 
 Session 15 closed 2026-10-25: HANDLEJHMETHOD_DECOMP_SPEC.md added at repo root. ProxyBridge.cpp header points at it. InlineHooker.cpp gained `g_iihe_quiet`; RunRegressionBug4 gates it around the 1000-cycle stress loop (eliminates ~15,000 `IIHE(bug4):` log lines). AntiDetectionE2ETest three connect tests `@Ignore`'d (Rule 12 honesty; were passing-by-skip on loopback EPERM). 49 pass, 3 ignored, 0 fail. Coverage 14/90.
 
-Session 14 closed 2026-10-25: two real bugs fixed from Claude code review of Session 13's nativeCNVM: (1) nativeCNVM arity guard read `strlen(sig)` AFTER `ReleaseStringUTFChars` — UB on every call, latent UAF, fixed by capturing sigLen before release; (2) `g_rewrite_effective_count` incremented unconditionally after the swap block — counted rewriter throws and zero-length results as "effective", fixed by gating on a local `swapped` bool. `ProxyBridgeSurfaceTest` observed running for the first time in `am instrument -r` output (Session 13's "52 tests" was aspirational; actual pre-Session-14 measurement was 48). `IntegrationTest.selftestReportIsComplete` passed — `:remote` process bad failure from Session 13 NOT reproduced. `rewriteEffective=3` matches the three "swapped reply" log lines exactly. 52 tests, 0 failed. Coverage 14/90 verified (not claimed).
+Session 14 closed 2026-10-25: two real bugs fixed from Claude code review of Session 13's nativeCNVM: (1) nativeCNVM arity guard read `strlen(sig)` AFTER `ReleaseStringUTFChars` — UB, latent UAF, fixed by capturing sigLen before release; (2) `g_rewrite_effective_count` incremented unconditionally after the swap block — counted rewriter throws and zero-length results as "effective", fixed by gating on local `swapped` bool. `ProxyBridgeSurfaceTest` observed running for the first time in `am instrument -r` output. 52 tests, 0 failed. Coverage 14/90 verified.
 
-Session 13 closed 2026-10-25: nativeCNVM decomp-verified vs sub_30BF7C + sub_30C238; 4 tests green in ProxyBridgeSurfaceTest. handleJHMethod DEFERRED (no sub_29E168 decomp). Session 13 claimed 52 tests / 51 pass / 1 fail; the actual measurement was 48 tests running and the ProxyBridgeSurfaceTest class not in the -r output — Session 14 corrected this.
+Session 13 closed 2026-10-25: nativeCNVM decomp-verified vs sub_30BF7C + sub_30C238; 4 tests green in ProxyBridgeSurfaceTest. handleJHMethod DEFERRED (no sub_29E168 decomp). Session 13 claimed 52 tests / 51 pass / 1 fail; actual measurement was 48 running, Session 14 corrected this.
 
 Session 12 closed 2026-10-24: Q1 flags-check measured (code 36 only matters for signature-flag callers), code-36 byte-rewrite deferred, exception-path test added, AidlProbe narrowed. 48 tests green. Coverage 13/90 (unchanged — pivot to handleJHMethod next).
 
 Session 11 closed 2026-10-24: tnFIN rewriter exception safety, drainCodes stub fix, code-36 reply captured + hex-dumped. 47 tests green. Coverage 13/90 (unchanged — code 36 not delivered).
 
 Completed:
-- Registry finding DISPROVED — RegistryCount() counts inline hooks, regDuring=1 observed. Assertion tightened in both directions.
-- §7.1 — 23 sites migrated to testreport::Report, logcat byte-identical.
-- §7.2 — test_suite.cpp dispatch, per-item harness runners extracted. Logcat byte-identical.
+- Registry finding DISPROVED — RegistryCount() counts inline hooks, regDuring=1 observed.
+- §7.1 — 23 sites migrated to testreport::Report.
+- §7.2 — test_suite.cpp dispatch.
 - §7.3 — JNI bridge (NativeTestBridge.runSuite / uninstallAll / setItem4Paths).
 - §7.4 — NativeTestBridge.kt Kotlin object.
-- §7.5 — NativeItemTest.kt parameterized runner. 5/5 green on device via am instrument.
-- §7.6 — regression suites bug1–bug5. 10 tests green.
-- §7.7 — selftest.txt file channel + IntegrationTest.kt. 11 tests green.
+- §7.5 — NativeItemTest.kt parameterized runner.
+- §7.6 — regression suites bug1–bug5.
+- §7.7 — selftest.txt file channel + IntegrationTest.kt.
 - §7.9 — build-only CI + README limitations. Item 7 CLOSED.
-- Phase 2 — 40 per-function reloc cases. 12 tests green.
-- Mission #1 Phase A: tnFIN mechanism (Session 8), rewriter algorithm (Session 9), production delivery for code 3 (Session 10), code-36 dispatch confirmed + reply format captured (Session 11).
-- Mission #1 Phase A: nativeCNVM decomp-verified + tested (Sessions 13–14). Session 14 fixed two real bugs in the port.
-- Session 14: two-bug fix (nativeCNVM UAF, g_rewrite_effective_count gate) verified in full `am instrument` run.
-- Session 15: HANDLEJHMETHOD_DECOMP_SPEC.md ships. handleJHMethod implementation now becomes a mechanical edit when sub_29E168 decomp lands.
-- Session 16: `:remote` flake characterized as AMS state (not a code crash); retry-with-backoff mitigation added; pass line confirmed as `OK (N tests)` (my Session 15 "run finished: is authoritative" claim was wrong — both are valid; see Device-test-signal section).
-- Session 22: Wall A RESOLVED — Viber DI `unknown component class ii` swallowed via JNI-safe exception capture. `Process.setArgV0` reflection fallback works. `PatchActivityThreadState` patches mBoundApplication.processName + appInfo + mInitialApplication. Providers 8/15 → 14/15. LoadedApk path with mClassLoader/mResources pre-set skips `NETWORK_STACK` wall.
-- Session 23: Wall B CLOSED — `ParcelRewriter_TryRewriteStorageRequest` intercepts `IStorageManager` transact prelude on caller thread, rewrites callingPackage string16 `com.viber.voip` → `com.ims134.hookengine` (+12 byte delta), AMS accepts. Hook installed at `GuestHost.load` entry before guest boot. 3 runs verified: `STORAGE rewrite fired: code=30 size=132->144 delta=12`. No IO_POOL/TM:MESSAGES crash. Milestone 3 verified via 60s probe: clean, active background IPC from Viber Engine threads.
-- Session 24: milestone 3 accepted, "Viber boot" chapter closed (Option 1). Zero code change. Scoping decision only.
+- Phase 2 — 40 per-function reloc cases.
+- Mission #1 Phase A: tnFIN mechanism (Session 8), rewriter algorithm (Session 9), production delivery for code 3 (Session 10), code-36 dispatch confirmed (Session 11).
+- Mission #1 Phase A: nativeCNVM decomp-verified + tested (Sessions 13–14).
+- Session 15: HANDLEJHMETHOD_DECOMP_SPEC.md ships.
+- Session 16: `:remote` flake characterized as AMS state; retry-with-backoff mitigation.
+- Session 22: Wall A RESOLVED — Viber DI `unknown component class ii` swallowed via JNI-safe exception capture. Providers 8/15 → 14/15.
+- Session 23: Wall B CLOSED — `ParcelRewriter_TryRewriteStorageRequest` for IStorageManager callingPackage. 3 runs verified. Milestone 3 verified.
+- Session 24: milestone 3 accepted, "Viber boot" chapter closed. Zero code change.
+- Session 25: milestone 4 first-wall probe delivered. Wall C1 named (Activity.<init> requires Looper).
+- Session 26: Wall C1 closed (post-to-main fix). Wall C2 named (Settings ContentProvider caller identity).
+- Session 27: Wall C2 diagnostic dump captured. Layout off by 4 bytes. Safe no-op.
+- Session 28: Wall C2 CLOSED (IContentProvider AttributionSource rewrite verified). Wall C3 named (MIUI ProcessManager kernel-uid rejection). Milestone 4: SplashActivity `onCreate`+`onStart`+`onResume` all succeeded.
 
 Pending:
 - Mission #1 Phase A: tnFIN code 36 byte-rewrite (Session 12+, deferred pending target need or decomp).
 - Mission #1 Phase A: handleJHMethod — BLOCKED on sub_29E168 decomp. HANDLEJHMETHOD_DECOMP_SPEC.md specifies the 7 questions whose answers unblock implementation.
 - Mission #1 Phase A: nativeInit full config.
 - Mission #1 Phase A: nativeOnLoad full DEX extract.
-- `IntegrationTest.selftestReportIsComplete` retry recovery: not yet observed firing (no flake caught post-mitigation). Observed pattern 3 pass / 2 fail (Sessions 13–16). If a future run logs `startService attempt N failed`, that is the verification signal.
-- Session 25 milestone 4 vs milestone 5 project pick: open. Operator decides at Session 25 open. Milestone 4 (Activity lifecycle, ~3–6 weeks); milestone 5 (network/register/message, months). See Session 25 decisions below.
+- `IntegrationTest.selftestReportIsComplete` retry recovery: not yet observed firing. If a future run logs `startService attempt N failed`, that is the verification signal.
+- **Wall C3 diagnostic + conditional fix** (Session 29): determine `addMiuiApplicationThread` parcel layout; if rewritable, add third iface case; if not, document as unrewritable and defer `ProcessManagerService` server-side hook. May name a reference method port (`nativeInit`).
+- **Wall C4 probe** (Session 29): extend ActivityBootProbeTest past `onResume` into `WindowManager.addView` / `IWindowSession.addToDisplayAsUser`. Wall C4 likely third instance of Wall B/C2 pattern (extends `tnFIN` further) or new Surface/AMS category.
+- **Wall C5** (Session 30+): `ActivityTaskManager.startActivity` with spoofed ComponentName. AMS task record + launch flags + Surface render.
 
 ---
 
@@ -78,9 +99,9 @@ No C++ counters added. The proposed g_inline_install_count / g_inline_uninstall_
 
 Discovered 2026-10-23. Three layers, each independently capable of returning green on failure:
 
-1. :app:connectedDebugAndroidTest — fails to install the test APK on this HyperOS device with SecurityException: INSTALL_GRANT_RUNTIME_PERMISSIONS (UTP-injected flag, refused by MIUI PackageInstallerService), logs AndroidTestRunner failed, and then reports BUILD SUCCESSFUL. Zero tests ran; the task returned green.
+1. `:app:connectedDebugAndroidTest` — fails to install the test APK on this HyperOS device with `SecurityException: INSTALL_GRANT_RUNTIME_PERMISSIONS` (UTP-injected flag, refused by MIUI PackageInstallerService), logs `AndroidTestRunner failed`, and then reports `BUILD SUCCESSFUL`. Zero tests ran; the task returned green.
 
-2. am instrument -w — returns INSTRUMENTATION_CODE: -1 (Activity.RESULT_OK) on both success and failure. Tests run: 6, Failures: 1 was observed with INSTRUMENTATION_CODE: -1. Exit code is 0 either way.
+2. `am instrument -w` — returns `INSTRUMENTATION_CODE: -1` (Activity.RESULT_OK) on both success and failure. `Tests run: 6, Failures: 1` was observed with `INSTRUMENTATION_CODE: -1`. Exit code is 0 either way.
 
 3. Consequence: no automated signal from the device is trustworthy as a CI gate. Reliable gate is parsing output:
 - **Pass:** `OK (N tests)` (standard AndroidJUnitRunner success line)
@@ -88,7 +109,7 @@ Discovered 2026-10-23. Three layers, each independently capable of returning gre
 - **Fail:** `FAILURES!!!` followed by `Tests run: N, Failures: M` (standard JUnit failure line; the `OK` and `run finished` lines do NOT appear)
 - **Additional fail signal:** `INSTRUMENTATION_STATUS_CODE: -2` per-test
 
-**Session 16 correction:** Session 15's claim that `run finished:` is the authoritative pass line and `OK (N tests)` is unreliable was wrong. Both indicate "all passed"; the failing run does not emit either. `run finished:` is a custom line from a wrapper listener and appears only on green runs in this build. `OK (N tests)` is the standard AndroidJUnitRunner line and also appears only on green runs. Both are trustworthy. `INSTRUMENTATION_CODE: -1` remains untrustworthy in isolation — it fires for both success and failure — so use `OK (N tests)` or `FAILURES!!!` for pass/fail, not `INSTRUMENTATION_CODE`.
+**Session 16 correction:** Both `OK (N tests)` and `run finished:` indicate all-pass; the failing run emits neither. `INSTRUMENTATION_CODE: -1` remains untrustworthy in isolation.
 
 Verified device workflow (only method that works on this device):
 
@@ -97,27 +118,20 @@ Verified device workflow (only method that works on this device):
     adb logcat -c
     adb shell am instrument -w -r com.ims134.hookengine.test/androidx.test.runner.AndroidJUnitRunner
 
-adb install succeeds where UTP does not — the security exception is specific to the UTP install path, not to pm install.
+adb install succeeds where UTP does not — the security exception is specific to the UTP install path, not to pm install. CI (§7.9) stays build-only. README must document this.
 
-CI (§7.9) stays build-only. README must document this under the test-suite section, not as a footnote.
-
-Session 14 addendum: the Session 13 baseline `OK (48 tests)` was not a full measurement; Session 14's `run finished: 52 tests, 0 failed, 0 ignored` was the first run in which `ProxyBridgeSurfaceTest` appeared in the -r class list. Session 15's `run finished: 49 tests, 0 failed, 3 ignored` is 49+3 = 52 total registered. Session 16's `OK (49 tests)` confirms 49 running (3 `@Ignore`'d tests not counted in the JUnit `Tests run:` total).
+Session 14 addendum: the Session 13 baseline `OK (48 tests)` was not a full measurement; Session 14's `run finished: 52 tests, 0 failed, 0 ignored` was the first run in which `ProxyBridgeSurfaceTest` appeared. Session 15's `run finished: 49 tests, 0 failed, 3 ignored` is 49+3 = 52 total registered. Session 16's `OK (49 tests)` confirms 49 running (3 `@Ignore`'d tests not counted in JUnit `Tests run:` total).
 
 ---
 
 ## Known issue — RESOLVED: duplicate log blocks, not duplicate runs
 
-The suspected "two PROCESS STARTED lines and the Item 1 block appearing three times" is expected behavior:
+Suspected "two PROCESS STARTED lines and Item 1 block appearing three times" is expected:
 
-- Two PROCESS STARTED: main process + :remote process (RemoteService is declared android:process=":remote"). One line per process.
-- Three emissions of each suite: three distinct emission points, fired once each per run —
-    1. per-test testreport::Report() inside the loop in test_itemN.cpp;
-    2. LOGD("%s", out.str().c_str()) at the end of the same function;
-    3. Kotlin Log.d("DualCore", runItemNTests()) in RemoteService.onStartCommand.
+- Two PROCESS STARTED: main + :remote processes. One line per process.
+- Three emissions: per-test `testreport::Report()`, `LOGD("%s", out.str())` at function end, `Log.d("DualCore", runItemNTests())` in `RemoteService.onStartCommand`.
 
-Same single run. The suites execute once. Closed.
-
-Item 7 implication: the file-based channel (§7.7) is mandatory, not optional. Logcat scraping would count 3×. RemoteService must write each line exactly once to filesDir/selftest.txt.
+Same single run. Closed. Item 7 implication: the file-based channel (§7.7) is mandatory. Logcat scraping would count 3×.
 
 ---
 
@@ -133,7 +147,7 @@ Item 7 implication: the file-based channel (§7.7) is mandatory, not optional. L
 | Part 7 | "27 tests" → 23 tests (6+5+3+4+5) | applied |
 | Part 8 README | Item 3 proof: fake=25000 / fake=68934 | applied |
 | Part 13 | Summary: item 6 verified, item 7 in progress | applied |
-| RemoteService.kt | Service started. (v27 — both fields) → (v29) | applied |
+| RemoteService.kt | Service started. (v27) → (v29) | applied |
 | Known issue | Duplicate log blocks — RESOLVED | applied |
 
 ---
@@ -142,71 +156,27 @@ Item 7 implication: the file-based channel (§7.7) is mandatory, not optional. L
 
 Design decisions:
 
-1. File-based result channel, not logcat scraping (§7.7). RemoteService writes filesDir/selftest.txt; the integration test polls the file. Logcat stays as the human workflow. Required because logcat triple-counts.
-2. C++ stays in C++. Primitives (ReadPageProt, AllocateMemoryNear, ShouldHookDlopen) live natively. Regression checks for Bugs 1, 2, 4, 5 are C++. Bug 3 is Kotlin-side (§7.6).
-3. Aggregate runner with per-test reporting, not one JUnit method per C++ function. 23 individually-reported cases is the deliverable.
+1. File-based result channel, not logcat scraping (§7.7).
+2. C++ stays in C++. Primitives (ReadPageProt, AllocateMemoryNear, ShouldHookDlopen) live natively.
+3. Aggregate runner with per-test reporting, not one JUnit method per C++ function.
 
 ### §7.1 — CLOSED 2026-10-23
-
-app/src/main/cpp/TestReport.h added. All 23 [PASS]/[FAIL] sites in test_item1.cpp through test_item5.cpp migrated from LOGD to testreport::Report(name, pass, detail). Report function prints to logcat via ANDROID_LOG_DEBUG (same level as LOGD, filters unchanged) and appends to an in-memory std::vector<Line>.
-
-Verified on device: logcat output byte-identical to pre-refactor run — same 23 lines, same field order, same 3-emission pattern per suite.
-
-Drain() renamed to Snapshot() — the function does not clear, so the name reflects behavior.
+app/src/main/cpp/TestReport.h added. All 23 [PASS]/[FAIL] sites migrated. Logcat output byte-identical.
 
 ### §7.2 — CLOSED 2026-10-23
-
-test_suite.h / test_suite.cpp added. RunTestSuite(env, name) dispatches to RunItem1ForHarness() … RunItem5ForHarness(env).
-
-Each test_itemN.cpp refactored: the JNI wrapper runItemNTests now calls a new static int RunItemNInternal(std::string& out) shared function. The harness path calls RunItemNInternal with an ignored out-param. JNI path unchanged at runtime.
-
-CMakeLists.txt extended with test_suite.cpp.
-
-RunTestSuite is dead code in this commit — verified by logcat remaining byte-identical.
-
-RunItem4ForHarness and RunItem5ForHarness needed plumbing decided in §7.5: item4 needs writable paths, item5 needs a reflected Method object.
+test_suite.h / test_suite.cpp added. `RunTestSuite(env, name)` dispatches. Logcat byte-identical.
 
 ### §7.3 — CLOSED 2026-10-23
-
-native-lib.cpp gained three JNI exports:
-- Java_com_ims134_hookengine_NativeTestBridge_runSuite(jstring) → array of "PASS|name|detail" or "FAIL|name|detail"
-- Java_com_ims134_hookengine_NativeTestBridge_uninstallAll() → UninstallAllHooks()
-- Java_com_ims134_hookengine_NativeTestBridge_setItem4Paths(jstring, jstring) → forwarded to SetItem4Paths in test_item4.cpp
-
-Plus extern "C" int UninstallAllHooks(); forward declaration.
+native-lib.cpp gained three JNI exports: `runSuite`, `uninstallAll`, `setItem4Paths`.
 
 ### §7.4 — CLOSED 2026-10-23
-
-app/src/androidTest/java/com/ims134/hookengine/NativeTestBridge.kt — Kotlin object with System.loadLibrary("hookengine") and three external funs matching the §7.3 exports.
+NativeTestBridge.kt Kotlin object.
 
 ### §7.5 — CLOSED 2026-10-23
-
-app/src/androidTest/java/com/ims134/hookengine/NativeItemTest.kt — parameterized runner, 5 cases (item1..item5, expectedMin = 6/5/3/4/5). Per-case assertions:
-1. lines.isNotEmpty()
-2. lines.size >= expectedMin
-3. no line starts with FAIL|
-
-@Before calls uninstallAll and setItem4Paths with targetContext.cacheDir/item4_real and .../item4_fake. @After calls uninstallAll.
-
-Device verification: adb shell am instrument -w -r com.ims134.hookengine.test/androidx.test.runner.AndroidJUnitRunner → numtests=5, all suites INSTRUMENTATION_STATUS_CODE: 0, final OK (5 tests).
-
-Findings during §7.5:
-
-1. mprotect_failure over-specified the refusal code. On the instrumentation process, the target mmap landed at 0x4034b50 (dense address space), and AllocateMemoryNear failed before mprotect was reached: HOOK_ALLOC_FAILED (6) instead of HOOK_MPROTECT_FAILED (5). Test now accepts both. Invariant tested is "install refused, target bytes unchanged, registry unchanged", not the specific refusal code.
-
-2. ExampleInstrumentedTest template was in the test APK, inflating numtests=6. Deleted.
-
-3. INSTRUMENTATION_CODE: -1 returns on both success and failure. See "Device test signal is triple-unreliable".
-
-Not verified by §7.5: logcat format vs. app path ([PASS] lines identical), absence of === Item N tests === headers in harness output.
+NativeItemTest.kt parameterized runner, 5 cases. Device: `OK (5 tests)`.
 
 ### §7.8 — CLOSED 2026-10-23
-
-app/build.gradle.kts:
-- testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-- testBuildType "debug"
-- ndk { abiFilters += "arm64-v8a" } — required: test files contain ARM64 inline assembly and do not compile for x86/x86_64/armv7.
-- androidTestImplementation for androidx.test.ext:junit:1.2.1, androidx.test:runner:1.6.2, androidx.test:rules:1.6.1
+app/build.gradle.kts: testInstrumentationRunner, testBuildType, ndk arm64-v8a filter, androidTestImplementation.
 
 ---
 
@@ -219,16 +189,15 @@ app/build.gradle.kts:
 | SetUninstallGraceMs(long) exists | yes, InlineHooker.cpp |
 | RunItemNTests() callable | refactored to shared RunItemNInternal in §7.2 |
 | Native lib name is hookengine | yes |
-| installPmSignatureSpoof callable from test context | NO — private to RemoteService. Bug 3 regression (§7.6) needed extraction. |
+| installPmSignatureSpoof callable from test context | NO — private to RemoteService. |
 | RegistryCount() excludes inline hooks | DISPROVED — counts them |
-| InstallInlineHookEx accepts `nullptr` name safely | YES — LOGD call sites guard `name ? name : "?"`; snprintf guarded by `if (name)` (Session 15 verified) |
+| InstallInlineHookEx accepts `nullptr` name safely | YES — guarded (Session 15 verified) |
 
 ---
 
 ## Item 7 — CLOSED 2026-10-23
 
-Final device state: `am instrument -w -r` → `numtests=11`, `OK (11 tests)`.
-33 underlying assertions (23 item + 8 regression + 1 integration + 1 Kotlin bug3), 0 failures.
+Final device state: `am instrument -w -r` → `numtests=11`, `OK (11 tests)`. 33 underlying assertions, 0 failures.
 
 Files added across Item 7:
 - `app/src/main/cpp/TestReport.h`
@@ -245,112 +214,56 @@ Files added across Item 7:
 
 ## Phase 2 — per-function reloc tests — CLOSED 2026-10-23
 
-40 cases across `ClassifyInsn` (20), `EncodeBranch` (8),
-`EmitRelocated` (12). Device: `am instrument -w -r` → `numtests=12`,
-`OK (12 tests)`, all reloc cases pass.
+40 cases across `ClassifyInsn` (20), `EncodeBranch` (8), `EmitRelocated` (12). Device: `numtests=12`, `OK (12 tests)`.
 
-Coverage beyond Item 1:
-- `ClassifyInsn` — 20 canonical/boundary words, raw roundtrip
-- `EncodeBranch` — forward/backward/self, B vs BL opcode,
-  unaligned rejection, ±128MB edge (in and out), decode roundtrip
-- `EmitRelocated` — NORMAL cap=0/1, B negative offset, BL 3-instruction
-  seq (STP/BL/LDP) + cap=2 rejection, ADRP negative page, ADR short
-  (n=1), ADR long fallback to ADRP+ADD (n=2), all four
-  unsupported-kind rejections (B.cond, CBZ, TBZ, LDR-literal)
-
-Two test bugs found and fixed while writing:
-1. `EncodeBranch` "edge in" test used `+(1LL<<27)` which is out of
-   range — max valid forward is `2^27 - 4`. Fixed.
-2. `make_adr(1, 0x200000)` overflowed the 21-bit signed field —
-   encoded `ADR x1, +0`, so EmitRelocated produced `n=1` not `n=2`.
-   Fixed with `make_adr(1, 0x80000)` and `new_pc=0x400000`.
-
-Both are test-only; the underlying `arm64_reloc.cpp` is unchanged and
-still passes all original Item 1 cases.
+Two test bugs found and fixed: `+(1LL<<27)` out-of-range in "edge in"; `make_adr(1, 0x200000)` overflow producing wrong `n`.
 
 ---
 
 ## API 37 finding — Process.MY_UID / MY_PID do not exist — 2026-10-23
 
-Verified on device: `GetStaticFieldID(Process, "MY_UID", "I")` and the same
-for `MY_PID` both return null + `NoSuchFieldError` on API 37.
-`Process.myUid()` / `Process.myPid()` are fast-JNI natives; they do not read
-any static field. The Batch 2a plan ("spoof MY_UID/MY_PID reflectively and
-verify Process.myUid() returns 10000") is therefore a no-op on this API.
+`GetStaticFieldID(Process, "MY_UID", "I")` returns null + `NoSuchFieldError` on API 37. `Process.myUid()` / `Process.myPid()` are fast-JNI natives; no static field.
 
-What works on API 37:
-- `Binder.getCallingUid()` ArtMethod hook          (Item 5 + ProcessHooksTest)
-- `libc::getpid` inline hook                        (test_process_hooks Test 4)
-- `getuid/geteuid/getgid/getegid` GOT hooks in libjavacore / libopenjdk
-- `execve/execv/execvp/system/ptrace/kill` inline hooks
+What works: `Binder.getCallingUid()` ArtMethod hook, `libc::getpid` inline hook, `getuid/geteuid/getgid/getegid` GOT hooks, `execve/execv/execvp/system/ptrace/kill` inline hooks.
 
-What does NOT work:
-- Field spoofing of Process.MY_UID / MY_PID (fields don't exist)
-- ArtMethod hook of Process.myUid / myPid / myTid / myTgid (fast-JNI tokens)
+What does NOT work: field spoofing of MY_UID/MY_PID (fields don't exist), ArtMethod hook of myUid/myPid/myTid/myTgid (fast-JNI tokens).
 
-Consequences:
-- The `Process.myPpid` Java hook is attempted but often not installed because
-  `myPpid` is also fast-JNI (installed count is 8, not 9, on API 37 — the
-  test accepts this).
-- Batch 2a as described in the original handoff should be retired. To spoof
-  UID as seen by the target app, choose the entry point it actually uses:
-  (a) `Binder.getCallingUid()`  → already covered by Item 5
-  (b) `Process.myUid()`         → needs native `getuid` hook (already in
-  Hooks.cpp as Fake_getuid, gated on
-  g_systemCallDepth)
-  (c) direct `getuid` syscall   → out of scope (needs seccomp / kernel)
+Consequence: `Process.myPpid` hook often not installed (fast-JNI, count 8 not 9, test accepts). Batch 2a as described should be retired. To spoof UID as seen by the target: (a) `Binder.getCallingUid()` — covered by Item 5, (b) `Process.myUid()` — needs native `getuid` hook (already in Hooks.cpp), (c) direct `getuid` syscall — out of scope.
 
 ---
 
 ## Test suite status — 52 registered (49 pass + 3 ignored), 0 fail
 
 Classes (Session 16 measurement, `OK (49 tests)`):
-- IntegrationTest              (1)   selftest file channel; retry-with-backoff (Session 16) — GREEN last run, retry path unverified
-- NativeItemTest               (5)   items 1–5 — GREEN
-- ProcessHooksTest             (4)   allProcessHooksPass,
-  spoofProcessStaticsApi37State,
-  processMyUidIsNative,
-  doesFrameworkSeeNativeHook — GREEN
-- RegressionTest               (5)   bug1–bug5 — GREEN
-- RelocTest                    (1)   40 per-function reloc cases — GREEN
-- ProxyBridgeSurfaceTest       (4)   nativeCNVM* — GREEN (first observed running in -r at Session 14)
-- AntiDetectionTest            (1)   allAntiDetectionTestsPass — GREEN
-- AntiDetectionE2ETest         (4)   javaFileHidingFiresHook GREEN; three connect tests @Ignore'd (loopback bind EPERM on API 37)
-- PmSpoofTest                  (4)   — GREEN
-- ClassLoaderBridgeTest        (3)   — GREEN
-- ClassLoaderProbeTest         (1)   — diagnostic
-- DualApplicationTest          (2)   — GREEN
-- BinderTransactE2ETest        (9)   — GREEN
-- BinderTransactHookTest       (2)   — GREEN
-- BinderTransactProbeTest      (1)   — diagnostic
-- BinderProbeTest              (1)   — diagnostic
-- AidlCodeProbeTest            (1)   — diagnostic
-- Session11Code36ReplyTest     (1)   — diagnostic
-- Session11ProbeTest           (2)   — diagnostic
-- GuestLoadTest                (1)   — outcome probe; Rule-12-compliant
+- IntegrationTest (1) — GREEN
+- NativeItemTest (5) — GREEN
+- ProcessHooksTest (4) — GREEN
+- RegressionTest (5) — GREEN
+- RelocTest (1) — GREEN
+- ProxyBridgeSurfaceTest (4) — GREEN
+- AntiDetectionTest (1) — GREEN
+- AntiDetectionE2ETest (4) — `javaFileHidingFiresHook` GREEN, three connect tests `@Ignore`'d
+- PmSpoofTest (4) — GREEN
+- ClassLoaderBridgeTest (3) — GREEN
+- ClassLoaderProbeTest (1) — diagnostic
+- DualApplicationTest (2) — GREEN
+- BinderTransactE2ETest (9) — GREEN
+- BinderTransactHookTest (2) — GREEN
+- BinderTransactProbeTest (1) — diagnostic
+- BinderProbeTest (1) — diagnostic
+- AidlCodeProbeTest (1) — diagnostic
+- Session11Code36ReplyTest (1) — diagnostic
+- Session11ProbeTest (2) — diagnostic
+- GuestLoadTest (1) — outcome probe; Rule-12-compliant
+- ActivityBootProbeTest (1) — milestone 4 probe; Rule-12-compliant
 
 Total 49 running + 3 ignored = 52 registered. 0 failed.
-
-Underlying assertions: 33+ (items) + 9 (process_hooks) + 3×bug4 + 3×bug5 +
-1×bug1 + 1×bug2 + 40 reloc + 4 nativeCNVM + … ≈ 90+ PASS lines, 0 FAIL.
 
 ---
 
 ## PmSpoof filter delivered; hidden API bypass via thread-attached reflection
 
-Two separate fixes:
-
-1. JavaHook gate: CheckHookCapability() now called inside JavaHookInstall.
-   Prior code only protected HookJavaMethod; ProcessHooks.cpp called
-   JavaHookInstall directly and would patch ArtMethod offset 24 blind on
-   any ART build outside [37,37].
-
-2. Hidden API bypass: Class.getDeclaredField / getDeclaredMethod calls
-   issued from an AttachCurrentThread'ed thread bypass the hidden-API
-   caller-domain check. Modeled on org.chickenhook.restrictionbypass.
-   Resolves BaseParceledListSlice.mList, enabling PmSpoof list filtering
-   to read, filter, and write back the item list without parcel
-   marshalling, Unsafe offsets, or CREATOR reflection.
+Two fixes: (1) `CheckHookCapability()` called inside `JavaHookInstall` (previously only `HookJavaMethod` was gated). (2) `Class.getDeclaredField` / `getDeclaredMethod` from `AttachCurrentThread`'d thread bypasses hidden-API caller-domain check. Resolves `BaseParceledListSlice.mList`, enabling PmSpoof list filtering.
 
 Test suite: 21/21 green. PmSpoof 4/4. Process hooks 9/9.
 
@@ -358,54 +271,11 @@ Test suite: 21/21 green. PmSpoof 4/4. Process hooks 9/9.
 
 ## Batch 2c — DEFERRED pending design decision — 2026-10-23
 
-Probe results on API 37 / HyperOS (ClassLoaderProbeTest):
+Probe results on API 37 / HyperOS (`ClassLoaderProbeTest`): every class-loading entry point is a Java method. `JavaHookInstall` cannot hook any of them. Reference NativeEngine doesn't hook loadClass either — it caches `DexFile.openDexFileNative` (DEX-file-swapping, different architecture).
 
-    DexFile.loadClassBinaryName(String, ClassLoader)   NOT FOUND
-    DexFile.loadClass(String, ClassLoader)             native=false public
-    ClassLoader.loadClass(String)                      native=false public
-    ClassLoader.loadClass(String, boolean)             native=false protected
-    ClassLoader.findClass(String)                      native=false protected
-    BaseDexClassLoader.findClass(String)               native=false protected
+Three viable paths: (1) Java proxy on guest ClassLoader — high cost, fragile; (2) DEX-file-swapping via openDexFileNative hook — very high cost, matches reference; (3) Rely on guest/host classloader compatibility — zero cost, verify at integration time.
 
-Conclusion: **every class-loading entry point is a Java method.**
-`JavaHookInstall` (which only replaces `ArtMethod.data_` = JNI entry,
-offset 24) cannot hook any of them. `ClassLoaderHooks.cpp` as
-originally planned is impossible.
-
-The reference NativeEngine does NOT hook loadClass either. It caches
-`DexFile.openDexFileNative` (a real native method) — that's DEX-file-
-swapping, where merged/prepended DEX files make `loadClass` succeed
-naturally. That's a different architecture, not a hook.
-
-### Decision required before any 2c code
-
-Three viable paths, all with different cost/benefit:
-
-1. **Java proxy on guest ClassLoader instance** — wrap the guest's
-   BaseDexClassLoader with a subclass that falls through to the host
-   classloader on ClassNotFoundException. Requires subclassing a
-   concrete class (impossible via Proxy), or bytecode manipulation
-   of the guest's existing classloader. **Cost: high. Fragile.**
-
-2. **DEX-file-swapping via openDexFileNative hook** — intercept DEX
-   open, return a merged DEX that includes both guest and host DEX.
-   Matches the reference engine. **Cost: very high** (build merged
-   DEX at runtime, multidex handling, pathList swap via hidden API).
-   Delivers the correct semantics.
-
-3. **Rely on guest/host classloader compatibility** — if DualHost
-   already loads host and guest DEX in the same classloader chain,
-   Viber's `loadClass` calls may naturally find host classes.
-   **Cost: zero.** Verify at integration time whether this is needed
-   at all.
-
-**Recommendation:** path 3 first. Attempt DualHost integration, watch
-whether Viber actually fails with `ClassNotFoundException` on host
-classes. If yes, path 1. Path 2 only if path 1 proves insufficient
-in practice.
-
-Do not write ClassLoaderHooks.cpp as a JavaHookInstall target. It
-will not work.
+Recommendation: path 3 first, path 1 if needed, path 2 only if path 1 insufficient.
 
 ---
 
@@ -413,1020 +283,233 @@ will not work.
 
 ### Scope (permanent, supersedes all prior plans)
 
-Replicate the reference implementation
-`com.excelliance.kxqp.platform.ApplicationProxy` (decompiled) **completely**
-before any DualHost integration. The reference is ~90 native methods across
-11 categories. Every method must be present in our engine — either as a
-direct port, an equivalent under a different name, or (with justification)
-explicitly marked out-of-scope.
-
-**Denominator corrected to 37 in Session 20** — `JNI_OnLoad` on the
-reference shows `RegisterNatives(proxy, table, 0x25)` = 37 methods, not 90.
-The 90 figure was an early-session overcount. All coverage numbers from
-Session 20 onward use 37.
-
-**DualHost integration is BLOCKED until the reference surface is matched.**
-(Superseded Session 18 — DualHost unblocked at any coverage level. See
-Session 18 close for the actual policy.)
+Replicate `com.excelliance.kxqp.platform.ApplicationProxy` (decompiled) completely before any DualHost integration. **Denominator corrected to 37 in Session 20** — `JNI_OnLoad` shows `RegisterNatives(proxy, table, 0x25)` = 37, not 90. DualHost integration unblocked (Session 18). Reference reproduction is pull-driven: decomp a method when a real integration failure names it.
 
 ### Current coverage: 14 / 37 (~38%)
 
-Verified via `am instrument -r` in Session 14: `ProxyBridgeSurfaceTest` four tests ran green. Session 15 + 16 did not move the number. Session 22 moved it from 14 "usable methods" to "usable under real guest" but did not add ports — Wall A and Wall B were integration-depth work, not new methods. Session 23 closed Wall B; also integration-depth, not new ports. Session 24 was scoping-only. Honest no-growth on the coverage counter; large growth on the "usable" dimension.
+Verified via `am instrument -r` in Session 14. Sessions 15–28 all integration depth, no new ports. Honest no-growth on coverage counter; large growth on "usable" dimension and integration behavior.
 
 **Delivered (matches reference):**
+
 | Method | Ours | Status |
 |---|---|---|
 | `attachBaseContext` | `DualApplication.attachBaseContext` | ✅ |
 | `onCreate` | `DualApplication.onCreate` | ✅ |
-| `nativeOnLoad` | `DualApplication.cpp::nativeOnLoad` | ⚠️ Partial — records paths, doesn't extract DEX |
+| `nativeOnLoad` | `DualApplication.cpp::nativeOnLoad` | ⚠️ Partial — records paths |
 | `nativeFNLN` | `ClassLoaderBridge.installFor` | ✅ |
 | `getCallingUid` | `FakeBinderGetCallingUid` | ✅ |
-| `is64Bit` | Implicit (arm64-only build) | ✅ |
-| `nativeGetCpuABI` | Implicit (arm64-only build) | ✅ |
-| `tnFIN` | `BinderTransactHook` + `ParcelRewriter` + `CppParcelRewriter` | ✅ Production delivery for code 3 (getPackageInfo). Code 36 (getInstalledPackages) dispatched but byte-rewrite deferred — see Session 12 decision note. Code 36 only matters for callers passing signature flags; not observed as a target requirement. Storage interface (IStorageManager) rewrite added Session 23 — see Wall B fix. |
-| `nativeDNPO` | TracerPid filter | ⚠️ Partial — misses full ptrace detect |
-| `nativeAMRHook` | Path hide list | ⚠️ Partial — no mount spoof |
-| **`nativeCNVM`** | `ProxyBridge.nativeCNVM` + `ProxyBridge.cpp::nativeCNVM` | ✅ Decomp-verified vs sub_30BF7C + sub_30C238 (Session 13). 4 tests in `ProxyBridgeSurfaceTest`. Two-bug fix in Session 14 (UAF in arity guard, `g_rewrite_effective_count` gate). Three safe-strengthening divergences vs reference documented in ProxyBridge.cpp header. |
-| **`handleJHMethod`** | — | ⏸️ PARKED INDEFINITELY per operator (Session 18). Body in ProxyBridge.cpp remains a stub. HANDLEJHMETHOD_DECOMP_SPEC.md and the scaffolding helpers stay on disk, untouched. Reactivated only when the operator says so, or when DualHost integration produces a real failure pointing at it — and even then, only on operator approval.
+| `is64Bit` | Implicit (arm64-only) | ✅ |
+| `nativeGetCpuABI` | Implicit (arm64-only) | ✅ |
+| `tnFIN` | `BinderTransactHook` + `ParcelRewriter` + `CppParcelRewriter` | ✅ Code 3, code 36 dispatch, code 30 storage (Wall B), code 1/21 IContentProvider (Wall C2). Third iface (Wall C3, Session 29) TBD. |
+| `nativeDNPO` | TracerPid filter | ⚠️ Partial |
+| `nativeAMRHook` | Path hide list | ⚠️ Partial |
+| `nativeCNVM` | `ProxyBridge.nativeCNVM` | ✅ decomp-verified, 4 tests |
+| `handleJHMethod` | — | ⏸️ PARKED (Session 18) |
 
-**Not started (~23 methods):**
-- **`nativeInit`** (3 params — `(Ljava/lang/String;Ljava/lang/String;I)`) — full context config. Correction from Session 19+20 decomp: was mistakenly stated as 9 params in earlier notes.
-- **`nativeOnLoad`** (full DEX extract) — currently partial.
-- **tnFIN code 36 byte-rewrite** — dispatched, not rewritten (Session 11 confirmed code 36 constant; layout hypothesis captured, decomp still required).
-- **Per-signature hook family (13 methods)** — `nativeBINH`, `nativeBPNH`, `nativeCLFH`, `nativeFRNH`, `nativeFSC`, `nativeLILH`, `nativeMDRMH`, `nativeMMIORH`, `nativeNGSTHook`, `nativeNINH`, `nativeSSMH`, `nativeTSTNH`, `nativeVMRTH`.
-- **Field/method getters (~15)** — `onGIF`, `onSIF`, `getFCO`, `getFNIR`, `getFIAAR`, `getFSTAF`, `getFBI`, `getFBABAI`, `getFWM`, `nativeGDFK`, `nativeGETDFNH`, `nativeGETDFS`, `nativeGETDMUH`, `getNIDS`, `nativeGIOMP`.
-- **Anti-detection remaining (~20)** — `nativeADB`, `nativeADOI`, `nativeAURR`, `nativeASK`, `nativeALBNM`, `nativeDNPO` (full), `nativeEROT`, `nativeIMME`, `nativeSHH`, `nativeSDMD`, `nativeSDTWI`, `nativeSIOR`, `nativeUFPL`, `nativeSFU`, `nativeSGSP`, `nativeSNF`, `nativeSQHCT`, `nativeSTZ`, `nativeTTLHW`, `nativeSATSV`, `nativeDBTHL`, `nativeLNLIH`, `nativeRTIMs`, `nativeLFMH`, `nativeLFMUH`, `nativeMMPH`, `nativeDJCV`, `nativeNPX`, `nativeSPPL`.
-- **File/IO (~5)** — `nativeSFSP`, `nativeSDO`, `nativeFCSCSG`, `nativeFIOR`, `nativeFGR`.
-- **NLDS (~2)** — `nativeStartNLDS`, `nativeUpdateNLDS`.
-- **ANR/crash/debug (~13)** — `nativeSignalAnrDetectiveInit`, `onANRDumped`, `onTraceFileDumpFinished`, `onPKTECB`, `reportAppExit`, `reportAppHaveDetected`, `reportHanhuaCorrupted`, `reportHanhuaUpdate`, `reportNativeCrashInfo`, `reportNewGameStarted`, `nativeDbgCaptureLog`, `nativeDbgClientInit`, `nativeDbgServerStart`.
-- **Misc (~7)** — `nativeJH*` family (`nativeJHHJM`, `nativeJHIOJM`, `nativeJHJHC`, `nativeJHYABAH`, `nativeJHYAInit`, `nativeJHI`, `nativeJHJI`, `nativeJHANRM`).
-- **Public instance methods (~2)** — `call(int, Object[])`, `callAssistant(Context, int, Object[])`.
-- **Static init** — DEX extraction from APK-JAR with checksum + file lock.
+**Not started (~23 methods):** `nativeInit` (3 params), `nativeOnLoad` (full DEX extract), tnFIN code 36 byte-rewrite, per-signature hook family (13), field/method getters (~15), anti-detection remaining (~20), file/IO (~5), NLDS (~2), ANR/crash/debug (~13), misc (~7), public instance methods (~2), static init (DEX extraction).
+
+**Wall C3 note (Session 28 close):** Wall C3 fix (Session 29) may be the first wall since Session 14 to require a reference method port. If `miui.process.ProcessManager` check is served from `nativeInit` (3-param config) or a per-signature hook family member, the port becomes the fix target, and coverage grows for the first time in seven sessions.
 
 ### Order of attack
 
-***Phase A — Core engine (blocking everything else):**
-1. ✅ `tnFIN` — mechanism (Session 8), algorithm (Session 9), production code 3 (Session 10), code-36 dispatch confirmed (Session 11), storage interface code 30 rewrite (Session 23).
-2. ⏸️ `tnFIN` code 36 byte-rewrite — DEFERRED (Session 12). Code 36 measured irrelevant for flags=0 callers. Reopen if a target is shown to require signature-flag `getInstalledPackages`, or if decomp of `PackageInfo.readFromParcel` + `BaseParceledListSlice.readFromParcel` lands.
-3. ⚠️ `nativeCNVM` ✅ decomp-verified + tested (Session 13). Two-bug fixed Session 14.
-   `handleJHMethod` ⏸️ DEFERRED — HANDLEJHMETHOD_DECOMP_SPEC.md at repo root. Requires sub_29E168 decomp.
+**Phase A — Core engine (blocking everything else):**
+1. ✅ `tnFIN` — mechanism, algorithm, code 3, code 36 dispatch, code 30 storage, code 1/21 IContentProvider
+2. ⏸️ `tnFIN` code 36 byte-rewrite — DEFERRED (Session 12)
+3. ⚠️ `nativeCNVM` ✅; `handleJHMethod` ⏸️ DEFERRED
 4. 🔲 `nativeInit` (full config)
 5. 🔲 `nativeOnLoad` (full DEX extract, if needed)
 
-**Phase B — Java hook surface:**
-6. Per-signature hook family (13 methods)
-7. Field/method getters (~15)
-
-**Phase C — Anti-detection full suite (~20)**
-
-**Phase D — ANR / crash / debug (~13)**
-
-**Phase E — Misc + public instance methods**
+**Phase B — Java hook surface:** per-signature hook family (13), field/method getters (~15).
+**Phase C — Anti-detection full suite (~20).**
+**Phase D — ANR / crash / debug (~13).**
+**Phase E — Misc + public instance methods.**
 
 ### Rules of engagement
 
 1. **Every session opens with the mission header.** No exceptions.
-2. **DualHost integration is out of scope until Phase A complete.** When Phase A is done, re-evaluate; DualHost may still wait for Phase B. (Amended Session 18: DualHost integration unblocked; reference reproduction is pull-driven.)
-3. **Coverage number in every message.** 14/37 now. Must be higher every session, with the honest exception noted when decomp blocks the only path. Sessions 11, 12, 15, 16, 17, 22, 23, 24 all did not grow it; all stated so openly.
+2. **DualHost integration may proceed at any coverage level.** Reference reproduction is best-effort per method: a specific reference method is decomp'd and ported when a logged integration failure names it, not before.
+3. **Coverage number in every message.** 14/37 now. Must be higher every session, with the honest exception stated when decomp or integration depth blocks all growth. Sessions 11, 12, 15, 16, 17, 18, 19+20, 22, 23, 24, 25, 26, 27, 28 all did not grow it; all stated so openly.
 4. **Every method shipped must have a test.**
-5. **Do not declare a method "done" unless it matches the reference's behavior**, not just its signature.
-6. **Session-by-session commit discipline.** One method (or one logical group) per commit, tests green at every commit.
-7. **When wire format, symbol contract, or field layout is uncertain, request IDA decomp of the reference implementation before writing parse code.** Do not iterate on offset guesses. Session 9 burned three rebuild cycles on this. Session 10 confirmed it. Session 11 reinforced it. Session 15 codified it into HANDLEJHMETHOD_DECOMP_SPEC.md so handleJHMethod implementation cannot start without the answers.
-8. **On this ROM, any JNI call taking a `jobject` on a caller thread with a JIT-compiled `BinderProxy.transact` frame above it crashes under CheckJNI.** Hook at the C++ layer (`IPCThreadState::transact`) or offload JNI to a fresh attached thread.
-9. **dlsym(RTLD_DEFAULT, ...) filters `android::Parcel` primitives and `IPCThreadState::transact` on this ROM.** Use dynsym scan.
-10. **The reply parcel's `mData` buffer is read-only post-transact.** Never write into it. Copy to a fresh `malloc`'d buffer, swap the pointer.
+5. **Do not declare a method "done" unless it matches the reference's behavior.**
+6. **Session-by-session commit discipline.** Green or the session is not done.
+7. **IDA-first when wire format, symbol contract, or field layout is uncertain.** Do not iterate on offset guesses.
+8. **Any `jobject`-touching JNI call on a caller thread with a JIT BinderProxy.transact frame above it crashes on this ROM.** Hook at C++ layer or offload to fresh attached thread.
+9. **dlsym filters `android::Parcel` primitives and `IPCThreadState::transact` on this ROM.** Use dynsym scan.
+10. **Reply parcel's `mData` is read-only post-transact.** Never write into it. Swap the pointer.
 11. **Kotlin `object` instance fields are not static.** Use `@JvmStatic` accessors.
-12. **Test assertions must be able to fail.** If a test can only pass, it is not a test. Session 15 fixed three tests in AntiDetectionE2ETest that were silently passing on loopback-bind EPERM — now `@Ignore`'d with a reason pointing at real substitution coverage in AntiDetectionTest. The test count is honest: 49 pass, 3 ignored.
-13. **Handoffs deliver whole-file replacements, not line-by-line edits.** Contiguous-block replacements where whole-file is impractical (large C++ files, one-function edits) must be clearly delimited with locate-by pattern and replace-with pattern. Every handoff must include: (a) change summary per file, (b) paste content, (c) verify-before-commit checklist, (d) explicit `git add` + `git commit -m "..."` block.
-14. **Every test-run instruction must include `./gradlew :app:assembleDebug :app:assembleDebugAndroidTest` followed by `adb install -r -t` on both APKs, before any `am instrument` call.** Sessions 14, 15, 16, 17a/b/c all ran a stale pre-retry test APK because the install step was omitted — the retry mitigation claim was baked in four sessions before it was actually on the device. Discovery: `git log` showed the retry commit; `IntegrationTest.kt` on disk had `for (attempt in 1..3)` at line 32; but `am instrument`'s stack trace showed `IntegrationTest.kt:21` (pre-retry line) — proof the device APK was stale. Local build output timestamps are not proof of device state. Only `adb install` returning `Success` is.
-15. **Engine behavior is native. Kotlin/Java in app/src/main is limited to:** JNI surface declarations, DualApplication (Android-mandated entry class), and Kotlin proxies that predate the port (PmSpoof, ParcelRewriter, BinderTransactHook, ClassLoaderBridge, GuestHost harness). Integration failures that map to a reference native method (nativeInit, nativeFNLN, per-signature hook family, nativeOnLoad, handleJHMethod) must be ported natively — not patched in Kotlin. Kotlin workarounds for missing native methods are forbidden even when they "work."
+12. **Test assertions must be able to fail.** Rule 12 stands.
+13. **Handoffs deliver whole-file replacements or well-delimited contiguous-block replacements.** Every handoff must include (a) change summary per file, (b) paste content, (c) verify-before-commit checklist, (d) explicit git commit block. **Session 28 addendum: full replacement preferred over delimited edits for `PROJECT_STATE.md` when operator asks; delimited edits acceptable for large C++ files.**
+14. **Every test-run instruction must include rebuild + `adb install -r -t` of both APKs.**
+15. **Engine behavior is native.** Kotlin/Java in `app/src/main` limited to: JNI surface declarations, `DualApplication`, and pre-port Kotlin proxies (`PmSpoof`, `ParcelRewriter`, `BinderTransactHook`, `ClassLoaderBridge`, `GuestHost` harness). Test files (androidTest) may be Kotlin. Kotlin engine code additions forbidden.
 
 ---
 
 ## Session 7 — BinderProbe results + strategy correction — 2026-10-24
 
-### Mission #1 status
+`BinderProbe.cpp` scans `libbinder.so` `.dynsym`. Key findings:
 
-**Reference surface coverage: 10 / 90 (~11%).** (Historical — 90 was corrected to 37 in Session 20.)
-DualHost integration blocked until all 90 methods are present. No exceptions. (Superseded Session 18.)
+1. **`BinderProxy::transact` is NOT a C++ symbol.** Java `native` method via `RegisterNatives` in `libandroid_runtime.so`.
+2. **Reference `tnFIN` signature confirms** — JNI signature of hooked `BinderProxy.transact`.
+3. **All Parcel I/O methods exported** in `libbinder.so` (data, dataSize, dataPosition, setDataPosition, readInt32, writeInt32, readString16, etc.).
+4. **`IPCThreadState::transact` IS exported** — `_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j`.
 
-### What was probed
-
-`BinderProbe.cpp` scans `libbinder.so` `.dynsym` for the symbols we'd need
-to implement `tnFIN` (Binder transact interceptor).
-
-### Key findings
-
-1. **`BinderProxy::transact` is NOT a C++ symbol** in `libbinder.so`.
-   Neither mangling variant found. Reason: `android.os.BinderProxy.transact`
-   is a **Java `native` method**, implemented as JNI function
-   `android_os_BinderProxy_transact` in `libandroid_runtime.so`, registered
-   via `RegisterNatives`. It was never a C++ class method.
-
-2. **The reference's `tnFIN` signature confirms this:**
-   `tnFIN(Object obj, int i, Parcel parcel, Parcel parcel2, int i2)`
-   = JNI signature of a hooked `BinderProxy.transact`. The reference is
-   hooking the **Java** native method's JNI entry, not a C++ symbol.
-
-3. **All Parcel I/O methods are exported** in `libbinder.so`:
-    - `Parcel::readInt32`           `_ZNK7android6Parcel9readInt32EPi`
-    - `Parcel::writeInt32`          `_ZN7android6Parcel10writeInt32Ei`
-    - `Parcel::readString16`        `_ZNK7android6Parcel12readString16EPNS_8String16E`
-    - `Parcel::writeString16`       `_ZN7android6Parcel13writeString16EPKDsm`
-    - `Parcel::readStrongBinder`    `_ZNK7android6Parcel16readStrongBinderEPNS_2spINS_7IBinderEEE`
-    - `Parcel::writeStrongBinder`   `_ZN7android6Parcel17writeStrongBinderERKNS_2spINS_7IBinderEEE`
-    - `Parcel::data`                `_ZNK7android6Parcel4dataEv`
-    - `Parcel::dataSize`            `_ZNK7android6Parcel8dataSizeEv`
-    - `Parcel::dataPosition`        `_ZNK7android6Parcel12dataPositionEv`
-    - `Parcel::setDataPosition`     `_ZNK7android6Parcel15setDataPositionEm`
-
-   Fallback path for reading parcels if Java-side `Parcel.readInt()` ever
-   gets blocked.
-
-4. **`IPCThreadState::transact` IS exported**:
-   `_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j`
-   Signature: `(int handle, uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags)`
-   Alternative hook target if Java-level `BinderProxy.transact` proves
-   insufficient (e.g., Viber uses a native path that bypasses the Java
-   transact wrapper).
-
-### Strategy correction (superseded by Session 10)
-
-Old plan: hook `BinderProxy::transact` at C++ level — impossible, symbol
-doesn't exist.
-
-Session 7 plan: hook Java `BinderProxy.transact` via `JavaHookInstall`.
-This was implemented in Session 8, worked at the mechanism level, but
-was superseded in Session 10 because of the CheckJNI crash — see
-Session 10 pivot.
-
-### Session 7 deliverables
-
-- `BinderProbe.cpp` — symbol scanner for libbinder.so (dynsym only)
-- `BinderProbeTest.kt` — diagnostic test (deleted in Session 10)
-- 32 JUnit tests green
+Strategy correction (superseded by Session 10): hook Java `BinderProxy.transact`, then pivot to `IPCThreadState::transact`.
 
 ---
 
 ## Session 8 — tnFIN mechanism delivered — 2026-10-24
 
-### Mission #1 status: 11 / 90 (~12%)
-
-`tnFIN` (Binder transact interceptor) mechanism is live. Reference
-coverage moved 10 → 11. DualHost remains blocked until Phase A completes.
-
-### What "mechanism" means vs "full tnFIN"
-
-Delivered this session:
-- `BinderProxy.transactNative` hooked via `JavaHookInstall`
-- `FakeBinderTransact` fires on real PackageManager calls (count > 0)
-- Pass-through preserves behavior (no observable change to callers)
-- Install / uninstall round-trip clean
-
-Not yet delivered (Session 9): Parcel rewriting, code dispatch, recursion guard.
-
-### Key technical findings
-
-**1. `BinderProxy.transact` is NOT native on API 37.** It's a Java wrapper.
-Probe confirmed: `public` (not `native`), calls `transactNative`.
-
-**2. `BinderProxy.transactNative` IS native.** Method ID real
-(`FromReflectedMethod = 0x71ac6130`, not fast-JNI token).
-
-**3. `transactNative`'s `data_` (offset 24) is a JIT stub, not a libart pointer.**
-- `data_ = 0x48166ef0`
-- `dladdr` fails (anon exec memory)
-- Page is `r-xp` (executable)
-- Reason: API 34+ ART JIT-compiles JNI stubs via `art::jit::JniCompiler`.
-  Hot native methods get per-method JIT stubs instead of direct libart
-  dispatch entries.
-
-**4. `FindEntrySlot` was over-strict.** Required `dladdr` to succeed and
-name a known lib. Fix: accept any `data_ >= 0x1000` that is executable.
-Keep the fast-JNI token guard (`< 0x1000`) as the true safety check.
-
-**5. Regression clean.** `Binder.getCallingUid` (`data_ = 0x6d70c63310`, in
-`libart.so`) still hooks via the old `dladdr` path. Both paths coexist.
+`BinderProxy.transactNative` hooked via `JavaHookInstall`. Key findings: (1) `transact` is Java wrapper, (2) `transactNative` is native, (3) `data_` (offset 24) is JIT stub not libart pointer, (4) `FindEntrySlot` accepts any executable `data_ >= 0x1000`, (5) `Binder.getCallingUid` still hooks via old `dladdr` path.
 
 ---
 
 ## Session 9 — tnFIN rewriter algorithm delivered — 2026-10-24
 
-### Mission #1 status: 12 / 90 (~13%)
-
-`tnFIN` rewriter algorithm is verified end-to-end on **synthetic parcels**.
-Reference coverage moved 11 → 12.
-
-### What was delivered
-
-- **Rewriter algorithm** — `ParcelRewriter.rewriteReply(code, data, reply)`
-  parses AIDL request preludes, matches code 3 / code 36, nulls signatures
-  via `PmSpoof.nullOutSignatures`, re-emits the reply parcel.
-- **Wire format IDA-verified** against the device's `libbinder.so`:
-  offset 0: [int32 strictModePolicy | STRICT_MODE_PENALTY_GATHER (0x80000000)]
-  offset 4: [int32 workSource] (default -1)
-  offset 8: [int32 PARCEL_HEADER_MAGIC = 0x53595354] ← "SYST"
-  offset 12: [int32 n] (string16 length in chars)
-  offset 16: [2n bytes UTF-16 interface token]
-  offset ..: [int16 null terminator]
-  offset ..: [pad to 4-byte boundary]
-  offset ..: [AIDL args: arg0 = string16 pkg name, arg1 = int64 versionCode, arg2 = int32 flags]
-
-`enforceInterface` reads the same sequence.
-
-### Bugs fixed this session
-
-| # | Bug | Fix |
-|---|---|---|
-| 18 | `readRequestedPackage` missed the PARCEL_HEADER_MAGIC int32 at offset 8 | Read three int32s (strict, worksource, magic), validate magic, then read token + pkg |
-| 19 | `rawAidlGetPackageInfoReturnsNullSignatures` was premise-broken | Deleted; replaced with synthetic-parcel rewriter test |
-| 20 | `rawAidlGetPackageInfoNonexistentReturnsError` was premise-broken | Deleted; replaced with `rewriterPreservesNullResultReply` + `rewriterPreservesExceptionReply` |
-
-### Tests
-
-`BinderTransactE2ETest` now has 3 synthetic-parcel tests. Raw AIDL tests
-+ 5 probe methods deleted. Full suite: **39 tests green**.
-
-### What was NOT delivered
-
-- Production delivery blocked on `rawNGR=0x0` — Session 10's problem.
-
-### Session 9 rules-amendment (applied as Rule 7)
-
-**When wire format or symbol contract is uncertain, request IDA decomp of
-the reference implementation first. Do not iterate on offset guesses.**
+Rewriter algorithm + wire format IDA-verified. Bugs fixed: (18) missed PARCEL_HEADER_MAGIC at offset 8, (19) premise-broken test deleted, (20) premise-broken test replaced. Rules-amendment: request IDA decomp first, do not iterate on offset guesses.
 
 ---
 
 ## Session 10 — tnFIN production delivery (code 3) — 2026-10-24
 
-### Mission #1 status: 13 / 90 (~14%)
-
-`tnFIN` production delivery is **live for code 3** (getPackageInfo). Real
-IPC goes through `android::IPCThreadState::transact`, the rewriter fires,
-signatures are nulled, caller reads the rewritten buffer. No crash.
-
-### The pivot — why the Java-layer hook was abandoned
-
-Session 8's `BinderProxy.transactNative` hook worked at the mechanism
-level. Session 10 tried to extend it to production delivery by reading
-`Parcel.mNativePtr` via `GetLongField` on the caller thread. **SIGSEGV
-in `ScopedCheck` (CheckJNI).**
-
-The hard-won fact that ended two sessions of iteration:
-
-> **Under `am instrument`, ANY JNI call taking a `jobject` on a caller
-> thread with a JIT-compiled `BinderProxy.transact` frame above it
-> crashes on this ROM.** Not just `NewGlobalRef`. Not just ref operations.
-> `GetLongField`, `GetObjectField`, `CallIntMethod` on a `jobject` — every
-> one. Session 8 discovered the mechanism; Session 10 confirmed the full
-> scope. There is no workaround at the Java hook layer.
-
-The fix: pivot the hook target to `android::IPCThreadState::transact`
-(`_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j`), a pure
-C++ symbol. Caller thread = pure native, no CheckJNI, no JIT frames.
-JNI work happens on a fresh attached thread.
-
-### Architecture shipped
-
-| Layer | Implementation |
-|---|---|
-| Hook target | `android::IPCThreadState::transact` (inline hook via `InstallInlineHookEx`, dynsym scan for symbol) |
-| Caller thread | Pure C++: prelude parse, async dispatch, zero JNI `jobject` touching |
-| Fresh thread | JNI: `Parcel.obtain()` → swap `mNativePtr` → `ParcelRewriter.rewriteReply` → swap back → recycle |
-| Reply mutation | Copy caller's reply bytes → fresh writable `Parcel` → rewrite → swap `mData` pointer back, `mDataPos = callerReplyPos` |
-| Code 3 | Full end-to-end |
-| Code 36 | Detected + dispatched; byte rewrite **skipped** (see known issue) |
-| Code 30 (storage) | Added Session 23 — callingPackage rewrite for IStorageManager. |
-
-### Bugs fixed this session
-
-| # | Bug | Root cause | Fix |
-|---|---|---|---|
-| 21 | `GetLongField` on caller thread SIGSEGV | CheckJNI ScopedCheck crash — all `jobject`-touching JNI calls crash on caller thread | Pivot hook to `IPCThreadState::transact` (pure C++ caller) |
-| 22 | `dlsym` returns null for `android::Parcel::*` | dlsym filters these symbols on this ROM | dynsym table scan |
-| 23 | Symbol mangling wrong on `readString16Inplace`, `setDataPosition` | Wrong lengths, missing `K` const qualifier | Abandoned both — manual buffer reads via 4 simple getters |
-| 24 | `GetStaticFieldID("ourPackageName")` returns null | Kotlin `object` instance field, not static | `@JvmStatic fun getOurPackageNameForCpp()` |
-| 25 | Rewriter wrote to read-only `mData` buffer → SEGV_ACCERR | Reply parcel's data buffer is kernel-filled, read-only post-transact | Copy to fresh writable `Parcel`, swap `mData` pointer back |
-| 26 | `mDataPos` set to end-of-data on swap → `NameNotFoundException` | Caller read from `newPos` (= end), out of bounds | Preserve `callerReplyPos` (= 0) instead of `newPos` |
-
-### Test results
-
-`am instrument -w -r` → `OK (43 tests)`. Zero failures. Zero SIGSEGV.
-
-Logcat proof:
-hookFiresOnRealPackageManagerQuery: before=46 after=51 delta=5
-rewriterDispatchesForOurPackage: before=6 after=7 delta=1
-RewriteOnFreshThread: swapped reply (1848 -> 1848 bytes) pos=0
-ParcelRewriter: code 3 signatures nulled for com.ims134.hookengine
-
-### Code 36 known issue (Session 11 target)
-
-`getInstalledPackages` reply format from hex dump:
-code 36 in: size=66024 first32=00000000 01000000 16010000 1e000000 61006e00 64007200 6f006900 64002e00
-
-Interpretation: `[ex=0][has=1][278 elements][string16 len=30]"android.…"`.
-
-Rewriter crashes in `ParceledListSlice.CREATOR.createFromParcel` →
-`PackageInfo.<init>` → `readString8` → invalid UTF-8. Cause not identified
-in Session 10. Session 11 carried the diagnostic forward.
-
-### Files touched this session
-
-**Added:**
-- `app/src/main/cpp/CppParcelRewriter.cpp` — dynsym-based primitive resolution, manual string16 read, 3 accessors (`GetData`/`GetSize`/`GetPos`)
-
-**Replaced:**
-- `app/src/main/cpp/BinderTransactHook.cpp` — full rewrite: dynsym scan, IPCThreadState hook, copy-swap, hex dump
-- `app/src/main/java/com/ims134/hookengine/BinderTransactHook.kt` — drop `installNative(Method)` arg, add `rewriteCount()`, keep `lastCode()`/`drainCodes()`
-- `app/src/main/java/com/ims134/hookengine/ParcelRewriter.kt` — add `getOurPackageNameForCpp()`, add `setDataSize` truncate after rewrite
-- `app/src/androidTest/java/com/ims134/hookengine/BinderTransactE2ETest.kt` — replace cached `getPackageInfo` assertions with `getInstalledPackages`
-- `app/src/androidTest/java/com/ims134/hookengine/NativeTestBridge.kt` — add `parcelRewriterReady()`
-- `CMakeLists.txt` — add `CppParcelRewriter.cpp`
-
-**Not touched:** all hooks unrelated to tnFIN, all other tests.
+Pivot: `IPCThreadState::transact` pure C++ hook, JNI on fresh thread. Bugs fixed: 21 (SIGSEGV from jobject-touching JNI on caller thread), 22 (dlsym filtering), 23 (symbol mangling wrong), 24 (Kotlin object field not static), 25 (write to read-only `mData`), 26 (`mDataPos` set to end-of-data). `OK (43 tests)`.
 
 ---
 
 ## Session 11 — rewriter exception safety + code-36 diagnostics — 2026-10-24
 
-### Mission #1 status: 13 / 90 (~14%) — UNCHANGED
-
-Session 11 did not close the code-36 gap. What it delivered is **the diagnostic foundation** to close it correctly in a later session: exception safety for the Kotlin rewriter, a real implementation of `drainCodesNative`, an effective-vs-dispatched rewriter counter, the raw 66 KB code-36 reply captured and hex-dumped, and the definitive observation that this ROM's `PackageInfo.<init>` uses `readString8` for `packageName` (not AOSP's `readString16`).
-
-Coverage stayed at 13/90. Rule 3 says every session must grow the number. Session 11 did not — because the code-36 byte rewrite is not delivered and the code-3 production delivery was already counted in Session 10. This is an honest non-growth session.
-
-### What was delivered
-
-- `ParcelRewriter.rewriteReply` now preserves `reply.dataSize()` on rewriter exception. Previously, a throw mid-parse caused `setDataSize(dataPosition())` to truncate the caller's reply to 8 bytes. This is a real corruption bug on any exception path.
-- `BinderTransactHook.cpp`: `drainCodesNative` no longer a stub. Before Session 11, `drainCodes()` always returned `[]`. After: returns the real codes. This made `AidlCodeProbeTest` live again.
-- `BinderTransactHook.cpp`: `RewriteOnFreshThread` bails before swap on rewriter exception. A partial rewrite is never swapped into the caller's reply.
-- `BinderTransactHook.cpp`: new `g_rewrite_effective_count`. Distinguishes "rewriter dispatched" from "rewriter delivered a swap".
-- `BinderTransactHook.cpp`: capture of the full raw code-36 reply (66 KB) into `g_last_code36_reply` on every code-36 dispatch. Exposed as `dumpLastCode36Reply` JNI method.
-- `NativeTestBridge.kt`, `BinderTransactHook.kt`: added Kotlin externals for `dumpLastCode36Reply` and `rewriteEffectiveCount`.
-- `Session11ProbeTest.kt` (new): asserts `getInstalledPackages(0)` fires at least one code, and that `rewriteCount > 0`.
-- `Session11Code36ReplyTest.kt` (new): captures the code-36 reply, asserts it exists and is non-empty, hex-dumps the first 128 bytes to logcat under tag `Session11`, and reads the front of the reply as `[ex][hasResult]`.
-
-### What was NOT delivered
-
-- **Code 36 byte rewrite.**
-- **The exact layout of the 3 int32s between the class name and the first element.**
-
-### Test results
-
-`am instrument -w -r` → `OK (47 tests)`. Zero failures. Zero SIGSEGV.
-
-### Why coverage did not increase
-
-Rule 3 says every session must increase the coverage number. Session 11 did not — because code 3 was already counted (Session 10) and code 36 was not delivered as behavior. Coverage 13 → 13 is the honest reflection of "code-3 live, code-36 pending." No inflation.
+Diagnostic foundation: exception preservation, `drainCodes` real impl, `g_rewrite_effective_count`, 66 KB code-36 reply captured. `OK (47 tests)`. Coverage unchanged (honest no-growth).
 
 ---
 
 ## Session 12 — Q1 measured, code 36 deprioritized — 2026-10-24
 
-### Mission #1 status: 13 / 90 (~14%)
-
-### Q1 result (measured on device, Session 12)
-
-    getInstalledPackages(0): 278 pkgs, 0 with non-null sigs
-    getInstalledPackages(GET_SIGNATURES): 278 pkgs, 278 with non-null sigs
-
-`PackageInfo.signatures` / `signingInfo` are null unless the caller
-explicitly passes `GET_SIGNATURES` / `GET_SIGNING_CERTIFICATES`.
-
-### Decision
-
-**Deprioritize code 36. Defer Phase A item 2 (code-36 byte-rewrite) and
-move to Phase A item 3 (`handleJHMethod` + `nativeCNVM`).**
-
-### What does NOT change
-
-- The code-36 skip-guard in `BinderTransactHook.cpp` stays in place.
-- The captured 66 KB code-36 reply (`g_last_code36_reply`) remains
-  available via `dumpLastCode36Reply` JNI.
-- `Session11Code36ReplyTest` remains green and diagnostic.
-- The 3-int32 hypothesis at offsets 80/84/88 remains unverified.
-
-### Deliverables this session
-
-- `BinderTransactE2ETest.rewriterExceptionPreservesReplySize` — the
-  Session 11 exception-path fix now has a direct test.
-- `AidlCodeProbeTest` narrowed from 15 probe calls to 4.
-- This decision note.
-
-### Test count: 48 green. Coverage: 13/90 (unchanged).
+`getInstalledPackages(0)` → 278 pkgs, 0 with non-null sigs. `getInstalledPackages(GET_SIGNATURES)` → 278 with sigs. Decision: deprioritize code 36, move to nativeCNVM + handleJHMethod. 48 tests green.
 
 ---
 
 ## Session 13 — nativeCNVM decomp-verified — 2026-10-25
 
-### Mission #1 status: 13 / 90 (~14%) at time of close; 14/90 after Session 14 verification
-
-`nativeCNVM` decomp-verified against `sub_30BF7C` + `sub_30C238`.
-`ProxyBridgeSurfaceTest.kt` added with four tests. `ProxyBridge.cpp` with
-`nativeCNVM` and a stub `handleJHMethod` added. `ProxyBridge.kt` with
-`nativeCNVM` external only.
-
-### What Session 13 actually delivered
-
-- **`nativeCNVM`** decomp-verified vs `sub_30BF7C` (entry) + `sub_30C238` (cache init). 8 jmethodIDs cached in identical order. `Executable.artMethod` fieldID cached on API ≥ 30, guarded, not read by `nativeCNVM`. Tag → slot mapping identical for all 9 tags. `DeleteLocalRef(elem)` after every unwrap. `FromReflectedMethod(method)` → `GetObjectClass(obj)` → `CallNonvirtualVoidMethodA(obj, cls, mid, args)`. Three safe-strengthening divergences vs reference documented in `ProxyBridge.cpp` header.
-- **`ProxyBridgeSurfaceTest.kt`** with four tests (nativeCNVM*).
-- **`handleJHMethod`** — deferred. Body is a stub returning `nullptr`.
-- **`IntegrationTest.selftestReportIsComplete`** failed with `:remote process bad`.
-
-### Session 13's claims vs reality
-
-Session 13 claimed "52 tests, 51 pass, 1 fail". Session 14 measured the actual test count was 48 running (ProxyBridgeSurfaceTest was not in the -r output). The 52/51/1 claim was aspirational; Session 14 corrected it. Session 15 confirmed 49 pass + 3 ignored = 52 registered.
-
-### Next session
-
-Phase A item 3 continued: `handleJHMethod` needs `sub_29E168` decomp. Session 14 identified two real bugs in `nativeCNVM` from Claude code review — see Session 14 section.
+Decomp-verified vs `sub_30BF7C` + `sub_30C238`. `ProxyBridgeSurfaceTest.kt` added (4 tests). `handleJHMethod` stub. `:remote` flake surfaced.
 
 ---
 
 ## Session 14 — nativeCNVM two-bug fix + test measurement — 2026-10-25
 
-### Mission #1 status: 14 / 90 (~16%) — verified, not claimed
-
-Session 14's deliverable was two bug fixes to Session 13's `nativeCNVM` port (from Claude code review) and the first true measurement of the test suite including `ProxyBridgeSurfaceTest`.
-
-### Bugs fixed
-
-| # | Bug | Root cause | Fix |
-|---|---|---|---|
-| 27 | `nativeCNVM` use-after-release of `sig` | Arity guard called `strlen(sig)` AFTER `ReleaseStringUTFChars`, with `FromReflectedMethod` and `GetObjectClass` (both GC safepoints) in between. UB on every call; latent UAF | Capture `sigLen = strlen(sig)` BEFORE release; use `sigLen` in guard |
-| 28 | `g_rewrite_effective_count` incremented unconditionally | After the swap block closed, so rewriter throws and zero-length results were counted as "effective". The "swapped reply" log had the same bug | Introduced local `bool swapped` set only inside the swap branch; gated both `fetch_add` and `LOGD` on `swapped`. Added explicit "no swap (...)" diagnostic log |
-
-### Measurement (what Session 13 claimed but did not verify)
-
-- `run finished: 52 tests, 0 failed, 0 ignored` — first run in which `ProxyBridgeSurfaceTest` class appears in `-r` output.
-- `nativeCNVMMatchesReferenceSignature`, `nativeCNVMNullArgsIsNoOp`, `nativeCNVMInvokesVoidMethodWithCorrectArgs`, `nativeCNVMCoercesBoxedIntegersToJvalueInt` — all four `finished:`, no `[FAIL]`.
-- `ProxyBridge.nativeCNVM: arity mismatch n=0 paramCount=2 — refusing dispatch` — arity guard fires correctly with the fixed length source. `paramCount=2` for `"VIL"` with 2 params.
-- `IntegrationTest.selftestReportIsComplete` PASSED. `:remote` process started cleanly, all hooks installed, `Service started. (v29)`, full item1-5 suite ran, `selftest.txt written: 23 pass`. Session 13's `process is bad` failure NOT reproduced.
-- `rewriteEffective=3` matches the three "swapped reply" log lines exactly (two from `AidlCodeProbeTest` code-3 GET_SIGNATURES and GET_SIGNING_CERTIFICATES, one from `BinderTransactHookTest.hookFiresAndPassesThrough` code-3). The Session 13 "16 dispatch / 3 effective" reading was coincidental (counter over-counted but happened to match). The counter is now semantically correct.
-
-### AntiDetectionE2ETest observation (fixed in Session 15)
-
-Three connect tests (`connectToFridaPortBlockedEvenWithListener`, `connectToIdaPortBlockedEvenWithListener`, `connectToNonBlockedPortSucceeds`) returned early on `SocketException: EPERM` from `bind(127.0.0.1)` and were reported as PASSED by JUnit. Rule 12 violation — tests that cannot fail. Fixed in Session 15.
-
-### Files touched
-
-**Modified:**
-- `app/src/main/cpp/ProxyBridge.cpp` — UAF fix; arity guard now reads `sigLen` after release. `handleJHMethod` unchanged (stub).
-- `app/src/main/cpp/BinderTransactHook.cpp` — `g_rewrite_effective_count` gate on `swapped` local; added "no swap (...)" log.
-
-### Coverage: 14/90 verified
-
-`nativeCNVM` is now a measured 14, not a claimed 14. The four `ProxyBridgeSurfaceTest` tests ran green in `am instrument -r`.
-
-### Next session
-
-Session 15: no decomp available for `sub_29E168`. Deliver prep work: decomp spec + loose-end cleanup (AntiDetectionE2ETest honesty fix, bug4 log noise). Coverage stays 14/90 (honest no-growth session).
+Bugs fixed: (27) UAF in arity guard, (28) `g_rewrite_effective_count` unconditional increment. Measured `run finished: 52 tests, 0 failed`. `rewriteEffective=3` matches exactly.
 
 ---
 
 ## Session 15 — handleJHMethod decomp spec + loose-end cleanup — 2026-10-25
 
-### Mission #1 status: 14 / 90 (~16%) — unchanged, honest no-growth session
-
-Session 15's deliverable was preparation: HANDLEJHMETHOD_DECOMP_SPEC.md at repo root, plus two loose-end cleanups (AntiDetectionE2ETest Rule-12 honesty, bug4 log noise suppression). No new methods shipped, so coverage did not grow. That is honestly stated per Rule 3.
-
-### Deliverables
-
-**15.1 — `HANDLEJHMETHOD_DECOMP_SPEC.md` (new file at repo root)**
-
-Enumerates 7 decomp questions with decision trees that determine whether the existing scaffolding helpers (`ReflectIds`, `BoxResult`, `IsStaticMethod`, `BuildDescriptor`, `UnwrapArgs`) can be wired into `handleJHMethod` as-is or need modification:
-
-- Q1 Dispatch path (`CallNonvirtualObjectMethodA` vs `CallObjectMethodA` vs static variant)
-- Q2 `obj2` semantic (unused, declaring class, fallback receiver, or config key)
-- Q3 Return-value boxing (matches current `BoxResult`? FindClass per call? raw primitive cast?)
-- Q4 Exception semantics (check-and-clear, fallback, do-nothing)
-- Q5 `Cache(env)` invocation (entry vs conditional vs never)
-- Q6 Descriptor derivation (`BuildDescriptor` reflective iteration vs `ArtMethod::GetSignature()` vs caller-passed)
-- Q7 `methodArr` arity / element use (single target method vs super-chain vs declaring-class-plus-params)
-
-Plus §3 exit criteria: the 10 evidence points the decomp artifact must contain before Session 16 can land `handleJHMethod`. If absent from the artifact, Session 16 escalates for a re-dump.
-
-`ProxyBridge.cpp` header comment updated to point at `HANDLEJHMETHOD_DECOMP_SPEC.md`.
-
-**15.2 — `AntiDetectionE2ETest.kt` Rule-12 honesty fix**
-
-Three connect tests were passing-by-skip on loopback-bind EPERM (Android 15+ unprivileged loopback bind restriction on API 37). Marked `@Ignore` with a reason string that points at real substitution coverage: `AntiDetectionTest.allAntiDetectionTestsPass` asserts the exact `Fake_connect` decision for ports 27042/27043/23946 and the allow cases 8080 and 8.8.8.8:27042, plus `connect_hook_installed == 1`. `javaFileHidingFiresHook` (no socket requirement) remains live.
-
-Test count moved from 52 pass + 0 ignored to 49 pass + 3 ignored. Honest, visible in `-r` output.
-
-**15.3 — bug4 log noise suppression**
-
-`InlineHooker.cpp` gained `extern "C" int g_iihe_quiet = 0;` and `#define IIHE_LOG(...)` guarding the verbose `IIHE(...)` LOGD calls inside `InstallInlineHookEx`. `LOGE` calls unchanged. `test_regression.cpp::RunRegressionBug4` sets `g_iihe_quiet = 1` around its 1000-cycle stress loop, `= 0` after. `bug5` (single cycle) is untouched.
-
-Eliminates ~15,000 lines of `IIHE(bug4):` noise per test run. All three bug4 [PASS] assertions preserved:
-- `bug4_no_relay_leak: cycles=1000 bad=0 alloc=1000 free=1000`
-- `bug4_target_bytes_restored: before=0x11000400 after=0x11000400`
-- `bug4_inline_count_zero: registry=0`
-
-### Measurement
-
-`run finished: 49 tests, 0 failed, 3 ignored`
-
-- `ignored: connectToFridaPortBlockedEvenWithListener(com.ims134.hookengine.AntiDetectionE2ETest)`
-- `ignored: connectToNonBlockedPortSucceeds(com.ims134.hookengine.AntiDetectionE2ETest)`
-- `ignored: connectToIdaPortBlockedEvenWithListener(com.ims134.hookengine.AntiDetectionE2ETest)`
-
-Live tests still green: `finished: javaFileHidingFiresHook(...)`, all four `ProxyBridgeSurfaceTest`, all `AntiDetectionTest` decision-function assertions.
-
-`IIHE(bug4):` count in run log: **0** (was ~15,000 in Session 14).
-
-`IntegrationTest.selftestReportIsComplete` PASSED again — 2/2 since Session 13's `:remote` failure. (Session 16 later disproved the "one more green closes it" expectation — the flake recurred.)
-
-### Files touched
-
-**Added:**
-- `HANDLEJHMETHOD_DECOMP_SPEC.md` (repo root)
-
-**Modified:**
-- `app/src/main/cpp/ProxyBridge.cpp` — header comment expanded, now points at `HANDLEJHMETHOD_DECOMP_SPEC.md`. Body unchanged (handleJHMethod still stub).
-- `app/src/main/cpp/InlineHooker.cpp` — `g_iihe_quiet` flag; 15 `LOGD("IIHE(` → `IIHE_LOG("IIHE(` sites inside `InstallInlineHookEx`. All `LOGE` sites unchanged.
-- `app/src/main/cpp/test_regression.cpp` — `extern "C" int g_iihe_quiet;` declaration; `RunRegressionBug4` sets `g_iihe_quiet = 1` before the 1000-cycle loop, `= 0` after.
-- `app/src/androidTest/java/com/ims134/hookengine/AntiDetectionE2ETest.kt` — three `@Ignore` annotations; class-level comment explaining the ROM restriction and pointing at substitution coverage.
-
-### Coverage: 14/90 (unchanged)
-
-Session 15 is a "no growth" session because no new method shipped. Rule 3 is not satisfied; that is stated as an honest exception, not a norm. The next growth path is blocked on `sub_29E168` decomp. HANDLEJHMETHOD_DECOMP_SPEC.md removes that block from the critical path — when decomp lands, implementation is mechanical.
+`HANDLEJHMETHOD_DECOMP_SPEC.md` at repo root. AntiDetectionE2ETest Rule-12 fix (3 `@Ignore`'d). `g_iihe_quiet` for bug4 noise suppression. 49 pass, 3 ignored.
 
 ---
 
 ## Session 16 — `:remote` flake investigated, retry mitigated, retry path unverified — 2026-10-25
 
-### Mission #1 status: 14 / 90 (~16%) — unchanged, stability investigation session
-
-Session 16 was originally scoped as a stability confirmation: three consecutive green runs of `IntegrationTest.selftestReportIsComplete` (2/3 so far) would close the `:remote` item as flake. The third run **failed**. That converted the session into an investigation.
-
-### Failure evidence
-
-Run 16 first attempt (before mitigation), from `test_out.txt`:
-
-java.lang.SecurityException: Unable to start service Intent { xflg=0x4
-cmp=com.ims134.hookengine/.RemoteService }: Unable to launch app
-com.ims134.hookengine/10428 for service Intent { cmp=com.ims134.hookengine/.RemoteService
-}: process is bad
-at android.app.ContextImpl.startServiceCommon(ContextImpl.java:2134)
-at android.app.ContextImpl.startService(ContextImpl.java:2091)
-at com.ims134.hookengine.IntegrationTest.selftestReportIsComplete(IntegrationTest.kt:21)
-
-FAILURES!!!
-Tests run: 49, Failures: 1
-
-
-Failure occurs at **position 26 of 52** — the first touch of `:remote` in the whole suite. Nothing else starts `:remote` beforehand.
-
-### Root cause: AMS state, not a code crash
-
-Logcat from a **passing** run (`remote_crash_filtered.txt`) shows `:remote` starting cleanly:
-02:30:53.787 ActivityManager: Start proc 7143:com.ims134.hookengine:remote/... for started-service
-02:30:54.018 DualApplication.attachBaseContext: entering
-02:30:54.090 PmSpoof: state list=true static=true instance=true
-02:30:54.091 DualApplication: hooks installed, calling super.attachBaseContext
-02:30:54.092 DualApplication.onCreate
-02:30:57.402 PmSpoof: state list=true static=true instance=true
-02:31:03.396 ActivityManager: Killing 7143:... (adj 500): stop com.ims134.hookengine due to finished inst
-
-No `FATAL EXCEPTION`, no `signal 11`, no `SIGSEGV`, no `SIGABRT`, no `ScopedCheck` crash. `:remote` starts, runs through `attachBaseContext`, `onCreate`, `RemoteService.onStartCommand`, and is killed by AMS for cleanup.
-
-"`process is bad`" is AMS `startProcessLocked` refusing to launch a process record already marked crashed. It is not a fresh crash. That means the state is set either (a) from a prior app-process lifetime on this ROM, or (b) by a Zygote/AMS fork failure that never reaches our code. Both fail before `IntegrationTest` runs.
-
-**Conclusion:** the failure is not a bug in `DualApplication`, `PmSpoof`, `nativeAttachBaseContext`, or any of our hook code. Every passing run's logcat proves our `:remote` path is healthy when it runs. The AMS-side state is what flips. This is not fixable from user code — only mitigated.
-
-### Observed flake rate
-
-| Session | `selftestReportIsComplete` |
-|---|---|
-| 13 | fail (`process is bad`) |
-| 14 | pass |
-| 15 | pass |
-| 16 run A | fail (`process is bad`) |
-| 16 run B (post-retry patch, green path) | pass |
-
-**3 pass / 2 fail = 60% pass rate.**
-
-### Deliverable: retry-with-backoff in `IntegrationTest.kt`
-
-Full-file replacement was applied. `IntegrationTest.selftestReportIsComplete` now loops `startService` up to 3 times with 2s then 4s backoff on `SecurityException`. If all 3 attempts fail, throws `AssertionError` with the last exception as cause (Rule 12 honest — a real failure still fails). If a flake is caught and the retry succeeds, the first attempt logs `Log.w` and the test proceeds normally.
-
-The retry loop preserves the original assertions on `selftest.txt` (23 PASS entries, END marker).
-
-### Verification
-
-Green run 16e, `OK (49 tests)`, `Select-String 'startService attempt'` returns nothing — retry was not exercised (first attempt succeeded). **Retry recovery path unverified**; the mitigation has not been observed to rescue a flake yet.
-
-Pass line confirmed as `OK (49 tests)` — standard JUnit line, not `run finished:`. Session 15's claim that `run finished:` is the authoritative pass line and `OK (N tests)` is untrustworthy was wrong; both indicate all-pass, and the failing run emits neither (`FAILURES!!!` + `Tests run: N, Failures: M` instead).
-
-### Files touched
-
-**Modified:**
-- `app/src/androidTest/java/com/ims134/hookengine/IntegrationTest.kt` — retry-with-backoff on `startService`.
-
-### Coverage: 14/90 (unchanged)
-
-No new methods. Rule 3 not satisfied. Honest exception, not a norm.
-
-### Next session (Session 17)
-
-- **If `sub_29E168` decomp is available:** implement `handleJHMethod` using HANDLEJHMETHOD_DECOMP_SPEC.md's decision tree. Coverage 14 → 15. Real Phase A progress.
-- **If not:** Session 17 is either a stability measurement (a few more runs to see if retry ever fires) or an escalation that Phase A is decomp-blocked. No other Phase A path is available — `nativeInit` also needs decomp.
+Failure: `SecurityException: ... process is bad` at `IntegrationTest.kt:21`. AMS state, not code crash. Retry-with-backoff added. Retry recovery path unverified. 3 pass / 2 fail across Sessions 13–16.
 
 ---
 
-## Session 17 — stale test APK discovered; retry verified present, not exercised — 2026-10-25
+## Session 17 — stale test APK discovered — 2026-10-25
 
-### Mission #1 status: 14 / 90 — unchanged, honest no-growth session
-
-Session 17 was Option A (stability measurement) — run the suite 3× to see if the retry ever fires. It surfaced a **four-session-old discipline gap** instead.
-
-### The stale-APK finding
-
-Runs 17a (pass), 17b (pass), 17c (fail) were executed against a test APK built **before** Session 16's retry commit. `IntegrationTest.kt` on disk had the retry at line 34; the failing stack trace showed `IntegrationTest.kt:21` — the pre-retry line. The APK on the device did not contain the retry code.
-
-Root cause: **no session from 14 onward instructed `adb install -r -t` of the rebuilt test APK before `am instrument`.** Session 16's `run16e` (my claimed "green path verified") also ran the stale APK. Same for all three runs in 17a/b/c. Every "pass" in Sessions 14–17a/b/c ran the pre-retry test.
-
-### Session 17 fix
-
-Rebuilt via `./gradlew :app:assembleDebug :app:assembleDebugAndroidTest`, then `adb install -r -t` on both APKs (both returned `Success`). One run in that state:
-
-- `run17e.txt`: `OK (49 tests)`
-- logcat grep for `startService attempt|process is bad|FATAL.*remote|signal.*remote`: **empty**
-- Meaning: retry code is on device; first `startService` succeeded; retry not exercised
-
-### `:remote` item close state
-
-- Mitigated: retry-with-backoff present in `IntegrationTest.kt` and confirmed on device via Session 17 rebuild+install
-- Recovery path: **unverified.** Low flake rate (~50% per run; retry recovers on 87.5% of flake runs; needs ~8 runs to observe) makes further verification not worth the cost
-- Item **accepted**, not resolved. Do not re-open without a new failure mode or a target that requires `:remote` clean startup
-
-### Files touched
-
-**Modified:** none — this session was diagnostic.
-**Rebuilds:** test APK rebuilt from current `IntegrationTest.kt`.
-
-### Coverage: 14/90 (unchanged)
-
-Fourth consecutive no-growth session (14, 15, 16, 17). The mission cannot progress without `sub_29E168` decomp. This session does not pretend otherwise.
-
-### Rule 14 added (see Rules of engagement)
-
-Every test-run instruction must include rebuild + install of both APKs. Discovered the hard way.
-
-### Session 18b/18c/18d — guest visibility + signature null-out
-
-- **18b** — `GuestHost.probeGuestSignatureSpoof` added. First run: `NameNotFoundException: com.viber.voip`. Misdiagnosed at first as a PmSpoof-only-our-package issue; the real cause was AMS package visibility (Android 11+), not the proxy.
-- **18c** — `<queries><package android:name="com.viber.voip" /></queries>` added to the manifest. Diagnostic matrix expanded to four rows: `getInstalledPackages` visibility, `getPackageInfo(name, 0)`, `getPackageInfo(name, GET_SIGNATURES)`, `getPackageArchiveInfo(apk, GET_SIGNATURES)`. Result: visibility wall gone, all four rows succeeded, `realSigCount=1` (PmSpoof didn't null cross-package).
-- **18d** — `PmSpoof.signatureNullOutPackages` set added; `rewrite()` extended to null when `requested in signatureNullOutPackages`; `GuestHost.load` registers the guest package on successful boot. **First pivot-driven behavior extension** — no decomp prediction possible; surfaced only by loading a real guest.
-
-**`ParcelRewriter` / `tnFIN` code-3 scope** — still nulls only `ParcelRewriter.ourPackageName` (single package). Extending to a set is a backlog item, warranted when a failure proves the proxy path is bypassed. Not blocking; not guessed at.
-
-### Next session (Session 18)
-
-**The Option B decision is now overdue.** Three choices, must be made in writing before Session 18 opens:
-
-1. **Set a decomp deadline** — e.g. "if `sub_29E168` not available by 2026-11-01, mission scope changes." Gives the current track one more real attempt.
-2. **Pivot mission scope** — drop Phase A (decomp-blocked), choose a different track: finish Phase B partial work that doesn't need decomp, or pivot to DualHost anyway (contradicts Rule 2 — would need to be amended), or pivot to a different mission entirely.
-3. **Park** — declare Phase A blocked on decomp, freeze the project, write the honest close-out.
-
-Session 18 does not open until the decision is made in this thread.
-
-## Session 18 — DualHost pivot, Viber load harness — 2026-10-25
-
-### Mission #1 status: 14/90 — coverage unchanged, pivot validated
-
-Session 18 opened with Rule 2 amended: DualHost integration unblocked, reference reproduction becomes pull-driven (decomp a method when a real integration failure names it, not before). `handleJHMethod` parked indefinitely per operator; stub, spec, scaffolding all stay on disk untouched.
-
-### Deliverables
-
-- **`GuestHost.kt`** — ApplicationProxy-style guest loader. Stages a guest APK in private storage, extracts arm64-v8a native libs, builds a `GuestClassLoader` over the APK, chains to host via parent-delegation, reads guest's `<application android:name>` from the manifest, instantiates the class, attaches a `GuestContext` (spoofed `getPackageName` / `getApplicationInfo` / `getClassLoader`), calls `attachBaseContext` and `onCreate`. Reports a single named outcome per run; writes `files/guest-boot.txt` for offline inspection.
-- **`GuestClassLoader.kt`** — `BaseDexClassLoader` subclass with guest-first lookup for a known list of bundled-dependency prefixes (`kotlin.`, `androidx.`, `okhttp3.`, `io.reactivex.`, `com.facebook.`, `com.google.gson.`, etc.). Parent-first for everything else. Solves the class-shadowing wall documented in the run history below.
-- **`GuestLoadTest.kt`** — instrumentation harness for `GuestHost.load(ctx, apkPath)`. Rule 12 compliance: asserts only that `result.outcome` is set; whether Viber boots is reported as data, not asserted.
-
-### Run history (three walls, three fixes)
-
-| Run | Wall | Fix |
-|---|---|---|
-| 1 | `SecurityException: Writable dex file '.../viber.apk' is not allowed` — ART 34+ refuses to load dex from a writable file | `File.setReadOnly()` before `PathClassLoader` construction |
-| 2 | `NoSuchMethodException: android.app.Application.attachBaseContext [class android.content.Context]` — `Application` inherits from `ContextWrapper`; `getDeclaredMethod` searches only the exact class | Walk `Application` superclass hierarchy to find the declaration |
-| 3 | `NoSuchMethodError: No static method i0(String,String)Z in kotlin.text.StringsKt` — `PathClassLoader(parent=hostLoader)` is parent-first, so `kotlin.text.StringsKt` resolved from the host APK (our engine's bundled stdlib, no `i0`), not Viber's dex | `GuestClassLoader` inverts delegation for bundled-dependency prefixes; `ClassLoaderBridge.installFor` removed (its dexElements merge had made it worse by prepending host elements into guest) |
-| 4 | ✅ `outcome=booted` — Viber's `Application.attachBaseContext` → `onCreate` completed | — |
-
-### What "booted" does not mean
-
-The `Application` lifecycle ran. No Activity, no ContentProvider, no network, no Binder IPC from guest code. `tnFIN` code 3 was not exercised against a real caller (no `ParcelRewriter: code 3 signatures nulled` line in the run log). `PmSpoof`'s `getPackageInfo` handler only nulls signatures for `ctx.packageName = com.ims134.hookengine`; a Viber-side request for its own signatures would return real values. These are the next integration targets.
-
-### Rule 12 note
-
-`GuestLoadTest.loadViberReportsOutcome` asserts only that `result.outcome != "?"`. Every layer of the harness (loader construction, manifest read, instantiate, attach, onCreate) is reported in `guest-boot.txt` and `logcat -s DualCore.Guest`; the test does not assert "booted" because boot success is a fact to observe, not a gate to pass. When integration fails, the failure surfaces in the outcome file, not as a test failure — this is by design, so guest regressions don't disguise loader regressions.
-
-### Coverage: 14/90 (unchanged)
-
-No new reference methods ported. Rule 3 exception stated openly: the pivot is a strategic realignment, not coverage growth. First coverage growth under the pivot will occur when a real integration failure names a specific reference method (or when a specific integration behavior requires extending an existing port — see `PmSpoof` guest-package null-out on the follow-up probe).
+Four-session-old discipline gap surfaced: no session from 14 onward instructed `adb install -r -t`. Every "pass" through 17c ran the pre-retry test APK. Rule 14 added.
 
 ---
 
-### Session 19 — ContentProvider installation probe — 2026-10-25
+## Session 18b/18c/18d — guest visibility + signature null-out
 
-19a — `GuestHost.installGuestProviders` added. Reads providers from
-`getPackageArchiveInfo(GET_PROVIDERS)`, instantiates each via guest
-ClassLoader, calls `ContentProvider.attachInfo(GuestContext, ProviderInfo)`
-then `onCreate()`. Per-provider errors are captured and reported, not
-thrown (Rule 12 — the probe reports, doesn't assert).
+- 18b — `probeGuestSignatureSpoof`. First run: `NameNotFoundException` (package visibility).
+- 18c — `<queries><package android:name="com.viber.voip" /></queries>` added. Four diagnostic rows all succeeded.
+- 18d — `PmSpoof.signatureNullOutPackages` set added. First pivot-driven behavior extension.
 
-First run against Viber 29.0.1.0: **15 providers declared, 7 succeeded,
-8 failed.**
+---
 
-- **Root cause of all 7 real failures (8th is test-env noise):**
-  `GuestContext.getResources()` inherits from host — returns our resource
-  table, not Viber's. Viber's `androidx.startup.InitializationProvider`
-  calls `context.getString(0x7f140312)` → `NotFoundException`. All six
-  Viber-authored providers cascade into NPEs on obfuscated `bb2.*`
-  interface methods (`bb2.X4`, `bb2.D5`, `bb2.K5`, `bb2.c5`, `bb2.W5`),
-  because the DI implementation `androidx.startup` was supposed to
-  register never got registered.
-- **No anti-tamper check observed.** No provider threw a signature / integrity / tamper error. Viber's provider layer doesn't verify. Positive signal for the current PmSpoof + ParcelRewriter null-out path.
-- `MlKitInitProvider` fails with "already initialized" — test-env artifact (our process already inits MLKit elsewhere). Not a Viber signal; do not add `com.google.mlkit.` to `GUEST_PRIORITY_PREFIXES` yet.
+## Session 18 — DualHost pivot, Viber Application boots — 2026-10-25
 
-**Next (19b):** fix `GuestContext.getResources()` to return
-`pm.getResourcesForApplication(guestAppInfo)`. Rerun. If the `bb2.*`
-NPEs persist after resources are fixed, `bb2` is the first named decomp
-target under Rule 2's pull-driven model — five methods on one obfuscated
-interface, all registered by the same `androidx.startup` path.
+Mission #1 status: 14/90 — coverage unchanged, pivot validated. Rule 2 amended: DualHost integration unblocked, reference reproduction pull-driven. `handleJHMethod` parked indefinitely per operator.
+
+Deliverables: `GuestHost.kt`, `GuestClassLoader.kt`, `GuestLoadTest.kt`. Four walls closed: (1) writable dex file, (2) `attachBaseContext` hierarchy, (3) Kotlin stdlib shadow, (4) `outcome=booted`.
+
+Rule 12 note: `GuestLoadTest` asserts only `result.outcome != "?"`. Boot success is data, not gate.
+
+Coverage: 14/90 (unchanged). Pivot is strategic realignment, not coverage growth.
+
+---
+
+## Session 19 — ContentProvider installation probe — 2026-10-25
+
+`GuestHost.installGuestProviders` added. 15 declared, 7 succeeded, 8 failed. Root cause: `GuestContext.getResources()` returned host resources, Viber's `androidx.startup.InitializationProvider` string lookup failed, cascade into `bb2.*` NPEs.
+
+No anti-tamper observed — positive signal for PmSpoof + ParcelRewriter null-out path. MlKitInitProvider "already initialized" is test-env noise.
+
+Next: fix `GuestContext.getResources()` to `pm.getResourcesForApplication(guestAppInfo)`.
 
 ---
 
 ## Session 19+20 — native boot via ApplicationProxy; provider wall named — 2026-10-26
 
-### Mission #1 status: 14/37 coverage (denominator corrected — reference registers 37 natives, not 90)
+Mission #1 status: 14/37 (denominator corrected from 90 in Session 20). Reference decomp: `KXQPApplication` → `VmApplication` → `ApplicationProxy` → guest Application boot. `ApplicationProxy` is not in manifest.
 
-Reference decomp across `JNI_OnLoad`, `nativeInit`/`nativeOnLoad`, `sub_335FC`, `sub_29F08`, `ApplicationProxy`, `KXQPApplication`, `VmApplication` confirmed the reference architecture:
+Deliverables: `ApplicationProxy.kt`, `ApplicationProxy.cpp`, `DualApplication.kt` reference-shape, `GuestHost.kt` test fallback, `GuestClassLoader.kt` guest-first delegation, `GuestLoadTest.kt`, `<queries>` manifest, `PmSpoof.signatureNullOutPackages`.
 
-KXQPApplication (manifest app, extends MultiDexApplication)
-→ VmApplication (process-strategy selector)
-→ ApplicationProxy (engine Application, native lifecycle)
-→ guest Application boot at ApplicationProxy.onCreate
+Verified: `outcome=booted-at-startup`, `instantiated=true attached=true onCreated=true`.
 
+The wall: `androidx.startup.InitializationProvider` → `getProviderInfo` → AMS `NameNotFoundException`. 7/15 providers succeed. Not implemented, not touched: `BinderTransactHook` interception of `IPackageManager.getProviderInfo`.
 
-**ApplicationProxy is not in the manifest.** It's constructed programmatically via `getInstance()`, driven by the container's lifecycle — exactly as `KXQPApplication` drives `VmApplication` in the reference. `mLoadedApk` is null because the framework never assigned one; all context-derived methods route through `getBaseContext()` (the guestCtx the container passed). This confirms Session 19e's `LoadedApk.makeApplication` detour was our invention — the reference never takes that path.
-
-### Deliverables
-
-- **`ApplicationProxy.kt`** — Kotlin `Application` subclass. Non-external overrides (`onCreate`, `onTerminate`, `onConfigurationChanged`) forward into `external fun nativeOnCreate` / `nativeOnTerminate` / `nativeOnConfigurationChanged` (Kotlin forbids `external override`). Static `getInstance()`, static native `getGuestApplication()`. **Not in manifest.**
-- **`ApplicationProxy.cpp`** — native lifecycle. `nativeOnCreate` reads `getBaseContext()`, calls `BootGuestFromContext(guestCtx)` → loads guest APK's Application class via `guestCtx.getClassLoader()`, instantiates, calls `attachBaseContext(guestCtx)` and `onCreate()` on the guest. Other natives forward.
-- **`DualApplication.kt`** — reference-shape container. `attachBaseContext` wires `ApplicationProxy.setBaseContext(guestCtx)` if APK staged before process start; `onCreate` drives `ApplicationProxy.onCreate()`; `onTerminate`/`onConfigurationChanged` forward. Matches `KXQPApplication`'s role.
-- **`GuestHost.kt`** — test fallback when APK staged after process start. Early-returns `"booted-at-startup"` if `ApplicationProxy.getGuestApplication()` is non-null. Otherwise drives `proxy.setBaseContext + proxy.onCreate()`.
-- **`GuestClassLoader.kt`** — guest-first delegation for bundled-dep prefixes (`kotlin.`, `androidx.`, `okhttp3.`, `com.facebook.`, etc.). Solves `NoSuchMethodError: StringsKt.i0` when `PathClassLoader` parent-first shadows Viber's own Kotlin stdlib.
-- **`GuestLoadTest.kt`** — observes result; does not drive boot when ApplicationProxy already booted.
-- **`AndroidManifest.xml`** — `<queries><package android:name="com.viber.voip" /></queries>`.
-- **`PmSpoof.kt`** — `signatureNullOutPackages` set; `rewrite` nulls cross-package sigs (Session 18d).
-
-**Dead files left on disk, not compiled:** `GuestContext.cpp` (Session 19c LoadedApk attempt — wrong mechanism), `GuestBoot.cpp` (Session 20a direct native boot, superseded by `ApplicationProxy.cpp`). Committed for reference; remove from `CMakeLists.txt` and delete in a later session if confirmed unused.
-
-### Verified on device
-
-DualCore.Native: ApplicationProxy.onCreate: entry
-DualCore.Native: BootGuest: guestApplication=com.viber.voip.ManifestViberApplication
-DualCore.Native: ApplicationProxy.onCreate: guest boot complete
-
-
-`guest-boot.txt`: `outcome=booted-at-startup`, `instantiated=true attached=true onCreated=true`. Framework-driven, native-backed. Rule 15 compliant — ApplicationProxy shape matches reference.
-
-### The wall: `getProviderInfo`
-androidx.startup.InitializationProvider.onCreate
-→ AppInitializer.discoverAndInitialize
-→ PackageManager.getProviderInfo("com.viber.voip", "androidx.startup.InitializationProvider")
-→ ApplicationPackageManager.getProviderInfo
-→ AMS: NameNotFoundException: ComponentInfo{com.viber.voip/androidx.startup.InitializationProvider}
-
-AMS doesn't know Viber's providers because Viber isn't installed as a package. 7/15 providers succeed (those not requiring AMS acknowledgment); 8/15 cascade from `androidx.startup` failing.
-
-**Not implemented, not touched:** `BinderTransactHook` needs to intercept the `IPackageManager.getProviderInfo` AIDL code, synthesize a reply from `getPackageArchiveInfo(apk, GET_PROVIDERS)`, same pattern as existing code-3 handling.
-
-### Corrections to prior notes
-
-- `nativeInit` is **3 params** `(Ljava/lang/String;Ljava/lang/String;I)`, not 9.
-- `nativeInit` (arm64 `sub_2A998`) == `nativeOnLoad` (x86 `sub_D420`) — same function across builds.
-- Reference registers **37** natives on ApplicationProxy, not 90. `JNI_OnLoad` shows `RegisterNatives(proxy, table, 0x25)`.
-- ApplicationProxy is **not** in the manifest; `KXQPApplication` is.
-- Session 19e's `LoadedApk.makeApplication` path was our invention; reference never takes it (`canAccessDataDir` → `NETWORK_STACK` wall was self-inflicted).
-
-### Rule 15 status
-
-Engine behavior is in native. Kotlin's role is (a) Application subclass surface — unavoidable because Kotlin forbids `external override`; (b) the container driver `DualApplication` — mirrors `KXQPApplication`; (c) test harness `GuestLoadTest`. All boot logic in `ApplicationProxy.cpp`. `GuestClassLoader` is JVM classloader policy (delegation inversion), not engine behavior; eventual `nativeFNLN` decomp replaces it.
+Corrections: `nativeInit` is 3 params not 9; `nativeInit` (arm64) == `nativeOnLoad` (x86); reference registers 37 not 90; `ApplicationProxy` not in manifest; Session 19e's `LoadedApk.makeApplication` path was our invention.
 
 ---
 
 ## Session 22 — Wall A closed, providers 8/15 → 14/15 — 2026-10-26
 
-### Mission #1 status: 14/37 coverage, integration depth up
+Mission #1 status: 14/37 coverage, integration depth up. Two fixes:
 
-Session 22 closed a four-session stuck wall (`bb2` DI). Coverage counter unchanged (no new method ports — this was integration depth). Biggest single-session delta since Session 18's first boot.
+**Fix 1** — `Process.setArgV0` via reflection (hidden on API 37). `ReflectGetDeclaredMethod(env, Process.class, "setArgV0", {String.class})` via `HiddenApiBridge`, then invoke. Works.
 
-### The two fixes that unblocked four sessions
+**Fix 2** — `PatchActivityThreadState` after `makeApplication`. Patches `mBoundApplication.processName`, `mBoundApplication.appInfo`, `mInitialApplication`. Providers jumped to 14/15.
 
-**Fix 1 — `Process.setArgV0` via reflection**
+**Bonus** — `LoadedApk` path works with `mClassLoader`/`mResources` pre-populated. Skips `canAccessDataDir` → `NETWORK_STACK` wall.
 
-Previous sessions: `setArgV0: method not found` — `GetStaticMethodID` fails because the method was hidden on API 37. Result: `Process.myProcessName()` returned `com.ims134.hookengine`, Viber's `isMainProcess()` returned false, and Viber's DI setup (`bb2`) was silently skipped. Every provider that called `bb2.r5(...)` etc. threw NPE.
+**Wall A** — `ViberApplication.onCreate` line 65 throws `IllegalArgumentException: unknown component class ii` (gu4.u, Viber-internal registry lookup). Fixed by swallow in `nativeCreateGuest` with correct JNI semantics: get throwable ref → `ExceptionClear()` → THEN `FindClass`. Previous version called `FindClass` with pending exception → JNI abort → SIGABRT.
 
-Fix: `ReflectGetDeclaredMethod(env, Process.class, "setArgV0", {String.class})` via `HiddenApiBridge`, then invoke. Now works — log line `setArgV0(com.viber.voip) OK (reflection)`.
+**Wall B** — `IStorageManager.getVolumeList(uid=10428, callingPackage="com.viber.voip")` rejected. Not addressed in Session 22.
 
-**Fix 2 — `PatchActivityThreadState` after `makeApplication`**
+Files: `ApplicationProxy.kt`, `DualApplication.kt`, `GuestClassLoader.kt`, `GuestHost.kt`, `PmSpoof.kt`, `ApplicationProxy.cpp`, `PROJECT_STATE.md`.
 
-Even with `setArgV0` succeeding, `ActivityThread.mBoundApplication.processName` was still `com.ims134.hookengine` — this is what Viber's `Application.getProcessName()` and modern `Application.getProcessName()` static reads actually see. Patched to `com.viber.voip`, along with `mBoundApplication.appInfo` (our patched `ApplicationInfo`) and `mInitialApplication` (the booted guest Application).
-
-Log lines confirming:
-PatchAT: mBoundApplication.processName = com.viber.voip
-PatchAT: mBoundApplication.appInfo patched
-PatchAT: mInitialApplication patched
-
-
-**After these two fixes, providers jumped to 14/15 on the first run.** Confirms `isMainProcess()` was the `bb2` gate.
-
-### Bonus — LoadedApk path also works now
-
-Session 19e failed at `canAccessDataDir → setVmPolicy → INetworkManagementService.setUidCleartextNetworkPolicy → NETWORK_STACK SecurityException`. That wall is bypassed by pre-populating `LoadedApk.mClassLoader` and `LoadedApk.mResources` before calling `makeApplication`. If `mClassLoader != null`, `makeApplicationInner:1733`'s call to `getClassLoader()` returns immediately and `createOrUpdateClassLoaderLocked` (containing `canAccessDataDir`) is never reached.
-
-Log confirms:
-BootLoadedApk: mClassLoader pre-set
-BootLoadedApk: mResources pre-set
-BootLoadedApk: invoking makeApplication
-BootLoadedApk: Application created=0x...
-BootGuest: LoadedApk path SUCCEEDED
-
-
-Guest `Application` now has a real `ContextImpl` bound to a real `LoadedApk` — log line `DualApplication.onCreate: guest booted — com.viber.voip.ManifestViberApplication base=android.app.ContextImpl`.
-
-### Wall A — resolved
-
-`ViberApplication.onCreate` throws `IllegalArgumentException: unknown component class ii`:
-java.lang.IllegalArgumentException: unknown component class ii
-at gu4.u(1)
-at coa.a(497)
-at coa.b(28)
-at wdx.a(665)
-at com.viber.voip.ViberApplication.onCreate(65)
-
-
-Viber throws this **inside its own `onCreate`, at line 65, after setting up `bb2` (lines 1-64).** Providers pass 14/15 despite the throw — proof that whatever line 65 is looking for is **not required for provider boot or engine init**.
-
-**What did NOT help:**
-- `PmSpoof` synthesis of `getServiceInfo`, `getActivityInfo`, `getReceiverInfo` — did not help. The throw happens *before* any PackageManager call; it's a Viber-internal registry lookup (`gu4.u` throws because a tag string `"ii"` isn't found in a class-name registry).
-
-**Fix:** swallow the exception in `nativeCreateGuest`. Critical JNI detail: previous version called `env->FindClass("java/lang/IllegalArgumentException")` while the `IllegalArgumentException` was **still pending**. JNI spec forbids `FindClass` with pending exception → JNI abort → SIGABRT. Fix: get throwable ref → `ExceptionClear()` → *then* `FindClass`.
-
-**Log confirming the swallow:**
-DualCore.Native: nativeCreateGuest: Viber DI 'unknown component class' swallowed — bb2 already set
-DualCore.Native: nativeCreateGuest: done (created=true)
-DualCore.Guest:  outcome=booted-viber-order elapsed=1654ms
-DualCore.Guest:  providers: declared=15 attempted=15 ok=14 fail=1
-
-
-**What the swallow does NOT do:** it does not unblock Viber's DI further. It catches and moves on. If line 65's failure has a downstream effect (deferred work that never runs), it surfaces later as a *different* wall (see Wall B).
-
-### Wall B — named
-
-Viber's JNI Engine thread `IO_POOL-2` calls `Environment.getExternalStorageDirectory()` → `IStorageManager.getVolumeList(uid=10428, callingPackage="com.viber.voip")`. AMS `StorageManagerService` rejects: our real UID is 10428, `com.viber.voip` doesn't own that UID (Viber isn't installed).
-
-FATAL EXCEPTION: IO_POOL-2
-Process: com.viber.voip, PID: 10000
-java.lang.SecurityException: callingPackage does not match UID
-at android.os.storage.IStorageManager$Stub$Proxy.getVolumeList(IStorageManager.java:1465)
-at android.os.Environment$UserEnvironment.getExternalDirs(Environment.java:251)
-at android.os.Environment.getExternalStorageDirectory(Environment.java:903)
-at com.viber.jni.Engine$5.lambda$initInstance$0(SourceFile:5)
-
-
-Not addressed in Session 22 — Wall B is Session 23's work.
-
-### Files touched this session
-
-**Modified:**
-- `app/src/main/java/com/ims134/hookengine/ApplicationProxy.kt`
-- `app/src/main/java/com/ims134/hookengine/DualApplication.kt`
-- `app/src/main/java/com/ims134/hookengine/GuestClassLoader.kt`
-- `app/src/main/java/com/ims134/hookengine/GuestHost.kt`
-- `app/src/main/java/com/ims134/hookengine/PmSpoof.kt`
-- `app/src/main/cpp/ApplicationProxy.cpp`
-- `app/PROJECT_STATE.md`
-
-### Coverage: 14/37 (unchanged)
-
-Coverage counter flat; integration depth up. Rule 3 exception stated openly: this session made the 14 methods actually *usable* by getting Viber past DI. Wall B is next.
+Coverage: 14/37 unchanged. Rule 3 exception stated openly.
 
 ---
 
 ## Session 23 — Wall B closed; milestone 3 verified — 2026-10-26
 
-### Mission #1 status: 14/37 coverage, milestone 3 verified
+Mission #1 status: 14/37 coverage, milestone 3 verified.
 
-Session 23 closed Wall B (storage callingPackage UID mismatch) and verified milestone 3 (engine ready, no crash in 60s, active background IPC). Coverage counter unchanged — this was integration depth, not new method ports.
+Wall B fix: `ParcelRewriter_TryRewriteStorageRequest` in `CppParcelRewriter.cpp`. Called from `Hook_Transact` before `_orig_transact`. Parses AIDL request prelude, rewrites `callingPackage` from `"com.viber.voip"` (14 chars) to `"com.ims134.hookengine"` (21 chars), +12 byte delta.
 
-### Wall B — closed
+Hook installed at `GuestHost.load` entry before guest boot. Verified 3 runs: `STORAGE rewrite fired: code=30 userId=0 size=132->144 delta=12` each time.
 
-Viber's JNI Engine threads (`IO_POOL-1`, `TM:MESSAGES`) crashed on `IStorageManager.getVolumeList` because AMS rejected `callingPackage="com.viber.voip"` — our real UID 10428 owns `com.ims134.hookengine`, not `com.viber.voip`.
+Milestone 3 verified by 60s probe: no crash, background IPC at 3.5s (code 3) and 60s (code 36). Zero FATAL, zero signal, zero ANR.
 
-**Fix: `ParcelRewriter_TryRewriteStorageRequest` in `CppParcelRewriter.cpp`.**
+Files: `CppParcelRewriter.cpp`, `BinderTransactHook.cpp`, `GuestHost.kt`, `GuestLoadTest.kt`.
 
-Called from `Hook_Transact` before `_orig_transact`. Pure C++, no JNI on the caller thread — Rule 8 not violated.
+Coverage: 14/37 unchanged. Rule 3 exception stated openly.
 
-- Parses AIDL request prelude: strict policy, worksource, magic (0x53595354), interface token.
-- If `iface == "android.os.storage.IStorageManager"`, reads userId, then reads the callingPackage string16.
-- If `callingPackage == "com.viber.voip"`, rebuilds the parcel: `"com.viber.voip"` (14 chars, 36 bytes) → `"com.ims134.hookengine"` (21 chars, 48 bytes), +12-byte delta at the string position, entire suffix shifted.
-- Swaps `mData` pointer to fresh `malloc`'d buffer (Rule 10 — reply buffer read-only post-transact is a different parcel; request buffer is caller-owned but we copy anyway).
-- Restores `mDataPos = oldPos + 12` if the reader was past the string; `= oldPos` otherwise.
+---
 
-**Hook installed at `GuestHost.load` entry, before guest boot.** Previously the hook was only installed by tests and `RemoteService` — so Viber's Engine thread crashed 47ms after boot with no hook in place. This was the race: our boot path and Viber's Engine thread, hook not yet active when the storage call fires.
+## Session 24 — scoping decision, milestone 3 accepted — 2026-10-26
 
-**Verified 3 runs on-device.**
-
-Every run:
-DualCore.Guest: BinderTransactHook installed for guest boot
-DualCore: STORAGE rewrite fired: code=30 userId=0 size=132->144 delta=12
-DualCore.Guest: outcome=booted-viber-order onCreated=true
-DualCore.Guest: providers: declared=15 attempted=15 ok=14 fail=1
-
-
-Every run:
-- **No `FATAL EXCEPTION`**
-- **No `IO_POOL` / `TM:MESSAGES` crash**
-- **No `callingPackage does not match UID`**
-- Process alive at last log line
-
-`code=30` = `IStorageManager.getVolumeList` on API 37. Size grew 132 → 144 = exactly the +12-byte string16 delta.
-
-The `providers=14/15 fail=1` is `MlKitInitProvider: IllegalStateException: MlKitContext is already initialized` — Google ML env noise, documented since Session 19a. Not a Viber signal.
-
-### Milestone 3 — verified
-
-60-second probe (`Thread.sleep(60_000)` in `GuestLoadTest`). Boot completed at `05:26:01.389`. Log ends at `05:27:01.430` — 60.04 seconds. **Zero crash signals of any kind.**
-
-**And Viber is actively working the whole time:**
-
-| Time post-boot | Event | Meaning |
-|---|---|---|
-| 3.5s | `RewriteOnFreshThread: code 3 in: size=1848` — `ParcelRewriter: code 3 signatures nulled for com.ims134.hookengine` — `swapped reply (1848 -> 1848 bytes)` | **Background Viber thread called `getPackageInfo` on its own package** |
-| 60.0s | `RewriteOnFreshThread: code 36 in: size=66652` | **Background Viber thread called `getInstalledPackages`** |
-
-Two distinct PackageManager IPC calls from **background Viber threads** — nothing the main thread could produce. The JNI Engine is alive, running, and issuing IPC after init. Not a hang, not a zombie, not a crash. Milestone 3 (engine ready) is functionally verified by the same standard that found Wall A and Wall B — silence in the crash channel plus active background work.
-
-### What milestone 3 does NOT prove
-
-Honest scope:
-- Not proven: network connectivity works from inside the engine.
-- Not proven: Viber can register, receive a message, or display UI.
-- Not proven: reference's full 37-native surface is exercised.
-- Not proven: the Activity lifecycle path (milestone 4) works — that's a new architecture layer, not started.
-
-### Files touched
-
-**Modified:**
-- `app/src/main/cpp/CppParcelRewriter.cpp` — added `ParcelRewriter_TryRewriteStorageRequest` (a full-function add, ~110 lines). Existing `ParcelRewriter_MatchesRequest` and `ParcelRewriter_Init` unchanged.
-- `app/src/main/cpp/BinderTransactHook.cpp` — `Hook_Transact` now calls `ParcelRewriter_TryRewriteStorageRequest` before `_orig_transact`. One guarded call site.
-- `app/src/main/java/com/ims134/hookengine/GuestHost.kt` — `BinderTransactHook.install()` call at entry of `load()`, before the `alreadyBooted` check.
-- `app/src/androidTest/java/com/ims134/hookengine/GuestLoadTest.kt` — IPC code drain after 60s post-boot sleep; `ipcCodesRaw` and `ipcCodeCount` fields added to `guest-boot.txt`.
-
-### Test suite unchanged
-
-52 registered = 49 pass + 3 ignored. `GuestLoadTest` runs as 1 test — assertion is `result.outcome != "?"` (Rule 12 compliant; boot success is data, not gate). No test file outside `GuestLoadTest.kt` was touched. `BinderTransactE2ETest`, `BinderTransactHookTest`, `AidlCodeProbeTest`, `Session11ProbeTest`, `Session11Code36ReplyTest` all still depend on `Hook_Transact` — the new `ParcelRewriter_TryRewriteStorageRequest` call site is guarded by `if (!(flags & 1) && data)` and by iface-token match inside, so IPackageManager code 3 / code 36 traffic passes through to the existing rewriter path unchanged.
-
-### Coverage: 14/37 (unchanged)
-
-Rule 3 exception stated openly: Wall B was an integration wall, not a coverage gap. Integration depth up. Milestone 3 verified. Session 24's task is a scoping decision, not a wall-fix.
-
-### Session 24 — the scoping decision
-
-Session 23 verified milestones 1–3. Milestone 4 (Activity lifecycle) is a materially different scope from everything so far. It's not "one more wall." It's ~3-6 weeks of focused work on a new architectural layer:
-
-- `Instrumentation.newActivity()` for Viber's launcher Activity class.
-- `Activity.attach(baseContext, activityThread, ...)` with proper `mInstrumentation`.
-- `Window` creation via `WindowManagerImpl` — the Activity needs a real `Surface`.
-- AMS registration via `ActivityTaskManager.startActivity` with a spoofed `ComponentName` that AMS accepts.
-- Task stack: task record, task id, launch flags.
-
-Each of these has its own set of walls. It's been done by containers like VirtualApp/BlackBox; it's typically 3–6 weeks of focused work on a new phone if you follow the reference architecture exactly.
-
-**Three options for the operator to decide before Session 24 opens:**
-
-1. **Accept milestone 3, close the "Viber boot" chapter.** Commit Session 22+23 as clean wins. Session 24 is a scoping decision, not a new session opener.
-
-2. **Probe milestone 4's first wall.** Session 24 opens with `Instrumentation.newActivity()` + `Activity.attach()` attempt. Same wall-fix methodology. First wall is likely `ActivityThread.mInstrumentation` null or `ActivityTaskManager` component-not-found. Budget: 3–6 weeks of sessions.
-
-3. **Functional scope (milestone 5).** Network, register, message. Months of work. Skip milestone 4 entirely (Viber may not require UI for engine functionality).
-
-**My recommendation: Option 1.** Wall B is verified 3× with the exact mechanism logged. Milestone 3 is verified by the same standard as Walls A and B. Don't start milestone 4 in the same mental session — that's a fresh project.
+See Session 24 close narrative at top.
 
 ---
 
 ## Hard-won facts (canonical reference)
 
-- **Under `am instrument`, ALL `jobject`-touching JNI calls crash on a caller thread with a JIT `BinderProxy.transact` frame above it.** Not just `NewGlobalRef`. `GetLongField` dies the same way. (Rule 8)
+- **Under `am instrument`, ALL `jobject`-touching JNI calls crash on a caller thread with a JIT `BinderProxy.transact` frame above it.** Not just `NewGlobalRef`. (Rule 8)
 
 - **`android::IPCThreadState::transact` is the correct hook for AIDL interception on this ROM.** Symbol `_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j`, in `libbinder.so` dynsym.
 
-- **dlsym filters android::Parcel primitives on this ROM.** Use dynsym scan for any `libbinder.so` symbol. (Rule 9)
+- **dlsym filters android::Parcel primitives on this ROM.** Use dynsym scan. (Rule 9)
 
 - **`android::Parcel` field offsets (IDA-verified, API 37, arm64):**
     - `+0` mError (int32)
@@ -1438,60 +521,63 @@ Each of these has its own set of walls. It's been done by containers like Virtua
     - `+81` mParseHeader (byte), `+82` mParseHeaderPadding (byte)
     - `+88` mType (int32)
 
-- **Reply parcel's `mData` buffer is read-only post-transact.** Never write into `mData` directly; always swap the pointer to a fresh `malloc`'d copy. (Rule 10)
+- **Reply parcel's `mData` buffer is read-only post-transact.** Never write into `mData` directly; always swap the pointer. (Rule 10)
 
 - **The fresh-thread rewriter pattern:** `Parcel.obtain()` → `SetLongField(mNativePtr, targetPtr)` → run rewriter → `SetLongField(mNativePtr, originalPtr)` → `recycle()`.
 
 - **Kotlin `object` instance fields are not static.** Use `@JvmStatic` accessors. (Rule 11)
 
 - **API 37 writeInterfaceToken wire format** (Session 9, IDA-verified):
-  offset 0: [int32 strictModePolicy | STRICT_MODE_PENALTY_GATHER (0x80000000)]
-  offset 4: [int32 workSource] (default -1)
-  offset 8: [int32 PARCEL_HEADER_MAGIC = 0x53595354] ← "SYST"
-  offset 12: [int32 n] (string16 length in chars)
+  offset 0: [int32 strictModePolicy | 0x80000000]
+  offset 4: [int32 workSource]
+  offset 8: [int32 PARCEL_HEADER_MAGIC = 0x53595354]
+  offset 12: [int32 n]
   offset 16: [2n bytes UTF-16 interface token]
   offset ..: [int16 null terminator]
   offset ..: [pad to 4-byte boundary]
   offset ..: [AIDL args]
 
-- **Code-36 reply on this ROM — observed layout (Session 11, 128 bytes):**
-  [int32 ex=0][int32 hasResult=1][int32 N=278][int32 class_name_len=30][60 bytes UTF-16 "android.content.pm.PackageInfo"][int16 null][pad to 4][int32 unknown=0 at +80][int32 unknown=1 at +84][int32 unknown=-1 at +88][int32 packageName_len=41][41 bytes ASCII …]
-  `packageName` uses `writeString8` on this ROM (MIUI change). The three int32s at 80/84/88 remain unverified without decomp.
+- **Code-36 reply on this ROM — observed layout (Session 11):** `packageName` uses `writeString8` on this ROM (MIUI change). Three int32s at 80/84/88 unverified.
 
-- **`g_rewrite_effective_count` vs `g_rewrite_count`:** "dispatched" vs "delivered a swap." Session 14 fix: counter now gates on local `swapped` bool — previously incremented unconditionally, counting rewriter throws and zero-length results as effective. Session 14 verified: `rewriteEffective=3` matches three "swapped reply" log lines.
+- **`g_rewrite_effective_count` vs `g_rewrite_count`:** dispatched vs delivered. Session 14 fix: gate on local `swapped` bool.
 
 - **`getPackageInfo(pkg, 0)` does not reliably fire on this ROM** due to framework caching. Only `getPackageInfo(pkg, GET_SIGNATURES)` reliably issues IPC. Use `getInstalledPackages(...)` for code-36 dispatch tests.
 
-- **`nativeCNVM` arity guard reads `sigLen` captured BEFORE `ReleaseStringUTFChars`.** Session 14 fix. Post-release `strlen(sig)` is UB — the buffer is unpinned, and `FromReflectedMethod`/`GetObjectClass` in between are GC safepoints. Do not move the `strlen` back after the release.
+- **`nativeCNVM` arity guard reads `sigLen` captured BEFORE `ReleaseStringUTFChars`.** Session 14 fix. Post-release `strlen(sig)` is UB.
 
-- **`handleJHMethod`'s scaffolding helpers exist but are unreachable from the stub body.** Session 15 made this deliberate via HANDLEJHMETHOD_DECOMP_SPEC.md. Do not modify any helper's behavior or add tests pinning their current behavior until the decomp spec's exit criteria are met. The helpers are compiled but not called — this is not a defect, it is the plan.
+- **`handleJHMethod`'s scaffolding helpers exist but unreachable from stub body.** Session 15 made deliberate via HANDLEJHMETHOD_DECOMP_SPEC.md.
 
-- **`g_iihe_quiet` in `InlineHooker.cpp`** gates the 15 verbose `IIHE(...)` LOGD lines inside `InstallInlineHookEx`. Errors (LOGE) always print. `test_regression.cpp::RunRegressionBug4` sets it around its 1000-cycle stress loop. Session 15 verified: 0 `IIHE(bug4):` lines in the run log (was ~15,000).
+- **`g_iihe_quiet` in `InlineHooker.cpp`** gates verbose `IIHE(...)` LOGD lines inside `InstallInlineHookEx`. Session 15 verified: 0 `IIHE(bug4):` lines (was ~15,000).
 
-- **Loopback bind on API 37 / HyperOS fails with `SocketException: EPERM`** in the instrumentation process. Android 15+ restricts unprivileged `bind()` on `127.0.0.1`. This makes any test requiring a real loopback listener impossible on this device in the instrumentation process. `AntiDetectionE2ETest` three connect tests are `@Ignore`'d for this reason (Session 15). The decision-function coverage in `AntiDetectionTest` still asserts the exact `Fake_connect` behavior.
+- **Loopback bind on API 37 / HyperOS fails with `SocketException: EPERM`.** AntiDetectionE2ETest three connect tests `@Ignore`'d.
 
-- **Pass/fail parsing from `am instrument -w -r` (Session 16 correction).** Both of the following are trustworthy pass signals:
-    - `OK (N tests)` — standard AndroidJUnitRunner line
-    - `run finished: N tests, 0 failed, Y ignored` — custom line from the wrapper listener, only appears on green runs
-      Fail is `FAILURES!!!` followed by `Tests run: N, Failures: M`. Neither `OK` nor `run finished` appears on fail. `INSTRUMENTATION_CODE: -1` remains untrustworthy in isolation (fires for both pass and fail). Session 15's claim that `run finished:` is authoritative and `OK (N tests)` unreliable was wrong.
+- **Pass/fail parsing from `am instrument -w -r`:** `OK (N tests)` OR `run finished: N tests, 0 failed, Y ignored`. Fail is `FAILURES!!!` + `Tests run: N, Failures: M`. `INSTRUMENTATION_CODE: -1` untrustworthy in isolation.
 
-- **`:remote` `startService` flake is AMS state, not a code crash (Session 16).** `SecurityException: ... : process is bad` at `IntegrationTest.kt:21` fires when AMS has already marked the `:remote` process record bad — the crash is upstream, not from the `startService` call. Passing runs' logcat confirms `:remote` starts cleanly (attachBaseContext → onCreate → onStartCommand → cleanup kill; no FATAL, no signal). Observed 3 pass / 2 fail across Sessions 13–16. Retry-with-backoff in `IntegrationTest.selftestReportIsComplete` (3 attempts, 2s/4s) mitigates the symptom; recovery path unverified.
+- **`:remote` `startService` flake is AMS state, not code crash (Session 16).** `process is bad` when AMS has marked record bad. 3 pass / 2 fail across Sessions 13–16. Retry-with-backoff mitigates symptom; recovery path unverified.
 
-- **`Process.setArgV0` is hidden on API 37.** `GetStaticMethodID(Process, "setArgV0", "(Ljava/lang/String;)V")` returns null. Direct lookup fails. Fix: `ReflectGetDeclaredMethod(env, Process.class, "setArgV0", {String.class})` via `HiddenApiBridge`, then invoke. Works. (Session 22)
+- **`Process.setArgV0` is hidden on API 37.** Fix: `ReflectGetDeclaredMethod(env, Process.class, "setArgV0", {String.class})` via `HiddenApiBridge`. Works. (Session 22)
 
-- **`ActivityThread.mBoundApplication.processName` is not patched by `setArgV0`.** Even after `setArgV0` succeeds, `Application.getProcessName()` / modern static reads see `mBoundApplication.processName` — patched separately via `PatchActivityThreadState` after `makeApplication`. (Session 22)
+- **`ActivityThread.mBoundApplication.processName` is not patched by `setArgV0`.** Patch separately via `PatchActivityThreadState` after `makeApplication`. (Session 22)
 
-- **`LoadedApk` path works if `mClassLoader` and `mResources` are pre-populated before `makeApplication`.** `makeApplicationInner:1733` calls `getClassLoader()` and short-circuits if `mClassLoader != null`, skipping `createOrUpdateClassLoaderLocked` (which contains the `canAccessDataDir` → `NETWORK_STACK` wall). Session 19e's `NETWORK_STACK` crash was self-inflicted; the reference never takes this path but ours does and it works with the pre-population. (Session 22)
+- **`LoadedApk` path works if `mClassLoader` and `mResources` pre-populated before `makeApplication`.** Skips `canAccessDataDir` → `NETWORK_STACK` wall. (Session 22)
 
-- **Viber DI (`bb2`) is set inside `ViberApplication.onCreate` lines 1-64, then line 65 throws `unknown component class ii`.** The throw is a Viber-internal registry lookup (`gu4.u`), not a PackageManager call — PmSpoof additions do not help. Swallow it with correct JNI semantics: capture throwable ref, `ExceptionClear()`, THEN `FindClass`. Calling `FindClass` with pending exception → JNI abort → SIGABRT. (Session 22)
+- **Viber DI (`bb2`) set inside `ViberApplication.onCreate` lines 1-64, then line 65 throws `unknown component class ii`.** Swallow with correct JNI semantics: capture throwable ref, `ExceptionClear()`, THEN `FindClass`. (Session 22)
 
-- **`IStorageManager` transacts use code 30 = `getVolumeList` on API 37.** AMS rejects `callingPackage` mismatch: our real UID 10428 owns `com.ims134.hookengine`, not `com.viber.voip`. Fix: rewrite the callingPackage string16 from `com.viber.voip` (14 chars, 36 bytes) to `com.ims134.hookengine` (21 chars, 48 bytes), +12-byte delta at the string position, entire suffix shifted. `ParcelRewriter_TryRewriteStorageRequest` in `CppParcelRewriter.cpp` handles this on the caller thread (pure C++, no JNI). (Session 23)
+- **`IStorageManager` transacts use code 30 = `getVolumeList` on API 37.** AMS rejects `callingPackage` mismatch. Fix: rewrite callingPackage string16 (14→21 chars, +12 delta). `ParcelRewriter_TryRewriteStorageRequest` in `CppParcelRewriter.cpp` on caller thread (pure C++, no JNI). (Session 23)
 
-- **`BinderTransactHook` must be installed BEFORE guest boot.** Previously only tests and `RemoteService` installed it — so `GuestHost.load` ran without the hook, Viber's Engine thread called `IStorageManager.getVolumeList` 47ms after boot, AMS rejected → SIGKILL. Install at `GuestHost.load` entry, before the `alreadyBooted` check. (Session 23)
+- **`BinderTransactHook` must be installed BEFORE guest boot.** (Session 23)
 
-- **Milestone 3 (engine ready) verification standard.** Same methodology that found Walls A and B: run longer, look at what breaks, name the wall. 60s probe returns silence → engine survived. Two background IPC calls (code 3 at 3.5s, code 36 at 60s) from Viber threads post-boot is the positive proof that the engine is alive, not a zombie. (Session 23)
+- **Milestone 3 (engine ready) verification standard.** Same methodology that found Walls A and B. 60s probe silence + active background IPC. (Session 23)
 
-- **MLKit init failure (`MlKitInitProvider: MlKitContext is already initialized`)** is env noise from our host process initializing MLKit before the guest boots. Not a Viber signal. Documented since Session 19a. Do not add `com.google.mlkit.` to `GUEST_PRIORITY_PREFIXES`. 14/15 providers is the healthy state.
+- **MLKit init failure is env noise.** Not a Viber signal. 14/15 providers is healthy. (Session 19a)
+
+- **API 37 `IContentProvider.AttributionSource` layout differs from AOSP** (Session 28, verified): `[+0]=leading int32 (92, purpose unknown — PRESERVE) [+4]=uid [+8]=pid [+12]=tag length (0) [+16]=pkg length [+20]=pkg chars UTF-16 [+48]=null [+50]=pad [+52]=suffix`. Total rewrite +12 bytes; uid at `[+4]`, pkg at `[+16]`, suffix from `[+52]`. Leading 92 preserved and accepted by server — not a length validated on this call path. Do not trust AOSP stack traces for this iface on this ROM.
+
+- **Wall C2 dispatch was identical to Wall B dispatch.** `ParcelRewriter_TryRewriteCallerIdentity` handles both `IStorageManager` (code 30) and `IContentProvider` (codes 1 and 21) via iface-token match. Intended architecture for future caller-identity walls: add iface case, don't refactor.
+
+- **`Instrumentation.newActivity` DOES call `Activity.attach` internally** (Session 26 stack trace: `Instrumentation.newActivity(1446)` → `Activity.attach(9482)`). Code assuming `newActivity` returns unattached Activity will double-attach or NPE.
+
+- **MIUI's `miui.contentcatcher.InterceptorProxy.addMiuiApplication` spawns `Thread-26` during Activity creation** (Session 28, Wall C3). Thread-26 calls `miui.process.ProcessManager.addMiuiApplicationThread()` which MIUI's server checks with `Binder.getCallingUid()` (kernel-assigned 10428, not parcel's 10000). SecurityException → FATAL on Thread-26 → does NOT kill process. Rewritability TBD (Session 29). If unrewritable: `ProcessManagerService` server-side hook (native, aggressive) or accepted-wall documentation. Consequence: MIUI interceptor doesn't attach, downstream MIUI behavior degraded.
 
 ---
 
@@ -1503,135 +589,555 @@ Each of these has its own set of walls. It's been done by containers like Virtua
 - Session 10: 43 tests
 - Session 11: 47 tests
 - Session 12: 48 tests
-- Session 13: 52 tests (claim — unverified; actual -r showed 48 running, ProxyBridgeSurfaceTest not in output)
-- Session 14: **52 tests** (verified — first run in which ProxyBridgeSurfaceTest appears in -r; 52 pass, 0 fail)
-- Session 15: **52 registered = 49 pass + 3 ignored** (AntiDetectionE2ETest three connect tests @Ignore'd on loopback EPERM)
-- Session 16: **52 registered = 49 pass + 3 ignored** (`OK (49 tests)` — 3 `@Ignore`'d tests not counted in JUnit total; retry mitigation added to IntegrationTest, recovery path unverified)
-- Session 17: **52 registered = 49 pass + 3 ignored** (`OK (49 tests)` — stale-APK fix, retry code verified on device, not exercised)
-- Session 22: **52 registered = 49 pass + 3 ignored** (unchanged; GuestLoadTest observed green throughout)
-- Session 23: **52 registered = 49 pass + 3 ignored** (unchanged; GuestLoadTest runs as 1 test, outcome=data assertion. No test file outside GuestLoadTest.kt touched. BinderTransactE2ETest / BinderTransactHookTest / AidlCodeProbeTest / Session11ProbeTest / Session11Code36ReplyTest unchanged by the new storage rewrite call site — it's guarded by iface token match.)
-- Session 24: **52 registered = 49 pass + 3 ignored** (unchanged; scoping session, no code touched).
+- Session 13: 52 (claim — unverified)
+- Session 14: **52 verified** (first run with ProxyBridgeSurfaceTest in -r)
+- Session 15: **52 registered = 49 pass + 3 ignored**
+- Session 16: **52 registered = 49 pass + 3 ignored**
+- Session 17: **52 registered = 49 pass + 3 ignored**
+- Session 22: **52 registered = 49 pass + 3 ignored**
+- Session 23: **52 registered = 49 pass + 3 ignored**
+- Session 24: **52 registered = 49 pass + 3 ignored** (scoping session)
+- Session 25: **52 registered = 49 pass + 3 ignored** (ActivityBootProbeTest added as 1-test probe, `OK (1 test)`, diagnostic)
+- Session 26: **52 registered = 49 pass + 3 ignored** (probe fix + Wall C2 discovery)
+- Session 27: **52 registered = 49 pass + 3 ignored** (probe with wrong layout)
+- Session 28: **52 registered = 49 pass + 3 ignored** (Wall C2 fix verified, `lifecycle.result=onCreate+onStart+onResume all succeeded`, background Thread-26 FATAL doesn't fail probe)
 
-Coverage history:
+---
+
+## Coverage history
+
 - Session 7: 10 / 90 (~11%) — historical denominator, corrected in Session 20
-- Session 8: 11 / 90 (~12%)
-- Session 9: 12 / 90 (~13%)
-- Session 10: 13 / 90 (~14%)
-- Session 11: 13 / 90 (~14%) — unchanged, honestly reported
-- Session 12: 13 / 90 — unchanged, honestly reported
+- Session 8: 11 / 90
+- Session 9: 12 / 90
+- Session 10: 13 / 90
+- Session 11: 13 / 90 — unchanged, honestly reported
+- Session 12: 13 / 90 — unchanged
 - Session 13: 14 / 90 — claimed; Session 14 verified
-- Session 14: **14 / 90 (~16%)** — verified via `am instrument -r`
-- Session 15: 14 / 90 — unchanged, honest no-growth (prep + cleanup, no new methods)
-- Session 16: 14 / 90 — unchanged, `:remote` stability investigation + retry mitigation; no new methods
-- Session 17: 14 / 90 — unchanged, stale-APK discovery + retry-on-device confirmed (not exercised); no new methods. **Fourth consecutive no-growth session.**
-- Session 18: 14 / 90 — unchanged, DualHost pivot validated (Viber boot via GuestHost harness). Pivot-driven growth: `PmSpoof.signatureNullOutPackages` set.
-- Sessions 19+20: **14 / 37** — denominator corrected. `JNI_OnLoad` decomp shows `RegisterNatives(proxy, table, 0x25)` = 37, not 90. ApplicationProxy native boot delivered; provider wall named.
-- Session 22: **14 / 37** — unchanged, Wall A closed, providers 8/15 → 14/15. Integration depth up.
-- Session 23: **14 / 37** — unchanged, Wall B closed (3 runs verified), milestone 3 verified (60s probe clean, active background IPC). Integration depth up. Session 24 is a scoping decision, not a wall-fix.
-- Session 24: **14 / 37** — unchanged, scoping session (Option 1). Milestone 3 accepted. "Viber boot" chapter closed. No code touched.
+- Session 14: **14 / 90 (~16%)** — verified
+- Session 15: 14 / 90 — honest no-growth
+- Session 16: 14 / 90 — stability + retry
+- Session 17: 14 / 90 — stale APK fix
+- Session 18: 14 / 90 — DualHost pivot
+- Sessions 19+20: **14 / 37** — denominator corrected (37, not 90)
+- Session 22: **14 / 37** — Wall A closed
+- Session 23: **14 / 37** — Wall B closed, milestone 3 verified
+- Session 24: **14 / 37** — scoping session
+- Session 25: **14 / 37** — Wall C1 named
+- Session 26: **14 / 37** — Wall C1 closed, Wall C2 named
+- Session 27: **14 / 37** — Wall C2 diagnostic
+- Session 28: **14 / 37** — Wall C2 closed, Wall C3 named, milestone 4 to onResume
 
 ---
 
-## What Session 25 must do FIRST
+## What Session 29 must do FIRST
 
-Session 24 closed milestone 3 and the "Viber boot" chapter (Option 1). Session 25 starts a **new project**. The operator picks at Session 25 open — no default, no auto-pick:
+Session 29 has two parallel workstreams. **All engine changes are native C++ (`CppParcelRewriter.cpp`).** The test file (`ActivityBootProbeTest.kt`) is Kotlin — allowed per Rule 15 (test-only).
 
-1. **Milestone 4 — Activity lifecycle (UI).** `Instrumentation.newActivity()` + `Activity.attach()` + `Window` creation via `WindowManagerImpl` + `ActivityTaskManager.startActivity` with a spoofed `ComponentName` AMS accepts + task stack. **~3–6 weeks of sessions.** Commits Viber's UI as a goal. Kotlin workarounds forbidden (Rule 15) — each item must be a native port when the reference has a native, or Kotlin only when the reference is Kotlin.
-2. **Milestone 5 — Functional (network / register / message).** Skip milestone 4. Test whether Viber's engine path actually requires an Activity to exist. **Months.** Not recommended — the dependency of engine on Activity existence is unproven either way, and without milestone 4 proven you may discover the engine gates on it after committing the milestone 5 scope.
+### Workstream A — Wall C3 diagnosis + conditional fix
 
-### Step 0 — read `PROJECT_STATE.md` Session 24 section, then pick 4 or 5
+**Phase A1 — Diagnostic (add iface-token dump for MIUI interfaces to `CppParcelRewriter.cpp`).**
 
-Confirmation before opening Session 25:
+Add a diagnostic block in `ParcelRewriter_TryRewriteCallerIdentity`, after the iface-token read succeeds and before the existing dispatch. Fire only when iface token contains `"ProcessManager"` OR starts with `"miui."`. Cap to first 3 unique (iface, code) pairs to avoid spam. Log: iface ascii, code, first 128 bytes of prelude hex. Return false (passthrough — no rewrite).
+MIUI prelude dump: iface='...' code=N aS=M hex=<128 bytes>
 
-```powershell
-cd H:\Mobiles\AndroidProject\2027\hookEngine
-git log --oneline -5
-# Expect: Session 24: milestone 3 accepted, Viber boot chapter closed... at HEAD
-#         Session 23: Wall B CLOSED ... at HEAD~1
-#         Session 22: Wall A ... at HEAD~2
-git status --short
-# Expect: empty
+Rebuild, install, run probe, capture logcat. Read the dump.
 
-If either fails, Session 25 does not open until resolved.
+**Phase A2 — Decision tree.**
 
-Session 25 must NOT do
-Do not decomp-guess milestone 4. Activity lifecycle is a well-documented container-app pattern; follow the reference architecture exactly rather than reverse-engineering com.viber.voip.MainActivity bytecode.
+- **Rewritable-pattern-B (Wall B layout):** prelude after token is `[userId int32] [callingPackage String16]` — reuse Wall B logic, new iface token.
+- **Rewritable-pattern-C (Wall C2 layout):** prelude after token is `[leading int32] [uid] [pid] [tagLen] [pkgLen] [pkg chars]` — reuse Wall C2 logic, new iface token.
+- **Unrewritable:** prelude after token has no caller-identity field (bare ints, no pkg String16, no AttributionSource). Rewrite mechanism can't help.
 
-Do not run a "cleanup pass" on PROJECT_STATE.md Sessions 7–21 narratives. Historical. Leave them.
+**Phase A3 — Conditional fix (only if A2 = rewritable).**
 
-Do not re-tune Thread.sleep in GuestLoadTest. 60s is enough. Milestone 3 verified.
+Add third iface case to `ParcelRewriter_TryRewriteCallerIdentity`. New `else if` branch with the pattern-B or pattern-C logic. Rebuild, install, rerun. Verify `FATAL EXCEPTION: Thread-26` gone from logcat.
 
-Do not re-open Wall A, Wall B, or milestone 3 verification. All closed. Re-opening them is not "due diligence," it is refusing to accept evidence.
+If A3 succeeds and `FATAL EXCEPTION: Thread-26` is gone: Wall C3 closed.
 
-Do not add PmSpoof synthesis additions unless a real wall names it. Neither Wall A nor Wall B was PmSpoof-fixable. Any future wall that surfaces a PmSpoof path must be named first, not guessed at.
+If A3 fails with a new MIUI-side rejection (different exception, same Thread-26 origin): name the sub-wall. Possibly a second attribution field in a different AIDL interface. Investigate in Session 30.
 
-Do not touch handleJHMethod. Parked indefinitely per operator (Session 18). Stub, spec, scaffolding stay on disk untouched.
+**Phase A4 — If unrewritable (documentation only).**
 
-Rules of engagement (unchanged — restated for continuity)
-Every session opens with the mission header. No exceptions.
+Log a distinct line: `Wall C3 UNREWRITABLE: iface='...' has no caller identity in prelude`. Document in session close. Defer `ProcessManagerService` server-side hook to future session (aggressive, cross-process). Proceed to Workstream B. **No Kotlin workaround for the interceptor spawn** (Rule 15 violation). No exception-catcher suppression.
 
-DualHost integration may proceed at any coverage level. Reference reproduction is best-effort per method: a specific reference method is decomp'd and ported when a logged integration failure names it, not before. Rule 5 (match behavior, not signature) and Rule 7 (no speculative decomp) both stand. Integration drives coverage; coverage no longer gates integration.
+### Workstream B — Wall C4 probe extension (Kotlin test-only)
 
-Coverage number in every message. 14/37 now. Must be higher every session, with the exception stated openly when decomp or scoping blocks all growth. Sessions 11, 12, 15, 16, 17, 18, 19+20, 22, 23, 24 all failed this rule honestly; that is the enforcement, not a habit.
+**Phase B1 — Extend `ActivityBootProbeTest.kt`.**
 
-Every method shipped must have a test.
+After `onResume.result=success`, add:
 
-Do not declare a method "done" unless it matches the reference's behavior.
+```kotlin
+// Wall C4 probe — WindowManager.addView
+try {
+    val wm = activity.window.windowManager
+    val decor = activity.window.decorView
+    val lp = decor.layoutParams
+    report("wm", wm.javaClass.name)
+    report("decorView", decor.javaClass.name)
+    report("lp", lp?.javaClass?.name)
+    wm.addView(decor, lp)
+    report("addView.result", "success")
+    report("decorView.isAttachedToWindow", decor.isAttachedToWindow)
+    report("decorView.width", decor.width)
+    report("decorView.height", decor.height)
+} catch (t: Throwable) {
+    val cause = (t as? java.lang.reflect.InvocationTargetException)?.targetException ?: t
+    report("addView.threw", "${cause.javaClass.name}: ${cause.message}")
+    report("addView.stack", cause.stackTraceToString().lines().take(25).joinToString(" | "))
+}
 
-Session-by-session commit discipline. Green or the session is not done. Commit after every green milestone.
+Phase B2 — Categorize Wall C4.
 
-IDA-first when wire format, symbol contract, or field layout is uncertain.
+SecurityException: Calling uid: ... on IWindowSession.addToDisplayAsUser: third instance of Wall B/C2 pattern. Extend rewriter to android.view.IWindowSession. Wall C4 closes with fourth iface case.
 
-Any jobject-touching JNI call on a caller thread with a JIT BinderProxy.transact frame above it crashes on this ROM. Hook at C++ layer or offload to fresh attached thread.
+BadTokenException / WindowManager.BadTokenException: AMS rejects token because no task record exists. AMS-registration category. Wall C4 = task record wall.
 
-dlsym filters android::Parcel primitives and IPCThreadState::transact on this ROM. Use dynsym scan.
+RuntimeException on addView: Surface/SurfaceFlinger category. New mechanism needed (defer, possibly milestone 5 scope).
 
-Reply parcel's mData is read-only post-transact. Never write into it. Swap the pointer.
+addView.result=success: Window registered. Wall C5 is AMS task record / launch flags (Session 30).
 
-Kotlin object instance fields are not static. Use @JvmStatic accessors.
+Phase B3 — No fix in Session 29. Wall C4 named only. Fix deferred to Session 30+.
 
-Test assertions must be able to fail. Session 15's AntiDetectionE2ETest fix and Session 16's retry in IntegrationTest preserve fail-on-exhaustion — Rule 12 stands.
+Order of execution
+A1 — diagnostic dump, build, run, capture (30 min)
 
-Handoffs deliver whole-file replacements or well-delimited contiguous-block replacements with locate-by/replace-with patterns. Every handoff must include: (a) change summary per file, (b) paste content, (c) verify-before-commit checklist, (d) explicit git add + git commit -m "..." block.
+A2 — read dump, decide rewritability (5 min)
 
-Every test-run instruction must include ./gradlew :app:assembleDebug :app:assembleDebugAndroidTest followed by adb install -r -t on both APKs, before any am instrument call. Local build output timestamps are not proof of device state. Only adb install returning Success is.
+A3 (if rewritable) OR A4 (if not) — conditional change to CppParcelRewriter.cpp (30 min)
 
-Engine behavior is implemented in native code. Kotlin/Java in app/src/main is limited to: JNI surface declarations, DualApplication (Android-mandated entry class), and Kotlin proxies that already predate the port (PmSpoof, ParcelRewriter, BinderTransactHook, ClassLoaderBridge, GuestHost harness). Integration failures that map to a reference native method must be ported natively — not patched in Kotlin. Kotlin workarounds for missing native methods are forbidden even when they "work."
+B1 — probe extension (parallel with A3, single file change, 15 min)
 
-Session 18 — DualHost pivot, Viber Application boots — 2026-10-25
-(This section is preserved as the narrative of the pivot session — see Session 18 close section above for its formal record. Duplicated here to preserve the original file structure at the end.)
+Build — A3 + B1 together (single rebuild, single install)
 
-Deliverables
-GuestHost.kt, GuestClassLoader.kt, GuestLoadTest.kt — described in the Session 18 close section above.
+Run — probe
 
-Coverage: 14/90 (unchanged)
-No new reference methods ported. Pivot validated. Rule 3 exception stated openly: pivot is strategic realignment, not coverage growth.
+A4 verify — FATAL EXCEPTION: Thread-26 gone from logcat
+
+B3 — read addView.threw or addView.result in activity-boot.txt, categorize Wall C4
+
+Two builds max. One commit at session close.
+
+Files touched
+Native (A3, if rewritable): app/src/main/cpp/CppParcelRewriter.cpp — add third iface case. Full replacement (Session 28 addendum to Rule 13: full replacement preferred for CppParcelRewriter.cpp since it's the entire rewriter).
+
+Native (A1): app/src/main/cpp/CppParcelRewriter.cpp — add diagnostic dump in the same file. Same full replacement covers A1 + A3.
+
+Test (B1): app/src/androidTest/java/com/ims134/hookengine/ActivityBootProbeTest.kt — add Wall C4 probe block. Full replacement.
+
+No changes: ApplicationProxy.cpp, GuestHost.kt, PmSpoof.kt, DualApplication.kt, ApplicationProxy.kt, GuestClassLoader.kt, BinderTransactHook.cpp (unless iface dispatch needs new extern), PROJECT_STATE.md (until session close).
+
+Mission #1 implications
+Wall C3 fix may name nativeInit. If MIUI's ProcessManager.addMiuiApplicationThread check requires server-side uid verification that maps to a nativeInit port (3-param config, (Ljava/lang/String;Ljava/lang/String;I)), coverage grows for the first time in seven sessions.
+
+Wall C4 fix likely extends tnFIN (fourth iface case — IWindowSession). No new port. Integration depth continues.
+
+No new reference method port unless Wall C3 diagnosis names one.
+
+Session 29 must NOT do
+No handleJHMethod decomp. Parked (Session 18).
+
+No milestone 5 work. Milestone 4 in progress.
+
+No 60s milestone-3 probe rerun. Closed Session 23.
+
+No Kotlin engine code. All fixes native C++. Test file changes allowed.
+
+No edits to ApplicationProxy.cpp, GuestHost.kt, PmSpoof.kt, DualApplication.kt, ApplicationProxy.kt, GuestClassLoader.kt. Session 29 is CppParcelRewriter.cpp + ActivityBootProbeTest.kt only.
+
+No Looper.prepare() on test thread. Post to main.
+
+No generalizing rewriter to "all interfaces." Third iface case if rewritable; generalization only when a fourth iface demands it.
+
+No root-cause fix on Process.myUid(). Deferred.
+
+No fix on Wall C4 in Session 29. Name only.
+
+No declaring milestone 4 closed. Wall C4, C5, and render pipeline all pending.
+
+No handoff. Withheld until operator demands.
+
+Session 29 deliverable
+Either:
+
+Wall C3 CLOSED + Wall C4 NAMED (if A2 shows rewritable), OR
+
+Wall C3 UNREWRITABLE + Wall C4 NAMED (if A2 shows bare transact, documentation only).
+
+Either way, Session 29 closes with a named Wall C4. Commit at close.
+
+Session 18 — DualHost pivot, Viber Application boots — 2026-10-25 (preserved narrative)
+Deliverables: GuestHost.kt, GuestClassLoader.kt, GuestLoadTest.kt. Coverage: 14/90 (unchanged). Pivot validated.
 
 
 ---
 
-## Verify-before-commit
+## Session 29 — Open (elongated)
 
-```powershell
-cd H:\Mobiles\AndroidProject\2027\hookEngine
+**Mission #1 status: 14/37 coverage.** Wall C2 closed. Wall C3 named. Milestone 4 at `onResume`. Wall C4 behind it, unreached.
 
-# 1. File size sanity — should be larger than the pre-Session-24 file
-Get-ChildItem .\app\PROJECT_STATE.md | Select-Object Length
+**Session 29 has two parallel workstreams and 2-3 phases within each. Commit at session close when state is verified.**
 
-# 2. Session 24 header present
-Select-String -Path .\app\PROJECT_STATE.md -Pattern 'Session 24 closed 2026-10-26'
+---
 
-# 3. Old "What Session 24 must do FIRST" gone; new "What Session 25 must do FIRST" present
-(Select-String -Path .\app\PROJECT_STATE.md -Pattern '## What Session 24 must do FIRST').Count  # expect 0
-(Select-String -Path .\app\PROJECT_STATE.md -Pattern '## What Session 25 must do FIRST').Count  # expect 1
+### The strategic picture
 
-# 4. Coverage history has Session 24 line
-Select-String -Path .\app\PROJECT_STATE.md -Pattern 'Session 24: \*\*14 / 37\*\*'
+Session 28 landed the biggest milestone-4 advance since the project started. `SplashActivity` is now a live, attached Activity instance running its own lifecycle callbacks. It has a `PhoneWindow`, a `ContextThemeWrapper` base, a live `ManifestViberApplication` reference, and it responded correctly to `onCreate`, `onStart`, `onResume`.
 
-# 5. Test count history has Session 24 line
-Select-String -Path .\app\PROJECT_STATE.md -Pattern 'Session 24: \*\*52 registered = 49 pass \+ 3 ignored\*\*'
+But it isn't on screen yet. Two walls stand between here and "Viber UI visible":
 
-# 6. Both session narratives present (Session 23 close, Session 24 close)
-Select-String -Path .\app\PROJECT_STATE.md -Pattern 'Session 23 closed 2026-10-26'
-Select-String -Path .\app\PROJECT_STATE.md -Pattern 'Session 24 closed 2026-10-26'
+**Wall C3** — MIUI's interceptor threads behind the UI creation flow are still rejected by their server-side `Binder.getCallingUid()` check. Non-blocking for the probe, but it means MIUI's crash detection, memory management, and screenshot APIs don't attach to our guest Activity. If Viber's UI relies on any MIUI-specific integration (which on HyperOS it likely does for some features), those features will silently fail later. It's not a wall in front of us — it's a leak in the foundation.
 
+**Wall C4** — the actual physical window. `WindowManager.addView` is what makes an Activity visible. Behind `addView` is `IWindowSession.addToDisplayAsUser`, which goes to `WindowManagerService` on the server side. WMS checks whether the window's token is a valid Activity token, whether the calling uid owns the task, whether the surface can be allocated. First wall here names milestone 4's real remaining cost.
+
+Both walls are relevant to Session 29. C3 is diagnosis + conditional fix. C4 is probe + naming.
+
+**Mission #1 implication:** Wall C3 is the first wall in seven sessions that might name a reference method port. If MIUI's rejection comes from a code path the reference ports as `nativeInit` or a per-signature hook family member, coverage grows for the first time since Session 14. That's not guaranteed, but it's the first honest opportunity. The diagnostic outcome (A2) determines whether Session 29 grows coverage or documents a wall.
+
+---
+
+### Workstream A — Wall C3 diagnostic and conditional fix
+
+**Why this must be diagnosis-first, not fix-first:**
+
+Sessions 25-28 taught a hard lesson: **do not guess parcel layouts**. Wall C1 was a fake fix we caught only because the stack trace told us. Wall C2's first attempt (Session 27) was 4 bytes off and produced a safe no-op because we had a diagnostic dump in place. That dump is why we didn't corrupt the parcel and didn't need a full session rollback.
+
+Wall C3's prelude layout is unknown. It may be:
+- Pattern B (Wall B): `[userId int32] [callingPackage String16]` — MIUI's older APIs used this.
+- Pattern C (Wall C2): `[leading] [uid] [pid] [tagLen] [pkgLen] [pkg chars]` — newer AttributionSource pattern.
+- Something else entirely — MIUI's `ProcessManager` is not AOSP, may use proprietary layouts.
+- Bare transact — no caller identity in the parcel at all. The check is purely kernel-side.
+
+**The dump answers this empirically in one build cycle.** No decomp needed, no guessing. That's the same discipline that fixed Wall B and Wall C2.
+
+**Phase A1 — diagnostic instrumentation**
+
+The current `ParcelRewriter_TryRewriteCallerIdentity` reads the prelude and dispatches on iface token. The diagnostic hooks in **between** iface-token read and dispatch:
+
+```cpp
+// Diagnostic: dump MIUI ProcessManager transacts that we don't rewrite
+// so we can decode the layout empirically. Fires at most 3 unique
+// (iface, code) pairs per process to avoid log spam.
+static int g_miui_dump_count = 0;
+
+if ((strstr(ifaceAscii, "ProcessManager") != nullptr ||
+     strncmp(ifaceAscii, "miui.", 5) == 0) &&
+    g_miui_dump_count < 3) {
+    char hexbuf[512];
+    int hpos = snprintf(hexbuf, sizeof(hexbuf),
+                        "MIUI prelude dump: iface='%s' code=%d aS=%zu bytes: ",
+                        ifaceAscii, code, g_getPos(parcel));
+    size_t dumpLen = (dataSize - g_getPos(parcel) < 128)
+                     ? (dataSize - g_getPos(parcel)) : 128;
+    for (size_t i = 0; i < dumpLen && hpos < 460; i++) {
+        hpos += snprintf(hexbuf + hpos, sizeof(hexbuf) - hpos,
+                         "%02x", pData[g_getPos(parcel) + i]);
+    }
+    LOGD("%s", hexbuf);
+    g_miui_dump_count++;
+    // Fall through — do NOT rewrite, diagnostic only.
+}
+
+The ifaceAscii variable is a small helper: convert the UTF-16 iface token to a UTF-8 ascii buffer for strstr/strncmp. Add it inline in the diagnostic path.
+
+Report the dump to logcat under DualCore tag. Not to activity-boot.txt — the diagnostic is in the native layer, and activity-boot.txt is written by the Kotlin probe. Grep for MIUI prelude dump in logcat.
+
+Phase A2 — decision tree based on dump
+
+Read the dump like a forensic examiner:
+
+text
+MIUI prelude dump: iface='miui.process.IProcessManager' code=N aS=M bytes: <128 bytes hex>
+Where aS = g_getPos(parcel) after the iface token is consumed. So hex[0..3] is the first int32 after the token.
+
+Branch 1 — Pattern-B (Wall B layout):
+
+text
+hex: [u s e r I D  (4 bytes)] [p k g L e n (4 bytes)] [p k g C h a r s UTF-16...]
+Interpretation: [userId int32] [String16 length] [String16 content]. userId will be something like 0 or -1. The String16 length will be 14 (for "com.viber.voip"). Fall through to Phase A3 with pattern-B logic.
+
+Branch 2 — Pattern-C (Wall C2 layout):
+
+text
+hex: [l e a d i n g (4 bytes)] [u i d (4 bytes)] [p i d (4 bytes)] [t a g L e n (4 bytes)] [p k g L e n (4 bytes)] [p k g C h a r s UTF-16...]
+leading = some constant (may be 92 for Bundle header, or a MIUI-specific value). uid = 10000. pid = 10000. tagLen = 0. pkgLen = 14. Fall through to Phase A3 with pattern-C logic.
+
+Branch 3 — Bare transact (no caller identity):
+
+text
+hex: [n u m e r i c  v a l u e s] [n o  s t r i n g 1 6  l e n g t h s  w h e r e  1 4  a p p e a r s]
+No String16 length of 14 anywhere in the first 128 bytes. The parcel carries only numeric args. The caller identity is coming from Binder.getCallingUid() on the server side, and there's nothing for the rewriter to modify. Unrewritable via transact.
+
+Branch 4 — Unexpected layout:
+Some other structure. Document what it looks like and defer Phase A3. The dump gives a starting point for Session 30.
+
+Phase A3 — conditional fix (only if Branch 1 or 2)
+
+Add a third else if branch to ParcelRewriter_TryRewriteCallerIdentity:
+
+cpp
+static const char16_t kMiuiProcessManagerIface[] = u"miui.process.IProcessManager";
+constexpr size_t kMiuiProcessManagerIfaceLen =
+    sizeof(kMiuiProcessManagerIface)/sizeof(char16_t) - 1;
+
+} else if (ifaceLen == kMiuiProcessManagerIfaceLen &&
+           memcmp(iface, kMiuiProcessManagerIface, kMiuiProcessManagerIfaceLen * sizeof(char16_t)) == 0) {
+    // ── MIUI ProcessManager branch (Session 29, Wall C3) ──
+    // Layout TBD from Session 29 Phase A1 diagnostic. Placeholder below
+    // shows the pattern-B shape. If diagnostic shows pattern-C, replace
+    // with the Wall C2 branch body unchanged (uid + pkg rewrite, +12 delta).
+    int32_t userId = 0;
+    if (!SafeReadInt32(parcel, &userId)) break;
+    size_t cpLen = 0;
+    const char16_t* cp = SafeReadString16(parcel, &cpLen);
+    if (!cp) break;
+    if (cpLen != kOldLen || memcmp(cp, kOld, kOldLen * sizeof(char16_t)) != 0) {
+        LOGD("MIUI iface matched callingPackage='%.*s' (code=%d) — not rewriting",
+             (int)cpLen, (const char*)cp, code);
+        break;
+    }
+    // ... rewrite body identical to Wall B (rewrite callingPackage at cp offset)
+}
+The actual pattern depends on A1 output. Phase A3 is executed after Phase A1, using the actual decoded layout.
+
+Phase A4 — verification
+
+Read logcat for FATAL EXCEPTION: Thread-26. If gone: Wall C3 closed. If present with same exception: rewrite didn't reach the correct field, or MIUI's check is server-side kernel-uid, not parcel-field. Investigate.
+
+Read logcat for MIUI rewrite fired: (add a distinct log line so we know the fix reached the parcel). If not present: iface token doesn't match — check the actual token string from A1 dump.
+
+Phase A4 (unrewritable) — documentation
+
+If A2 says Branch 3 or 4:
+
+Log a distinct line: MIUI prelude: UNREWRITABLE — no caller identity in parcel.
+
+Document in Session 29 close as Wall C3 = unrewritable-via-transact.
+
+Defer ProcessManagerService server-side hook to Session 32+ (needs cross-process AIDL hook, aggressive, not blocking milestone 4).
+
+Proceed to Workstream B.
+
+Workstream B — Wall C4 probe extension
+Why this must be probe-only, not fix:
+
+Session 25 taught the lesson (Wall C1: probe first, fix after — the fix worked because we knew the exception was Looper). Session 26 showed the reverse (Wall C2 discovery — the fix wasn't applied because we correctly refused to preempt). Session 28 confirmed (Wall C2 fix landed because the exception was clear, not because we pre-guessed).
+
+Wall C4 might be any of:
+
+Another AIDL identity check (IWindowSession.addToDisplayAsUser) — Wall B/C2 pattern, fixable in transact rewriter.
+
+An AMS task record check (BadTokenException) — needs AMS registration, new mechanism.
+
+A Surface allocation failure — needs real Surface, new mechanism.
+
+Something completely different — WMS-specific MIUI/Android 17 check.
+
+The probe extension names it in one build cycle. The fix follows in Session 30.
+
+Phase B1 — the extension
+
+The current probe ends at onResume.result=success. The extension runs immediately after:
+
+kotlin
+// Wall C4 probe — WindowManager.addView
+// ActivityThread.handleResumeActivity (the real launcher) calls
+// wm.addView(decorView, layoutParams) right after onResume. We replicate
+// that pattern with the Activity's own WindowManager (not getSystemService,
+// which returns a different WM instance).
+try {
+    val wm = activity.window.windowManager
+    val decor = activity.window.decorView
+    val lp = decor.layoutParams
+    report("wallC4.wm", wm.javaClass.name)
+    report("wallC4.decorView", decor.javaClass.name)
+    report("wallC4.lp", lp?.javaClass?.name)
+    wm.addView(decor, lp)
+    report("wallC4.addView.result", "success")
+    report("wallC4.decorView.isAttachedToWindow", decor.isAttachedToWindow)
+    report("wallC4.decorView.width", decor.width)
+    report("wallC4.decorView.height", decor.height)
+} catch (t: Throwable) {
+    val cause = (t as? java.lang.reflect.InvocationTargetException)?.targetException ?: t
+    report("wallC4.addView.threw", "${cause.javaClass.name}: ${cause.message}")
+    report("wallC4.addView.stack",
+        cause.stackTraceToString().lines().take(25).joinToString(" | "))
+}
+Why activity.window.windowManager not activity.getSystemService(WINDOW_SERVICE):
+
+Activity.getSystemService(WINDOW_SERVICE) returns the app-level WindowManagerImpl (a singleton per Context).
+
+Activity.window.windowManager returns the per-window WindowManagerImpl created by Activity.attach, which is the specific one ActivityThread.handleResumeActivity calls addView on.
+
+The per-window WM is the one that carries the correct token in its mParentWindow.mAppToken and mParentWindow.mToken. If we use the wrong one, the addView will fail with BadTokenException for the wrong reason (we'd be debugging a false wall).
+
+Phase B2 — categorize Wall C4
+
+After the probe runs, read activity-boot.txt. Four possible outcomes:
+
+Outcome 1 — wallC4.addView.threw = java.lang.SecurityException: Calling uid: ... doesn't match source uid: ...
+
+Third instance of Wall B/C2 pattern. IWindowSession.addToDisplayAsUser is the AIDL interface.
+
+Wall C4 = same category as C2. Fix in Session 30: add fourth iface case to ParcelRewriter_TryRewriteCallerIdentity for android.view.IWindowSession. Verified by same technique (log-and-rewrite with dump).
+
+This would be a clean, expected outcome. Multiple AIDL interfaces in the same category is normal — the rewriter is designed for this.
+
+Outcome 2 — wallC4.addView.threw = android.view.WindowManager$BadTokenException: Unable to add window — token android.os.BinderProxy@... is not valid; is your activity running?
+
+AMS doesn't recognize our token. The token came from activity.window.getAttributes().token, which Activity.attach set to some fake value (or null). AMS's WindowManagerService.addWindow checks the token against ActivityTaskManagerService task records, finds none, rejects.
+
+Wall C4 = AMS-registration category. Fix in Session 30 requires ActivityTaskManager.startActivity with a spoofed ComponentName that AMS accepts, or direct ActivityTaskManager.attachApplication with a synthetic ActivityClientRecord. Both are big. Possibly 2-3 weeks.
+
+This is the "real wall" of milestone 4 — the one that turns the milestone from "3-4 sessions" into "3-6 weeks."
+
+Outcome 3 — wallC4.addView.threw = java.lang.RuntimeException: <something about Surface / RenderThread / Choreographer>
+
+Surface allocation failure. IWindowSession.addToDisplayAsUser went through, WMS accepted the window, but SurfaceFlinger couldn't allocate a Surface for the render pipeline.
+
+Wall C4 = render-pipeline category. Fix requires cross-process Surface handoff — this is what BlackBox/VirtualApp call "surface flipping" and it's the hardest part of container-app rendering. Session 30+ scope: possibly 4-6 weeks.
+
+This outcome would be bad news relative to Outcomes 1 or 2. But it would be the honest answer.
+
+Outcome 4 — wallC4.addView.result = success + wallC4.decorView.isAttachedToWindow = true
+
+WMS accepted the window, allocated the Surface, attached the decorView. Viber's SplashActivity is technically visible on screen (though it's likely showing a splash theme background or a blank frame — the real UI requires the app to render on the correct Surface).
+
+Wall C5 (Session 30+) = ActivityTaskManager.startActivity + task record + real render handoff. This is where the milestone goes from "Activity lifecycle proven" to "Viber UI visible" — probably 2-4 weeks.
+
+This outcome is excellent news. It means the render pipeline works and milestone 4 is 60-70% done.
+
+Phase B3 — no fix in Session 29
+
+Whichever outcome, Wall C4 is named and documented. Fix deferred. Session 30 opens on the fix.
+
+Why no fix: because the fix cost varies by 10x across outcomes. Session 29 must commit to a scope before the cost is known. Naming first is correct.
+
+Files touched in Session 29 (full content)
+app/src/main/cpp/CppParcelRewriter.cpp — full replacement (A1 diagnostic + A3 conditional, if rewritable)
+
+The full file is the Session 28 version plus:
+
+A small helper for iface-token ascii conversion (ifaceToAscii).
+
+Diagnostic dump block inserted between iface-token read and dispatch.
+
+Third else if branch (if A2 = rewritable), using whichever layout the dump showed.
+
+Since A1 runs before A3, the file is edited twice in Session 29:
+
+First edit (after A1 build/run): add diagnostic block only. Rebuild, run, capture dump. Decide A2.
+
+Second edit (after A2): add third iface case. Rebuild, run, verify A4.
+
+Full replacement for each edit. Session 28's file is the base.
+
+app/src/androidTest/java/com/ims134/hookengine/ActivityBootProbeTest.kt — full replacement (B1 extension)
+
+The Session 28 version plus the Wall C4 probe block above, inserted after onResume.result=success.
+
+Total file changes across Session 29:
+
+2 builds of CppParcelRewriter.cpp (diagnostic + fix, if applicable)
+
+1 build of ActivityBootProbeTest.kt
+
+1 combined build (after A3 + B1 land together) OR 1 test-only build (if A2 = unrewritable)
+
+2-3 am instrument runs
+
+Commit at session close, single commit with both files changed (A3 + B1) or single commit with test file only (A1 diagnostic + B1, A2 = unrewritable).
+
+Order of operations — step by step
+Backup current state. git status --short should be clean. git log -1 shows Session 28.
+
+Edit 1 — diagnostic in CppParcelRewriter.cpp. Full replacement with A1 diagnostic block added. No third iface case yet.
+
+Build + install + run.
+
+powershell
+./gradlew :app:assembleDebug :app:assembleDebugAndroidTest
+adb install -r -t app\build\outputs\apk\debug\app-debug.apk
+adb install -r -t app\build\outputs\apk\androidTest\debug\app-debug-androidTest.apk
+adb logcat -c
+adb shell am instrument -w -r -e class com.ims134.hookengine.ActivityBootProbeTest com.ims134.hookengine.test/androidx.test.runner.AndroidJUnitRunner
+adb logcat -d -v time DualCore:D AndroidRuntime:E *:F > logcat-s29-a1.txt
+Select-String -Path logcat-s29-a1.txt -Pattern 'MIUI prelude dump|FATAL EXCEPTION|Thread-26' | Out-File logcat-s29-a1-slice.txt
+Get-Content logcat-s29-a1-slice.txt
+Read the dump. Decide A2 (rewritable / unrewritable).
+
+Edit 2 (if rewritable) — add third iface case. Full replacement with diagnostic retained (useful for future MIUI ifaces) and third iface case added. If unrewritable, diagnostic kept, no fix, documentation only.
+
+Edit 3 — probe extension in ActivityBootProbeTest.kt. Full replacement with Wall C4 probe block.
+
+Build + install + run. Same as step 3, then:
+
+powershell
+adb shell run-as com.ims134.hookengine cat files/activity-boot.txt > activity-boot-s29.txt
+Get-Content activity-boot-s29.txt
+adb logcat -d -v time ActivityBoot:D DualCore:D AndroidRuntime:E *:F > logcat-s29-final.txt
+Select-String -Path logcat-s29-final.txt -Pattern 'MIUI rewrite fired|FATAL EXCEPTION|Thread-26|wallC4|addView' | Out-File logcat-s29-final-slice.txt
+Get-Content logcat-s29-final-slice.txt
+Analyze outcomes.
+
+If Wall C3 was rewritable and MIUI rewrite fired appears: check FATAL EXCEPTION: Thread-26 is gone. If gone: Wall C3 closed.
+
+If Wall C3 was unrewritable: confirm no FATAL EXCEPTION: Thread-26 change. Document as unrewritable.
+
+Wall C4: read wallC4.addView.result or wallC4.addView.threw in activity-boot.txt. Categorize based on Outcome 1-4 above.
+
+Commit at close.
+
+powershell
+git add app\src\main\cpp\CppParcelRewriter.cpp
+git add app\src\androidTest\java\com\ims134\hookengine\ActivityBootProbeTest.kt
+git add app\PROJECT_STATE.md
+git commit -m "Session 29: Wall C3 <closed|unrewritable> — <description>. Wall C4 named — <category>. Milestone 4 at <state>. Coverage 14/37 <unchanged|15/37>."
+git push origin master
+What each outcome means for Session 30
+C3 outcome	C4 outcome	Session 30 scope	Effort
+Closed (rewrite worked)	Outcome 1 (identity check)	Add fourth iface case (IWindowSession), verify, milestone 4 to addView-success	1-2 sessions
+Closed (rewrite worked)	Outcome 2 (BadToken)	AMS registration — big scope, ActivityTaskManager.attachApplication path	3-6 weeks
+Closed (rewrite worked)	Outcome 3 (Surface)	Render pipeline — hard, possibly milestone 5 prerequisite	4-6 weeks
+Closed (rewrite worked)	Outcome 4 (addView success)	ActivityTaskManager.startActivity + task record + real render	2-4 weeks
+Unrewritable	Outcome 1	Add fourth iface case; C3 documented unrewritable, defer	1-2 sessions
+Unrewritable	Outcome 2/3/4	Same as row above for C4	Same
+Unrewritable + names nativeInit	Any	Port nativeInit (Mission #1 growth); fix C3 natively	2-3 sessions + port
+The best case (C3 closed, C4 Outcome 1) is one more 1-2 session wall before addView succeeds. The worst case (C3 closed, C4 Outcome 3) is a 4-6 week render pipeline that may or may not be in milestone 4's scope.
+
+Mission #1 grows only if C3 diagnostic names nativeInit or a per-signature hook family member. That's the first coverage-growth opportunity since Session 14. Session 29's A2 decision determines whether it happens.
+
+Session 29 must NOT do (restated)
+No handleJHMethod decomp
+
+No milestone 5 work
+
+No 60s milestone-3 probe rerun
+
+No Kotlin engine code
+
+No edits outside CppParcelRewriter.cpp + ActivityBootProbeTest.kt
+
+No Looper.prepare() on test thread
+
+No rewriter generalization beyond third iface case
+
+No root-cause fix on Process.myUid()
+
+No Wall C4 fix this session
+
+No milestone 4 closed declaration
+
+No handoff
+
+Deliverable
+activity-boot-s29.txt — probe output including wallC4.* lines
+
+logcat-s29-a1-slice.txt — A1 diagnostic dump showing MIUI prelude layout
+
+logcat-s29-final-slice.txt — final run showing MIUI rewrite fired (or absence) and FATAL EXCEPTION: Thread-26 state
+
+Three files. One commit. Session 29 closes when all three are reviewed and Wall C3 (closed or unrewritable) + Wall C4 (named) are recorded in PROJECT_STATE.md.
+
+Ready to run Phase A1. Edit CppParcelRewriter.cpp with the diagnostic block, build, run, paste the MIUI prelude dump. That's the first output needed — everything else depends on it.
+
+Coverage stays 14/37 unless A2 names nativeInit. Rule 3 exception stated openly either way.
