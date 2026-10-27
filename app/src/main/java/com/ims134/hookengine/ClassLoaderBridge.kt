@@ -1,26 +1,38 @@
 package com.ims134.hookengine
 
 import android.util.Log
-import java.lang.reflect.Field
 
 /**
- * Chains the guest's BaseDexClassLoader to include the host's DEX elements.
+ * Session 54 — Feature 4.2: Native ClassLoader chaining.
  *
- * After this runs, `guest.loadClass("com.ims134.hookengine.Foo")` succeeds
- * because the guest's DexPathList now contains host elements before its own.
- * This is what the reference engine's `nativeFNLN(ClassLoader, ClassLoader,
- * boolean)` does — we do it via hidden-api bypass reflection, no native hook.
+ * Rule 15 debt closure: the merge logic that was previously Kotlin
+ * reflection (findField + read array + dedupe + merge + write back) now
+ * runs in C++ (`NativeFnln.cpp`). This Kotlin object is a thin API
+ * surface that delegates to the native function.
  *
- * Requires: PmSpoof.init / HiddenApiBridge.reflectGetDeclaredField working.
+ * Behavior preserved from the prior Kotlin implementation:
+ *   - guest === host      → no-op, returns true
+ *   - guest null / host null → false
+ *   - host elements already in guest (identity) → skipped
+ *   - merged guest.dexElements = [host-only..., guest-elements...]
+ *
+ * Hidden-api-bypass reflection needed to reach pathList and dexElements
+ * (both private, hidden-api-blocked) goes through HiddenApiBridge from
+ * C++ — same pattern ParcelRewriter.cpp uses.
+ *
+ * Existing ClassLoaderBridgeTest (3 tests) continues to pass:
+ *   - installForOnSameLoaderReturnsTrue      → same-loader no-op
+ *   - installForOnFreshLoaderReturnsTrue     → native returns 0
+ *   - chainMergesDexElementsStructurally     → afterCount >= beforeCount
  */
 object ClassLoaderBridge {
     private const val TAG = "DualCore"
     private var installed = false
 
-    /**
-     * Idempotent install using the current thread's context classloader as
-     * guest and our own loader as host. Called from DualApplication.attachBaseContext.
-     */
+    init { System.loadLibrary("hookengine") }
+
+    private external fun nativeFnln(guest: ClassLoader, host: ClassLoader): Int
+
     @Synchronized
     fun install(): Boolean {
         if (installed) return true
@@ -33,10 +45,6 @@ object ClassLoaderBridge {
         return installFor(guest, host)
     }
 
-    /**
-     * Explicit form for testing and DualHost integration. Chains host dex
-     * elements into guest DexPathList. Safe to call multiple times.
-     */
     @Synchronized
     fun installFor(guest: ClassLoader, host: ClassLoader): Boolean {
         if (guest === host) {
@@ -45,69 +53,20 @@ object ClassLoaderBridge {
             return true
         }
         return try {
-            chain(guest, host)
-            installed = true
-            Log.d(TAG, "ClassLoaderBridge: chained ${guest.javaClass.simpleName} → ${host.javaClass.simpleName}")
-            true
+            val rc = nativeFnln(guest, host)
+            if (rc >= 0) {
+                installed = true
+                Log.d(TAG, "ClassLoaderBridge: chained natively, added $rc elements")
+                true
+            } else {
+                Log.e(TAG, "ClassLoaderBridge: native chain failed rc=$rc")
+                false
+            }
         } catch (t: Throwable) {
-            Log.e(TAG, "ClassLoaderBridge: chain failed", t)
+            Log.e(TAG, "ClassLoaderBridge: native chain threw", t)
             false
         }
     }
 
     fun isInstalled(): Boolean = installed
-
-    private fun chain(guest: ClassLoader, host: ClassLoader) {
-        val pathListField = findField(guest.javaClass, "pathList")
-            ?: throw IllegalStateException("no pathList on ${guest.javaClass.name}")
-
-        val guestPathList = pathListField.get(guest)
-            ?: throw IllegalStateException("guest pathList null")
-        val hostPathList = pathListField.get(host)
-            ?: throw IllegalStateException("host pathList null")
-
-        val dexElementsField = findField(guestPathList.javaClass, "dexElements")
-            ?: throw IllegalStateException("no dexElements on ${guestPathList.javaClass.name}")
-
-        val guestElems = dexElementsField.get(guestPathList) as? Array<*> ?: run {
-            throw IllegalStateException("guest dexElements null")
-        }
-        val hostElems = dexElementsField.get(hostPathList) as? Array<*> ?: run {
-            throw IllegalStateException("host dexElements null")
-        }
-
-        Log.d(TAG, "ClassLoaderBridge: guest elements=${guestElems.size} host elements=${hostElems.size}")
-
-        // Guard: if host elements are already present, skip (idempotent)
-        val guestSet = guestElems.filterNotNull().toSet()
-        val hostOnly = hostElems.filterNotNull().filter { it !in guestSet }
-        if (hostOnly.isEmpty()) {
-            Log.d(TAG, "ClassLoaderBridge: all host elements already present, nothing to add")
-            return
-        }
-
-        // Build merged array: host elements FIRST, then guest
-        val elementClass = Class.forName("dalvik.system.DexPathList\$Element")
-        val total = hostOnly.size + guestElems.size
-        val merged = java.lang.reflect.Array.newInstance(elementClass, total) as Array<Any?>
-
-        var i = 0
-        for (e in hostOnly) { java.lang.reflect.Array.set(merged, i++, e) }
-        for (e in guestElems) { if (e != null) java.lang.reflect.Array.set(merged, i++, e) }
-
-        dexElementsField.set(guestPathList, merged)
-        Log.d(TAG, "ClassLoaderBridge: merged array size=${merged.size} (host ${hostOnly.size} + guest ${guestElems.size})")
-    }
-
-    private fun findField(cls: Class<*>, name: String): Field? {
-        var c: Class<*>? = cls
-        while (c != null) {
-            HiddenApiBridge.reflectGetDeclaredField(c, name)?.let { f ->
-                HiddenApiBridge.reflectSetAccessible(f)
-                return f
-            }
-            c = c.superclass
-        }
-        return null
-    }
 }

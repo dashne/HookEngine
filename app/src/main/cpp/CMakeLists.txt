@@ -34,6 +34,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         SignalOverrideJni.cpp
         Backtrace.cpp
         BacktraceJni.cpp
+        NativeFnln.cpp
         ApplicationProxy.cpp
         GuestBoot.cpp
         test_item1.cpp
