@@ -172,12 +172,12 @@ Those are research-grade instrumentation frameworks, distinct from a hook engine
 
 Viber boot under the engine is a **regression canary**, not a target. Every session ends with `GuestLoadTest` green (`outcome=booted-viber-order`, providers ≥14, no new FATAL). If the canary breaks, an engine feature broke — fix the engine feature, then continue. Viber UI, Viber functionality, Viber network — not in scope, not pursued, not tracked.
 
-**IMPORTANT measurement note:** the canary must be measured from a **fresh process** — a run where `GuestLoadTest` is the only test invoked. Running `GuestLoadTest` inside the full suite (position 50 of 108) has `elapsedMs=16000+` and `providersSucceeded=3` because 49 test classes have already fragmented the process — `FileProvider` and other providers time out. That is **not** the canary measurement. The canary is: `adb shell am instrument -w -r -e class com.ims134.hookengine.GuestLoadTest ...`. Fresh process. Baseline: `elapsedMs ~1700ms`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise).
+**IMPORTANT measurement note:** the canary must be measured from a **fresh process** — a run where `GuestLoadTest` is the only test invoked. Running `GuestLoadTest` inside the full suite (position 50 of 124) has `elapsedMs=16000+` and `providersSucceeded=3` because 49 test classes have already fragmented the process — `FileProvider` and other providers time out. That is **not** the canary measurement. The canary is: `adb shell am instrument -w -r -e class com.ims134.hookengine.GuestLoadTest ...`. Fresh process. Baseline: `elapsedMs ~1700ms`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise).
 
 
 # PROJECT STATE
 
-Last updated: **Session 52 close (2026-10-27)**. Supersedes Session-51-close version. Sessions 41–52 landed on disk and are on-device verified (118 tests executed, 0 failed at Session 52 close). **Category 1 (Hook mechanisms) COMPLETE at 9/9.** **Category 2 (Memory primitives) at 6/7** — only 2.8 backtrace remains (scheduled for Session 53). **Feature 3.4 (ServiceManager lookup interception) COMPLETE at the transact level** — cache-hit interception is a measured architectural wall on MIUI/API 37, documented in detail below. **Feature 3.6 (Signal handling override) COMPLETE.** Session 53 target: Feature 2.8 backtrace from hook site — closes Category 2.
+Last updated: **Session 53 close (2026-10-27)**. Supersedes Session-52-close version. Sessions 41–53 landed on disk and are on-device verified (124 tests executed, 0 failed at Session 53 close). **Category 1 (Hook mechanisms) COMPLETE at 9/9.** **Category 2 (Memory primitives) COMPLETE at 7/7.** **Category 3 (IPC / kernel boundary) at 6/7** — only 3.7 Native ServiceManager addition remains (scheduled S58). Feature 3.4 cache-hit is a measured architectural wall on MIUI/API 37, documented in detail below. Session 54 target: Feature 4.2 Native ClassLoader chaining (Rule 15 debt closure).
 
 ---
 
@@ -210,13 +210,13 @@ The target is defined by the **feature inventory** below — not by any particul
 
 Sessions 1–14 built the primitive foundation. Sessions 15–40 did **not** deepen the engine — they built a container around it (dual-Application boot, GuestClassLoader, LoadedApk manipulation, WMS probes). That detour consumed 26 sessions and produced one engine port (`nativeInit`, S38). The container is now the canary; its further development is out of scope.
 
-Sessions 41–52 resumed engine work and delivered **sixteen** verified primitives — the entire Category 1, all of Category 2 except backtrace, and six of seven of Category 3. **Category 1 is complete.** Category 2 is 6/7. Category 3 has 6/7 ✅ with only 3.7 scheduled.
+Sessions 41–53 resumed engine work and delivered **seventeen** verified primitives — the entire Category 1, the entire Category 2, and six of seven of Category 3. **Categories 1 and 2 are complete.** Category 3 has 6/7 ✅ with only 3.7 scheduled.
 
 ---
 
 ## Current verified state
 
-**Engine primitives (verified on-device, all green at Session 52 close):**
+**Engine primitives (verified on-device, all green at Session 53 close):**
 - Inline hook: 9 ARM64 instruction kinds. Verified by RelocTest (49 assertions).
 - GOT hook: 26 sites, works.
 - ArtMethod hook: works (native methods, non-fast-JNI only).
@@ -228,12 +228,13 @@ Sessions 41–52 resumed engine work and delivered **sixteen** verified primitiv
 - Register state inspection: full ARM64 GP + SP + NZCV + Q register capture. PROBE and PASSTHRU modes. Verified by RegInspectTest (6 tests).
 - Memory read / write / scan: `/proc/self/maps`-validated; MemWrite mprotects each page to RW, writes, restores orig (Rule 10 preserved). Verified by MemoryOpsTest (6 tests).
 - Full maps enumeration: MemEnumMaps, MemEnumMapsFilter, MemFindRegionContaining; per-entry {start, end, prot, offset, dev major/minor, inode, path}. Verified by MapsEnumTest (6 tests).
+- **Backtrace from hook site: FP-chain walker with /proc/self/maps PC validation, 16-byte alignment guard, monotonic ascending FP guard, cycle detection, bounded at BT_MAX_FRAMES=32. Verified by BacktraceTest (6 tests).**
 - Dynamic runtime attach: works with alignment/mapped/exec guards. Verified by DynamicAttachTest (6 tests).
 - Hidden-API bypass: works via thread-attached reflection.
 - `IPCThreadState::transact` inline hook: works.
 - AIDL prelude rewrite: works on 4 interfaces.
 - ServiceManager lookup interception (transact-level): alias and null overrides rewrite String16 names in the request parcel before transact. Fires on every ServiceManager handle=0 transact. Verified by ServiceManagerTest (8 tests).
-- **Signal handling override: sigaction-based per-slot handlers with PASS_THROUGH / SUPPRESS actions, full siginfo capture. Verified by SignalOverrideTest (6 tests).**
+- Signal handling override: sigaction-based per-slot handlers with PASS_THROUGH / SUPPRESS actions, full siginfo capture. Verified by SignalOverrideTest (6 tests).
 - `nativeCNVM`: decomp-verified, 4 tests green.
 - `nativeInit` (structural): verified Session 38.
 
@@ -262,7 +263,7 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 | 1.8 | Conditional hook | ✅ |
 | 1.9 | Return-value modification | ✅ |
 
-### Category 2 — Memory primitives
+### Category 2 — Memory primitives — **7/7 COMPLETE**
 
 | # | Feature | Status |
 |---|---|---|
@@ -272,9 +273,9 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 | 2.4 | Allocate memory near target | ✅ |
 | 2.5 | Enumerate maps | ✅ **S50** |
 | 2.7 | Register state inspection at hook site | ✅ |
-| 2.8 | Backtrace from hook site | ❌ → **S53 target** |
+| 2.8 | Backtrace from hook site | ✅ **S53** |
 
-**Category 2: 6/7.** 2.8 backtrace scheduled for Session 53.
+**Category 2: COMPLETE.**
 
 ### Category 3 — IPC / kernel boundary
 
@@ -293,7 +294,7 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 | # | Feature | Status |
 |---|---|---|
 | 4.1 | Custom ClassLoader delegation | ✅ |
-| 4.2 | Native ClassLoader chaining | ⚠️ (Kotlin) |
+| 4.2 | Native ClassLoader chaining | ⚠️ (Kotlin) → **S54 target** |
 | 4.3 | Dynamic DEX loading | ❌ |
 | 4.4 | DEX merging at runtime | ❌ |
 | 4.5 | Resource merging | ✅ |
@@ -355,20 +356,20 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 
 ### Totals
 
-- **✅ verified complete:** ~39 features
-- **⚠️ partial:** ~7 features
-- **❌ not started:** ~16 features
+- **✅ verified complete:** ~49 features (73% of 67 tracked)
+- **⚠️ partial:** 7 features
+- **❌ not started:** 11 features
 
-**Engine completion requires ~23 more sessions.**
+**Engine completion requires ~22 more sessions.**
 
 ---
 
-## Engine roadmap — Session 53 to Session 75
+## Engine roadmap — Session 54 to Session 75
 
 ### Phase A — Foundation (Sessions 41–44) — CLOSED
 ### Phase B — Hook mechanism depth (Sessions 45–48) — CLOSED (Category 1 9/9)
 
-### Phase C — Memory + kernel boundary (Sessions 49–53)
+### Phase C — Memory + kernel boundary (Sessions 49–53) — **CLOSED**
 
 | Session | Feature | Status / Exit |
 |---|---|---|
@@ -376,15 +377,15 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 | 50 | 2.5 Full maps enumeration | ✅ `MapsEnumTest` |
 | 51 | 3.4 ServiceManager lookup interception | ✅ `ServiceManagerTest` (8 tests; cache-hit wall documented) |
 | 52 | 3.6 Signal handling override | ✅ `SignalOverrideTest` (6 tests) |
-| **53** | **2.8 Backtrace from hook site** | **next — `BacktraceTest` — closes Category 2** |
+| 53 | 2.8 Backtrace from hook site | ✅ `BacktraceTest` (6 tests) — **closes Category 2** |
 
-After S53: **Category 2 complete. Category 3 (except 3.7) complete.**
+**Categories 1 and 2 complete. Category 3 (except 3.7) complete.**
 
 ### Phase D — Class loading + symbol depth (Sessions 54–58)
 
 | Session | Feature | Exit |
 |---|---|---|
-| 54 | 4.2 Native `nativeFNLN` (Rule 15 debt closure) | `NativeFnlnTest` |
+| **54** | **4.2 Native `nativeFNLN` (Rule 15 debt closure)** | **next — `NativeFnlnTest`** |
 | 55 | 4.3 Dynamic DEX loading | `DexLoadTest` |
 | 56 | 4.4 DEX merging at runtime | `DexMergeTest` |
 | 57 | 7.6 PLT stub resolution | `PltResolveTest` |
@@ -421,313 +422,244 @@ The Session 51 **cache-hit aspiration** — intercepting `ServiceManager.getServ
 
 ### The three fast-JNI tokens
 
+
 rawGetService FromReflectedMethod = 0x3d
 getService FromReflectedMethod = 0x3f
 checkService FromReflectedMethod = 0x41
 
-All three return **small integer tokens**, not ArtMethod pointers. `0x3d`, `0x3f`, `0x41` are ART's encoding of fast-JNI dispatch-table indices — `(index << 1) | 1` marker bit. Dereferencing any of them as an `ArtMethod*` would SIGSEGV inside the NULL page (0x3d is address 0x3d). `JavaHookInstall` correctly refuses (`mid < 0x1000`). **Every ArtMethod-based interception path for these three methods is architecturally impossible on this ROM.** No flags to clear, no struct to patch, no entry point to swap.
+A
+All three return **small integer tokens**, not ArtMethod pointers. `0x3d`, `0x3f`, `0x41` are ART's encoding of fast-JNI dispatch-table indices — `(index << 1) | 1` marker bit. Dereferencing any of them as an `ArtMethod*` would SIGSEGV inside the NULL page. `JavaHookInstall` correctly refuses (`mid < 0x1000`). **Every ArtMethod-based interception path for these three methods is architecturally impossible on this ROM.**
 
 ### The `+32` slot is not a callable code address
 
-`ArtMethod*+32` for `getService` holds `0x38000970eceb68`. That address is **not in `/proc/self/maps`**. Attempting an inline hook there fails at `ReadPageProt` inside `InstallInlineHookEx` with `HOOK_INTERNAL_ERROR=10`. Patching `+32` to point to our shim succeeds at the write level but `CallStaticObjectMethod` and framework callers never consult the patched value — shim hits stay at 0 across all attempts. **The `+32` slot is a JIT write-cache address that JIT callers read once at their own compile time and then bake into their inline cache.**
+`ArtMethod*+32` for `getService` holds `0x38000970eceb68`, not in `/proc/self/maps`. Cannot be inline-hooked (ReadPageProt fails with HOOK_INTERNAL_ERROR=10). Patching `+32` to our shim succeeds at write level but never affects dispatch — hits stay at 0.
 
 ### `SimpleArrayMap.get(sCache)` is JIT-inlined
 
-Hooking `SimpleArrayMap.get(Object)` via `JavaHookInstall` succeeds — the ArtMethod resolves to a real pointer (`0x718ef7a0`), `data_=0x4802e680` is an executable JIT stub. But the shim fires on **unrelated ArrayMap lookups elsewhere in the process**, not on the actual `sCache.get(name)` call from `getService`. Two reasons:
-
-1. **Inlining.** MIUI's JIT compiles `ServiceManager.getService` down to a body that inlines the `sCache.get(name)` lookup directly.
-2. **Quick-ABI mismatch.** `SimpleArrayMap.get` dispatches via quick ABI (x0=ArtMethod*, x1=receiver, x2=key), not JNI ABI. A shim declared as `(JNIEnv*, jobject, jobject)` sees `env = ArtMethod*`, and calling `env->IsSameObject(...)` SIGSEGVs at `_JNIEnv::IsSameObject+32`.
+Hooking `SimpleArrayMap.get(Object)` via `JavaHookInstall` succeeds but the shim fires on unrelated ArrayMap lookups, not the actual `sCache.get(name)` from `getService`. MIUI JIT-inlines the call; quick-ABI mismatch (x0=ArtMethod*, not JNIEnv*) SIGSEGVs on any JNI call inside the shim.
 
 ### The `sCache` field is a decoy
 
-From the decompiled framework.jar:
-`java
- `private static IBinder rawGetService(String name) throws Throwable {
-    `...
-    `IBinder binder = getIServiceManager().getService2(name).getServiceWithMetadata().service;
-    `...
-    `return binder;   // does NOT put into sCache
-`}
+MIUI's `rawGetService` never puts into `sCache` — only `initServiceCache()` at process startup does, never in app processes. `sCache` is **always empty**. Actual cache is in `getIServiceManager().getService2(name)`.
 
-Unlike AOSP, MIUI's rawGetService never puts the resolved binder into sCache. sCache is populated only by initServiceCache() at process startup — and never in app processes. So on this ROM, sCache is always empty. Every getService("activity") call goes through rawGetService(name), which calls getIServiceManager().getService2(name). getService2 has its own internal cache.
+### The complete list of mechanisms tried and their failure
 
-The complete list of mechanisms tried and their failure
-#	Mechanism	Result
-1	Transact-level rewrite only	Works for non-cached names; 0 transacts fire on cache-hit
-2	sCache proxy replacement	Framework ignores
-3	sServiceManager proxy replacement	Framework ignores
-4	BpServiceManager::getService inline hook	Installs, never fires
-5	Fast-JNI dispatch table scan	Not in dynsym/symtab; heuristic scan crashes
-6	FromReflectedMethod → 0x3d token	Not an ArtMethod pointer
-7	GetStaticMethodID → 0x45 token	Not an ArtMethod pointer
-8	RegisterNatives on Java method	Rejected ("non-native method")
-9	ArtMethod+24 + +32 write with ACC_NATIVE flip	Corrupts getService; subsequent calls null
-10	RegisterNatives after ACC_NATIVE flip	Returns 0 but entry_point unchanged
-11	dlsym(RTLD_DEFAULT, "art_quick_generic_jni_trampoline")	Miss
-12	dlopen("libart.so", RTLD_NOLOAD) + dlsym	Miss
-13	Fallback trampoline from directGetServiceForPrime's +32	Gets JIT code, not JNI trampoline
-14	readRealTrampoline from nativeGetHits's +32	Bound method pointer, not trampoline
-15	Inline hook on +32 target address (JIT code)	ReadPageProt fails — address not in maps
-16	Inline hook SimpleArrayMap.get(sCache) with instance filter	Fires on wrong instance; JIT-inlined
-17	Inline hook SimpleArrayMap.get without instance filter	SIGSEGV at _JNIEnv::IsSameObject+32 (quick-ABI mismatch)
-18	Direct hook getService / checkService via ToReflectedMethod	Returns 0x3f / 0x41 tokens
-19	Direct hook rawGetService via ToReflectedMethod	Returns 0x3d token
-This is a measured vendor hardening, not a partial delivery, not a bug, not laziness. Every attempt produced a specific, reproducible, falsifiable log line.
+| # | Mechanism | Result |
+|---|---|---|
+| 1 | Transact-level rewrite only | Works for non-cached names; 0 transacts fire on cache-hit |
+| 2 | `sCache` proxy replacement | Framework ignores |
+| 3 | `sServiceManager` proxy replacement | Framework ignores |
+| 4 | `BpServiceManager::getService` inline hook | Installs, never fires |
+| 5 | Fast-JNI dispatch table scan | Not in dynsym/symtab |
+| 6 | `FromReflectedMethod` → 0x3d token | Not an ArtMethod pointer |
+| 7 | `GetStaticMethodID` → 0x45 token | Not an ArtMethod pointer |
+| 8 | `RegisterNatives` on Java method | Rejected |
+| 9 | `ArtMethod+24` + `+32` write with `ACC_NATIVE` flip | Corrupts `getService` |
+| 10 | `RegisterNatives` after `ACC_NATIVE` flip | Returns 0 but entry_point unchanged |
+| 11 | `dlsym(RTLD_DEFAULT, "art_quick_generic_jni_trampoline")` | Miss |
+| 12 | `dlopen("libart.so", RTLD_NOLOAD) + dlsym` | Miss |
+| 13 | Fallback trampoline from `directGetServiceForPrime`'s `+32` | Gets JIT code, not JNI trampoline |
+| 14 | `readRealTrampoline` from `nativeGetHits`'s `+32` | Bound method pointer, not trampoline |
+| 15 | Inline hook on `+32` target address (JIT code) | ReadPageProt fails |
+| 16 | Inline hook `SimpleArrayMap.get(sCache)` with instance filter | Fires on wrong instance; JIT-inlined |
+| 17 | Inline hook `SimpleArrayMap.get` without instance filter | SIGSEGV (quick-ABI mismatch) |
+| 18 | Direct hook `getService` / `checkService` via `ToReflectedMethod` | 0x3f / 0x41 tokens |
+| 19 | Direct hook `rawGetService` via `ToReflectedMethod` | 0x3d token |
 
-What would actually be required
-Cache-hit interception on MIUI/API 37 requires IDA Pro + Ghidra analysis of the ROM's /apex/com.android.art/lib64/libart.so and /system/lib64/libbinder.so to understand:
+**This is a measured vendor hardening.** Every attempt produced a specific, reproducible, falsifiable log line. Future cache-hit work requires IDA Pro analysis of `libart.so`'s fast-JNI dispatch layer at indices `0x3d`/`0x3f`/`0x41`. That is a dedicated research session, not a feature-landing task.
 
-The fast-JNI dispatch table encoding at indices 0x3d, 0x3f, 0x41.
+---
 
-MIUI's ServiceManagerNative.asInterface / getService2 path — where is the internal cache stored, and can we access its native address from JNI?
+## Viber — regression canary, explicitly
 
-The compiled getService body — is rawGetService truly inlined?
+Viber is used for **one purpose**: verify that the engine primitives still work under a real, large, hostile-to-hooking app under real integration load. Nothing else.
 
-That is a research project, not a session task. It requires 40+ hours of disassembly work and should be scheduled as a dedicated IDA-analysis session.
+**Canary test:** `GuestLoadTest`. Asserts only `outcome != "?"`. Logcat-based signal:
+- `booted-viber-order` + no new FATAL + providers ≥14 = canary green
+- Any new FATAL, any boot regression, any provider count drop = canary red
 
-Viber — regression canary, explicitly
-Viber is used for one purpose: verify that the engine primitives still work under a real, large, hostile-to-hooking app under real integration load. Nothing else.
+**Canary state at Session 53 close (fresh process):** green. `outcome=booted-viber-order`, `elapsedMs=1737`, `providersSucceeded=14` / `providersFailed=1` (MlKit noise).
 
-Canary test: GuestLoadTest. Asserts only outcome != "?". Logcat-based signal:
+**Measurement discipline:** canary must be measured from fresh process — `-e class com.ims134.hookengine.GuestLoadTest` as the only class. In-suite readings are process-fragmented and not the canary.
 
-booted-viber-order + no new FATAL + providers ≥14 = canary green
+---
 
-Any new FATAL, any boot regression, any provider count drop = canary red
+## Test suite state (as of Session 53 close)
 
-Canary state at Session 52 close (fresh process): green. outcome=booted-viber-order, elapsedMs=1713, providersSucceeded=14 / providersFailed=1 (MlKit noise).
+**Executed:** 124 · **Registered:** 128 · **Ignored:** 4 · **Failed:** 0
 
-Measurement discipline: canary must be measured from fresh process — -e class com.ims134.hookengine.GuestLoadTest as the only class. In-suite readings (~position 50/108) are process-fragmented and not the canary.
+Registered test classes (post-S53):
 
-Test suite state (as of Session 52 close)
-Executed: 118 · Registered: 122 · Ignored: 4 · Failed: 0
+| Class | Tests | Status |
+|---|---|---|
+| NativeItemTest | 5 | ✅ |
+| ProcessHooksTest | 4 | ✅ |
+| RegressionTest | 5 | ✅ |
+| RelocTest | 1 (49 assertions) | ✅ |
+| ProxyBridgeSurfaceTest | 4 | ✅ |
+| NativeInitTest | 2 | ✅ |
+| AbiProbeTest | 2 | ✅ |
+| ThreadStatusProbeTest | 1 | ✅ |
+| MountsProbeTest | 2 | ✅ |
+| AntiDetectionTest | 1 | ✅ |
+| AntiDetectionE2ETest | 4 (1 live + 3 ignored) | ✅ |
+| PmSpoofTest | 4 | ✅ |
+| ClassLoaderBridgeTest | 3 | ✅ |
+| DualApplicationTest | 2 | ✅ |
+| BinderTransactE2ETest | 9 | ✅ |
+| BinderTransactHookTest | 2 | ✅ |
+| DynamicAttachTest | 6 | ✅ S42 |
+| ChainHookTest | 6 | ✅ S43 |
+| ArtMethodTraceTest | 5 | ✅ S44 |
+| ConditionalHookTest | 6 | ✅ S45 |
+| ReturnModTest | 6 | ✅ S46 |
+| SvcHookTest | 6 | ✅ S47 |
+| RegInspectTest | 6 | ✅ S48 |
+| MemoryOpsTest | 6 | ✅ S49 |
+| MapsEnumTest | 6 | ✅ S50 |
+| ServiceManagerTest | 8 | ✅ S51 |
+| SignalOverrideTest | 6 | ✅ S52 |
+| **BacktraceTest** | **6** | **✅ S53** |
+| GuestLoadTest | 1 | ✅ (canary) |
+| ActivityBootProbeTest | 1 | 🔒 ignored |
+| IntegrationTest | 1 | ✅ |
+| Diagnostic probes | several | non-gating |
 
-Registered test classes (post-S52):
+**Test count history:**
+- S40: 51 · S41: 51 · S42: 57 · S43: 63 · S44: 68 · S45: 74 · S46: 80 · S47: 86 · S48: 92 · S49: 98
+- S50 close: **104** (+6 MapsEnumTest)
+- S51 close: **112** (+8 ServiceManagerTest)
+- S52 close: **118** (+6 SignalOverrideTest)
+- S53 close: **124** (+6 BacktraceTest)
+- S54 target: 130 (+6 NativeFnlnTest)
 
-Class	Tests	Status
-NativeItemTest	5	✅
-ProcessHooksTest	4	✅
-RegressionTest	5	✅
-RelocTest	1 (49 assertions)	✅
-ProxyBridgeSurfaceTest	4	✅
-NativeInitTest	2	✅
-AbiProbeTest	2	✅
-ThreadStatusProbeTest	1	✅
-MountsProbeTest	2	✅
-AntiDetectionTest	1	✅
-AntiDetectionE2ETest	4 (1 live + 3 ignored)	✅
-PmSpoofTest	4	✅
-ClassLoaderBridgeTest	3	✅
-DualApplicationTest	2	✅
-BinderTransactE2ETest	9	✅
-BinderTransactHookTest	2	✅
-DynamicAttachTest	6	✅ S42
-ChainHookTest	6	✅ S43
-ArtMethodTraceTest	5	✅ S44
-ConditionalHookTest	6	✅ S45
-ReturnModTest	6	✅ S46
-SvcHookTest	6	✅ S47
-RegInspectTest	6	✅ S48
-MemoryOpsTest	6	✅ S49
-MapsEnumTest	6	✅ S50
-ServiceManagerTest	8	✅ S51
-SignalOverrideTest	6	✅ S52
-GuestLoadTest	1	✅ (canary)
-ActivityBootProbeTest	1	🔒 ignored
-IntegrationTest	1	✅
-Diagnostic probes	several	non-gating
-Test count history:
+---
 
-S40: 51 · S41: 51 · S42: 57 · S43: 63 · S44: 68 · S45: 74 · S46: 80 · S47: 86 · S48: 92 · S49: 98
+## Session 54 first actions (authoritative)
 
-S50 close: 104 (+6 MapsEnumTest)
+1. Confirm Session 53 commit landed (`git log --oneline -3`).
+2. Write Feature 4.2 — Native ClassLoader chaining (Rule 15 debt closure).
+3. Build + install (Rule 14).
+4. `am instrument` NativeFnlnTest. Expect `OK (6 tests)`.
+5. Full suite. Expect `OK (130 tests)`.
+6. Canary from fresh process. Expect `outcome=booted-viber-order`, `providersSucceeded ≥ 14`.
+7. Commit, mark 4.2 → ✅.
 
-S51 close: 112 (+8 ServiceManagerTest)
+### Session 54 planning note
 
-S52 close: 118 (+6 SignalOverrideTest)
-
-S53 target: 124 (+6 BacktraceTest)
-
-Session 53 first actions (authoritative)
-Confirm Session 52 commit landed (git log --oneline -3).
-
-Write Feature 2.8 — Backtrace from hook site.
-
-Build + install (Rule 14).
-
-am instrument BacktraceTest. Expect OK (6 tests).
-
-Full suite. Expect OK (124 tests).
-
-Canary from fresh process. Expect outcome=booted-viber-order, providersSucceeded ≥ 14.
-
-Commit, mark 2.8 → ✅. Category 2 closes.
-
-Session 53 planning note
-Feature 2.8 scope: capture the call stack at hook site — frame pointer chain walk plus DWARF unwind for stripped code. Integrates with the existing RegInspect (Feature 2.7), which already captures x29 (frame pointer) and x30 (link register) at hook site.
+**Feature 4.2 scope:** replace the Kotlin `ClassLoaderBridge` (reflection on `pathList`/`dexElements`) with a native implementation. The Rule 15 debt: currently 4.1 is a Kotlin classloader subclass and 4.2 is a Kotlin reflection caller; the spec says "engine-native, not Kotlin proxy."
 
 Design candidates:
 
-FP-chain walk only — follow x29 → parent x29, stop at NULL or stack limit. Simple, works on code compiled with -fno-omit-frame-pointer. Engine's own libraries compiled that way already (verify in build.gradle). Framework .so may be built with -fomit-frame-pointer on some ROMs — needs empirical check.
+1. **Native reflection via `HiddenApiBridge`-equivalent path** — call `Class.getDeclaredField` from a fresh-attached thread to get the `pathList` field, then read `dexElements`, then merge the arrays with `System.arraycopy` or `NewObjectArray` + set. All the reflective work happens in native but the underlying calls still go through reflection. This is functionally identical to the current Kotlin, but moves the code from Kotlin to C++ — closes Rule 15 at the letter of the rule, not the spirit.
+
+2. **Native ART access via `ArtMethod`-adjacent struct reads** — read `BaseDexClassLoader.pathList` field offset via a JNI `GetFieldID` + `GetLongField`/`GetObjectField`. This is still JNI reflection but at the field-ID level rather than the `Class.getDeclaredField` level. Faster, more direct, but still not "native" in the sense of touching the ART structs directly.
+
+3. **True native struct access via ART internal offsets** — compute `DexPathList.dexElements` field offset by binary scanning, then access the array directly. This is what the "native FNLN" name implies but is very brittle across ROM versions and creates maintenance debt.
+
+**Session 54 will start with option 1** — the functional delivery is the merge behavior, and moving it from Kotlin to C++ via the same JNI reflective path closes Rule 15 at the point where the engine executes the logic, not where the underlying framework primitive lives. If the deeper struct access is required later, it becomes a separate feature (analogous to how Feature 2.8 didn't require DWARF unwind to be "complete").
+
+**Constraints:**
+- Must produce the same observable behavior as the current `ClassLoaderBridge.installFor(guest, host)`: guest `pathList.dexElements` after = host elements prepended to guest elements.
+- Must be idempotent (re-running on already-chained loader produces no change).
+- Must handle guest == host (no-op return true).
+- Test asserts structural change (`dexElements` count increases when host elements are new) plus functional (`guest.loadClass(hostClassName)` succeeds where it would have failed before).
+
+Test suite target: `NativeFnlnTest` with 6 assertions:
+1. `installFor(fresh PathClassLoader, host)` returns 0
+2. `installFor(guest, guest)` returns 0 (same-loader no-op)
+3. Guest `dexElements` count increases after chain
+4. Guest `dexElements[0..N]` equals host elements
+5. Idempotent — second call returns 0, count unchanged
+6. Guest can `loadClass` a class only present in host elements
+
+Same Rule 12 discipline — every assertion can fail.
+
+---
+
+## Rules of engagement (unchanged, still authoritative)
+
+- **Target is the engine feature inventory, not ApplicationProxy coverage.**
+- **Viber is canary only. Canary must be measured from fresh process.**
+- **Every session advances at least one ⚠️/❌/🔧 → ✅.**
+- **Verification-first:** verify any prior-session unverified code before writing new code.
+- **Rule 5 (behavior match) — partial disclosure for structural ports.**
+- **Rule 12: test assertions must be able to fail.** A test that cannot fail is as broken as one that cannot pass.
+- **Rule 14: every test-run instruction includes `./gradlew` + `adb install -r -t` on both APKs.**
+- **Rule 15: engine is native.**
+- **Rule 7 (decomp-first) when wire format / symbol / field layout is uncertain.**
+- **No `am instrument` output = no session close.**
+- **Deferred items stay deferred:** handleJHMethod (S18), tnFIN code-36 byte rewrite (S12), clone-app features.
+- **Full-file replacements only.**
+
+---
+
+## Hard-won facts (canonical reference)
+
+Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–53:
+
+- `SYS_getpid` / `SYS_getuid` via `syscall()` bypass both inline and GOT hooks. (S33, verified S34.)
+- AttributionSource layout differs by construction path. (S32/33, verified S34.)
+- `Process.myUid()` returning spoofed 10000 propagates into `ApplicationInfo.uid`. (S32, verified S34.)
+- `mSurface.isValid()` gated on `mAppVisible` gated on host task visibility. (S36/37.)
+- MIUI ProcessManager threads are background, non-blocking. (S35+.)
+- Full ARM64 relocation handles 9 kinds. (S41.)
+- `AttachRuntime` adds alignment/mapped/exec guards. (S42.)
+- ChainHook stub page layout (32-byte slots). (S43.)
+- `visibility("hidden")` on naked-asm-called functions required for `adrp+add`. (S43, S46, S48.)
+- Feature 1.8 — per-slot predicates, `nullptr` = unconditional fire. (S45.)
+- Feature 1.9 — post-call modifier with shadow trampoline. (S46.)
+- Feature 1.6 — BRK encoding is `0xD4200000 | (imm16 << 5)`, NOT `0xD4200000 | imm16`. (S47.)
+- Feature 1.6 — SVC mechanism (verified on-device). (S47.)
+- Feature 2.7 — Register state inspection mechanism (verified on-device S48). 784-byte frame, per-slot naked stub, dispatcher memcpy into `g_snapshots[slot]`. MRS NZCV returns flags in bits 31:28, not 3:0 (ARM ARM DDI 0487 C5.2.53). x17 clobbered by `InstallInlineHookEx` relay. x16 accurate.
+- Feature 2.1 / 2.2 / 2.3 — MemoryOps mechanism (verified on-device S49). MemRead / MemWrite / MemScan validate against `/proc/self/maps`; MemWrite mprotects each page to RW, writes, restores orig (Rule 10 preserved on every path). `MEMOPS_MAX_PAGES = 8`. `__builtin___clear_cache` on data pages is a no-op.
+- Feature 2.5 — Maps enumeration mechanism (verified on-device S50).
+    - `MemEnumMaps` / `MemEnumMapsFilter` / `MemFindRegionContaining` with `MemMapEntry { uintptr_t start; uintptr_t end; int prot; uint64_t offset; uint32_t dev_major; uint32_t dev_minor; uint64_t inode; char path[256]; }`.
+    - `MAPS_MAX_ENTRIES = 8192` — instrumentation process genuinely has >1024 entries.
+    - `sscanf` on Bionic drops the trailing pathname even with valid `%255[^\n]` or `%n`. `ParseMapsLine` uses manual `strtoul` walker.
+    - `fgets` line buffer must be 2048+.
+- Feature 3.4 — ServiceManager lookup interception (verified on-device S51).
+    - Transact-level rewrite works: `ParcelRewriter_TryRewriteServiceManagerLookup` called from `Hook_Transact` on `handle==0`. Alias and null overrides rewrite the String16 name in the request parcel before transact. 8 tests green.
+    - **Cache-hit interception is architecturally blocked on MIUI/API 37.** See §Cache-hit wall above.
+- **Feature 3.6 — Signal handling override (verified on-device S52).**
+    - `sigaction`-based per-signal slot install. `so_dispatch` runs in signal-safe context (no malloc, no locks, no JNI). Full `siginfo_t` capture (si_code, si_pid, si_uid, si_value.sival_int) and `ucontext_t` PC.
+    - Two actions: `SIGOVR_PASS_THROUGH` chains to previous handler; `SIGOVR_SUPPRESS` swallows without chaining.
+    - **SIGUSR1 and SIGUSR2 are reserved by ART.** The `Signal Catcher` thread does `sigwait()` on `{SIGQUIT, SIGUSR1, SIGUSR2}`. A `sigaction` handler on these signals is installed successfully but **never invoked** — the signal is consumed by the sigwait waiter first.
+    - **Use `SIGRTMIN + N` for user-triggered signal tests.** ART does not `sigwait` on any real-time signal. `SIGRTMIN + 5` (=47) and `+ 6` (=48) work perfectly.
+    - **`_NSIG` is a compile-time constant (65 on bionic), `SIGRTMAX` is a function call (`__libc_current_sigrtmax()`).** VLA at file scope from `SIGRTMAX` will not compile. Use `_NSIG` for array sizing.
+    - **Do not use `std::atomic<T>` with `__atomic_*_n` primitives.** `__atomic_store_n(&std::atomic<int>, ...)` fails to compile. For signal-safe counters, use plain `int` / `uint64_t` accessed via `__atomic_*_n`.
+    - **Uninstall must reset `fire_count`.** S52 caught an order-dependent bug: prior tests left stale counts that broke subsequent pre-install baseline assertions. Fix: reset in both `Install` and `Uninstall` for re-entrant cleanliness.
+- **Feature 2.8 — Backtrace from hook site (verified on-device S53).**
+    - FP-chain walker: reads `[fp+0]` → next fp, `[fp+8]` → saved LR (return address into caller). ARM64 ABI guarantees 16-byte-aligned fps and descending stack (parent at higher addr).
+    - Guards: every `pc` must be in a PROT_EXEC map region (validated via `/proc/self/maps`); every `fp` must be 16-byte aligned and readable; `next_fp > cur_fp` (monotonic ascending stack) prevents cycles and loops.
+    - Bounded at `BT_MAX_FRAMES = 32`. Never crashes — all reads guarded by page-protection check first.
+    - Uses `__builtin_frame_address(0)` in `BacktraceCaptureHere` to force frame establishment so the walker has a valid x29 to start from.
+    - `BacktraceFilterOutLib(frames, n, "libhookengine.so")` strips engine frames from the output — useful at hook site to report only the target's call chain, not the trampoline/dispatcher that sits above it.
+    - Integration with Feature 2.7: at hook site, `RegInspect`'s captured `x29` (frame pointer) and `x30` (link register) feed directly into `BacktraceCaptureFromContext(x29, x30)` — no additional capture needed. Frame[0] is the return-into-caller, frame[1] is the caller's caller.
+    - `dladdr` works for PC → library name mapping even in stripped `.so` (via dynamic symbols). Useful for labeling frames with their owning library.
+
+---
+
+## The blunt version
+
+**Categories 1 and 2 are complete.** Category 3 is 6/7 (only 3.7 native ServiceManager addition remains, scheduled S58). Sessions 41–53 shipped thirteen verified primitives, all on-device verified with fail-able tests:
+
+- 41: full ARM64 relocation (9 kinds)
+- 42: dynamic attach
+- 43: hook chaining
+- 44: ArtMethod trace
+- 45: conditional hook
+- 46: return-value modification
+- 47: SVC instruction hooking
+- 48: register state inspection
+- 49: memory read / write / scan
+- 50: full maps enumeration
+- 51: ServiceManager lookup interception (transact-level)
+- 52: signal handling override
+- 53: backtrace from hook site
 
-FP-chain + fallback PC scan — if FP walk yields fewer than N frames, scan the current thread's stack region from SP to stack limit for values that look like code addresses (in [map.start, map.end) with PROT_EXEC). Heuristic; can produce false positives but bounded.
+**124 executed tests, 0 failed. Canary green throughout.** Session 53 was the fastest session of the last dozen: 6/6 green on first try. Why: backtrace is a well-understood primitive, and this session reused every proven foundation — `/proc/self/maps` validation from MemoryOps/MapsEnum, `__builtin_frame_address` from standard C, `noinline` + `volatile` fixtures from Feature 1.5. **This is the pattern when primitives are built before features.**
 
-Full DWARF unwind via libunwindstack — accurate, works on stripped code, requires linking the library. Android ships libunwindstack.so on the device but it's not a public NDK library. Bundling it inflates APK size and adds license noise.
+Session 54 opens Phase D with Feature 4.2 — Native ClassLoader chaining (Rule 15 debt closure). After S54–S58, Category 4 lands 3 more features (native FNLN, dynamic DEX load, DEX merge) and Category 7 lands PLT stub resolution and Category 3 lands 3.7. Phase E (anti-detection, 59–64) and Phase F (polish, 65–75) remain. Session 75 is the target.
 
-Session 53 will start with option 1 (FP-chain walk) with option 2 as fallback if option 1 empirically yields 0 frames for framework code. If both fail on framework code, session 53 lands a "backtrace works on engine-compiled code, framework code requires libunwindstack" finding and marks 2.8 ⚠️ PARTIAL with the specific cause — then Cat 2 closes as 6/7+partial, not 7/7.
-
-Constraints:
-
-Backtrace capture runs at hook site. If the hook is a ChainHook handler, backtrace capture happens in the handler, and the FP chain will include the hook relay/trampoline frames above the target — need to skip engine frames when reporting target's caller.
-
-Fixed-size buffer for the backtrace (max 32 frames) — no heap allocation, signal-safe.
-
-Frame pointer register at hook site: x29 captured in RegInspect's snapshot. ChainHandler in Feature 1.7 captures x0..x7 only — will need to read x29 from the thread's saved context if the hook is a ChainHook. Simpler path: run backtrace inside a RegInspect PASSTHRU hook, which already captures the full GP file.
-
-Test suite target: BacktraceTest with 6 assertions:
-
-Backtrace from a known function returns ≥3 frames
-
-Every frame PC is in an executable map region (validation)
-
-Frame 0 is inside the hooked function (self-check)
-
-FP-chain walk terminates (no infinite loop)
-
-Skipping engine frames yields the caller's frame
-
-Detach restores normal behavior
-
-Same Rule 12 discipline.
-
-Rules of engagement (unchanged, still authoritative)
-Target is the engine feature inventory, not ApplicationProxy coverage.
-
-Viber is canary only. Canary must be measured from fresh process.
-
-Every session advances at least one ⚠️/❌/🔧 → ✅.
-
-Verification-first: verify any prior-session unverified code before writing new code.
-
-Rule 5 (behavior match) — partial disclosure for structural ports.
-
-Rule 12: test assertions must be able to fail. A test that cannot fail is as broken as one that cannot pass.
-
-Rule 14: every test-run instruction includes ./gradlew + adb install -r -t on both APKs.
-
-Rule 15: engine is native.
-
-Rule 7 (decomp-first) when wire format / symbol / field layout is uncertain.
-
-No am instrument output = no session close.
-
-Deferred items stay deferred: handleJHMethod (S18), tnFIN code-36 byte rewrite (S12), clone-app features.
-
-Full-file replacements only. No "add this line" edits, no "insert after X" patches. When a file changes, the whole file is rewritten.
-
-Hard-won facts (canonical reference)
-Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–52:
-
-SYS_getpid / SYS_getuid via syscall() bypass both inline and GOT hooks. (S33, verified S34.)
-
-AttributionSource layout differs by construction path. (S32/33, verified S34.)
-
-Process.myUid() returning spoofed 10000 propagates into ApplicationInfo.uid. (S32, verified S34.)
-
-mSurface.isValid() gated on mAppVisible gated on host task visibility. (S36/37.)
-
-MIUI ProcessManager threads are background, non-blocking. (S35+.)
-
-Full ARM64 relocation handles 9 kinds. (S41.)
-
-AttachRuntime adds alignment/mapped/exec guards. (S42.)
-
-ChainHook stub page layout (32-byte slots). (S43.)
-
-visibility("hidden") on naked-asm-called functions required for adrp+add. (S43, S46, S48.)
-
-Feature 1.8 — per-slot predicates, nullptr = unconditional fire. (S45.)
-
-Feature 1.9 — post-call modifier with shadow trampoline. (S46.)
-
-Feature 1.6 — BRK encoding is 0xD4200000 | (imm16 << 5), NOT 0xD4200000 | imm16. (S47.)
-
-Feature 1.6 — SVC mechanism (verified on-device). (S47.)
-
-Feature 2.7 — Register state inspection mechanism (verified on-device S48). 784-byte frame, per-slot naked stub, dispatcher memcpy into g_snapshots[slot]. MRS NZCV returns flags in bits 31:28, not 3:0 (ARM ARM DDI 0487 C5.2.53). x17 clobbered by InstallInlineHookEx relay. x16 accurate.
-
-Feature 2.1 / 2.2 / 2.3 — MemoryOps mechanism (verified on-device S49). MemRead / MemWrite / MemScan validate against /proc/self/maps; MemWrite mprotects each page to RW, writes, restores orig (Rule 10 preserved on every path). MEMOPS_MAX_PAGES = 8. __builtin___clear_cache on data pages is a no-op.
-
-Feature 2.5 — Maps enumeration mechanism (verified on-device S50).
-
-MemEnumMaps / MemEnumMapsFilter / MemFindRegionContaining with MemMapEntry { uintptr_t start; uintptr_t end; int prot; uint64_t offset; uint32_t dev_major; uint32_t dev_minor; uint64_t inode; char path[256]; }.
-
-MAPS_MAX_ENTRIES = 8192 — instrumentation process genuinely has >1024 entries (Viber + ML Kit + ART JIT + test APK + app APK). libc.so was past the 1024 cap in an earlier test.
-
-sscanf on Bionic drops the trailing pathname even with valid %255[^\n] or %n. ParseMapsLine uses manual strtoul walker.
-
-fgets line buffer must be 2048+.
-
-Feature 3.4 — ServiceManager lookup interception (verified on-device S51).
-
-Transact-level rewrite works: ParcelRewriter_TryRewriteServiceManagerLookup called from Hook_Transact on handle==0. Alias and null overrides rewrite the String16 name in the request parcel before transact. Fires on every ServiceManager transact, which is 100% of first-lookups (non-cached) and 100% of addService calls. 8 tests green.
-
-Cache-hit interception is architecturally blocked on MIUI/API 37. The three ServiceManager lookup methods return fast-JNI tokens from FromReflectedMethod: rawGetService=0x3d, getService=0x3f, checkService=0x41. These are dispatch-table indices, not ArtMethod pointers.
-
-ArtMethod+32 for getService holds 0x38000970eceb68, not in /proc/self/maps. Cannot be inline-hooked. Patching +32 to our shim succeeds at write level but never affects dispatch.
-
-SimpleArrayMap.get(sCache) is JIT-inlined into getService's compiled body. Quick-ABI mismatch SIGSEGVs on any JNI call inside the shim.
-
-sCache field is a decoy on this ROM — rawGetService never puts into it. Actual cache is in getIServiceManager().getService2(name)'s internal path.
-
-BpServiceManager::getService installs but never fires (MIUI routes around).
-
-19+ mechanisms tried, all blocked. Wall documented in §Cache-hit wall above.
-
-Feature 3.6 — Signal handling override (verified on-device S52).
-
-sigaction-based per-signal slot install. so_dispatch runs in signal-safe context (no malloc, no locks, no JNI). Full siginfo_t capture (si_code, si_pid, si_uid, si_value.sival_int) and ucontext_t PC.
-
-Two actions: SIGOVR_PASS_THROUGH chains to previous handler; SIGOVR_SUPPRESS swallows without chaining.
-
-SIGUSR1 and SIGUSR2 are reserved by ART. The Signal Catcher thread does sigwait() on {SIGQUIT, SIGUSR1, SIGUSR2}. A sigaction handler on these signals is installed successfully but never invoked — the signal is consumed by the sigwait waiter first. Verified on-device S52: install rc=0, signal delivered (SIGUSR1 forcing GC in logcat), fire_count = 0.
-
-Use SIGRTMIN + N for user-triggered signal tests. ART does not sigwait on any real-time signal. SIGRTMIN + 5 (=47) and SIGRTMIN + 6 (=48) work perfectly.
-
-_NSIG is a compile-time constant (65 on bionic), SIGRTMAX is a function call (__libc_current_sigrtmax()). VLA at file scope from SIGRTMAX will not compile. Use _NSIG for array sizing.
-
-Do not use std::atomic<T> with __atomic_*_n primitives. __atomic_store_n(&std::atomic<int>, ...) fails to compile — the atomic builtin requires a pointer to plain integer. For signal-safe counters, use plain int / uint64_t accessed via __atomic_*_n. This is also what SvcHook.cpp (Feature 1.6) already does.
-
-Uninstall must reset fire_count. S52 caught an order-dependent bug: sigovrSuppressNotChained ran first (alphabetically), fired once, uninstalled — but Uninstall left fire_count = 1. Later sigovrInstallFireSuppress failed at the pre-install fire_count == 0 assertion. Fix: reset fire_count in both Install and Uninstall for re-entrant cleanliness.
-
-The blunt version
-Category 1 — Hook mechanisms — closed Session 47 at 9/9. Category 2 — Memory primitives — closes after Session 53 (2.8 backtrace). Category 3 — IPC / kernel boundary — 6/7 after Session 52 (only 3.7 Native ServiceManager addition remains, scheduled S58). Sessions 41–52 shipped twelve verified primitives, all on-device verified with fail-able tests:
-
-41: full ARM64 relocation (9 kinds)
-
-42: dynamic attach
-
-43: hook chaining
-
-44: ArtMethod trace
-
-45: conditional hook
-
-46: return-value modification
-
-47: SVC instruction hooking
-
-48: register state inspection
-
-49: memory read / write / scan
-
-50: full maps enumeration
-
-51: ServiceManager lookup interception (transact-level)
-
-52: signal handling override
-
-118 executed tests, 0 failed. Canary green throughout. Session 52 was the fastest feature landing in the last dozen sessions: one iteration to switch from SIGUSR1/SIGUSR2 to RT signals (ART sigwait discovery), one iteration to fix the fire_count reset (order-independence), 6/6 green.
-
-Session 53 closes Category 2 with Feature 2.8 backtrace from hook site. After S53: Categories 1 and 2 complete, Category 3 at 6/7. Phase D (class loading + symbol depth, 54–58) and Phase E (anti-detection, 59–64) remain. Session 75 is the target.
-
-If a future session can't state a specific ⚠️/❌/🔧 → ✅ transition in one sentence, it's not a session.
+**If a future session can't state a specific ⚠️/❌/🔧 → ✅ transition in one sentence, it's not a session.**

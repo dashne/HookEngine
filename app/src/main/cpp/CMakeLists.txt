@@ -32,6 +32,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ServiceManagerShimJni.cpp
         SignalOverride.cpp
         SignalOverrideJni.cpp
+        Backtrace.cpp
+        BacktraceJni.cpp
         ApplicationProxy.cpp
         GuestBoot.cpp
         test_item1.cpp

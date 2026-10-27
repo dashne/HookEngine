@@ -123,6 +123,17 @@ object NativeTestBridge {
     external fun memEnumMapsDebugDump(): String
     external fun memFindRegionContaining(addr: Long): LongArray?
 
+    // Feature 2.8 — backtrace from hook site
+    external fun btRunChain(): Int
+    external fun btTrigger(): Int
+    external fun btFrameCount(): Int
+    external fun btFramePc(idx: Int): Long
+    external fun btFrameFp(idx: Int): Long
+    external fun btFixtureAAddr(): Long
+    external fun btFixtureBAddr(): Long
+    external fun btFixtureCAddr(): Long
+    external fun btFilterOutLib(libSubstr: String): Int
+
     // Feature 3.4 — ServiceManager override tables
     external fun smSetNullOverride(name: String): Boolean
     external fun smSetAliasOverride(from: String, to: String): Boolean
