@@ -183,4 +183,8 @@ object NativeTestBridge {
     external fun sigovrRestoreRawSigaction(signo: Int)
     external fun sigovrRawSigactionCount(): Int
     external fun sigovrCurrentHandlerKind(signo: Int): Int
+
+    // Feature 7.6 — PLT stub resolution
+    external fun pltResolve(libName: String, symbolName: String): Long
+    external fun pltCallOpen(pltAddr: Long, path: String, flags: Int): Int
 }
