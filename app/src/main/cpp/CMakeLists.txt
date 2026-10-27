@@ -35,6 +35,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         Backtrace.cpp
         BacktraceJni.cpp
         NativeFnln.cpp
+        DexLoader.cpp
         ApplicationProxy.cpp
         GuestBoot.cpp
         test_item1.cpp
