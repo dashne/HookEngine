@@ -155,4 +155,21 @@ object NativeTestBridge {
 
     external fun traceTargetS0(warmup: String): Int
     external fun traceTargetS1(warmup: String, x: Int): Int
+
+    // Feature 3.6 — Signal handling override
+    external fun sigovrInstall(signo: Int, handlerId: Int, userCtx: Long): Int
+    external fun sigovrUninstall(signo: Int): Int
+    external fun sigovrCount(): Int
+    external fun sigovrFireCount(signo: Int): Int
+    external fun sigovrResetAll()
+    external fun sigovrLastSiCode(): Int
+    external fun sigovrLastPid(): Int
+    external fun sigovrLastUid(): Int
+    external fun sigovrLastSivalInt(): Int
+    external fun sigovrLastPc(): Long
+    external fun sigovrRaiseWithInt(signo: Int, sival: Int): Int
+    external fun sigovrInstallRawSigaction(signo: Int): Int
+    external fun sigovrRestoreRawSigaction(signo: Int)
+    external fun sigovrRawSigactionCount(): Int
+    external fun sigovrCurrentHandlerKind(signo: Int): Int
 }

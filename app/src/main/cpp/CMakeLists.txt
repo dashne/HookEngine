@@ -30,6 +30,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         BpServiceManagerHook.cpp
         FastJniHook.cpp
         ServiceManagerShimJni.cpp
+        SignalOverride.cpp
+        SignalOverrideJni.cpp
         ApplicationProxy.cpp
         GuestBoot.cpp
         test_item1.cpp
