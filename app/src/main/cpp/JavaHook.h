@@ -17,6 +17,22 @@ struct JavaHook;
 extern "C" JavaHook* JavaHookInstall(JNIEnv* env, jobject method_obj,
                                      void* replacement, void** out_original,
                                      const char* name);
+
+// Feature 3.4 session 51 — direct jmethodID entry.
+//
+// Same behavior as JavaHookInstall but skips the FromReflectedMethod round-
+// trip. On MIUI/API 37, FromReflectedMethod returns 0x3d (a small token) for
+// ServiceManager.getService even though reflection reports native=false. This
+// entry path accepts a jmethodID returned by GetStaticMethodID/GetMethodID
+// directly, so callers who already have the jmethodID can bypass the anomaly.
+//
+// If GetStaticMethodID also returns a token, the fast-JNI guard here will
+// refuse with the same log line — that would mean the method truly is fast-
+// JNI on this ART and ArtMethod hook is architecturally blocked.
+extern "C" JavaHook* JavaHookInstallByMethodID(JNIEnv* env, jmethodID method_id,
+                                               void* replacement, void** out_original,
+                                               const char* name);
+
 extern "C" HookResult JavaHookUninstall(JavaHook* hook);
 extern "C" int JavaHookUninstallAll();
 extern "C" int JavaHookCount();

@@ -36,7 +36,22 @@ object HiddenApiBridge {
     ): java.lang.reflect.Method?
 
     /** Sets accessible on a member via the same bypass path. */
-    external fun reflectSetAccessible(member: Field?): Boolean
+    /**
+     * Sets accessible on a member via the same bypass path. Accepts both
+     * Field and Method — the native implementation invokes
+     * AccessibleObject.setAccessible(true), which works for any
+     * AccessibleObject subclass.
+     */
+    external fun reflectSetAccessible(member: Any?): Boolean
+
+    /**
+     * Returns all declared fields of a class, obtained from a privileged
+     * (fresh-attached-thread) context so hidden-API filters don't strip
+     * them. This is the array variant of reflectGetDeclaredField — the
+     * singular one already worked for named lookup; this one reveals
+     * fields whose names we don't know in advance.
+     */
+    external fun reflectGetDeclaredFieldsArray(cls: Class<*>): Array<java.lang.reflect.Field>?
 
     @Volatile var lastError: String = ""
         private set

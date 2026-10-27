@@ -23,7 +23,7 @@ object NativeTestBridge {
 
     external fun dumpLastCode36Reply(): ByteArray?
 
-    // ─── Feature 1.5 — dynamic runtime attach ───────────────────────
+    // Feature 1.5 — dynamic runtime attach
     external fun attachRuntime(addr: Long, repl: Long): Int
     external fun detachRuntime(addr: Long): Int
     external fun getFnAttachTargetAddr(): Long
@@ -32,7 +32,7 @@ object NativeTestBridge {
     external fun callFnAttachTarget(x: Int): Int
     external fun readU32At(addr: Long): Long
 
-    // ─── Feature 1.7 — hook chaining ────────────────────────────────
+    // Feature 1.7 — hook chaining
     external fun chainAttach(target: Long, handler: Long): Int
     external fun chainDetach(target: Long, handler: Long): Int
     external fun chainCount(): Int
@@ -46,7 +46,7 @@ object NativeTestBridge {
     external fun chainOrderFirst(): Int
     external fun chainReset()
 
-    // ─── Feature 1.8 — conditional hook ─────────────────────────────
+    // Feature 1.8 — conditional hook
     external fun chainAttachCond(target: Long, predicate: Long, handler: Long): Int
     external fun getChainPredAcceptAllAddr(): Long
     external fun getChainPredRejectAllAddr(): Long
@@ -55,7 +55,7 @@ object NativeTestBridge {
     external fun chainPredCalls(): Int
     external fun chainPredLastX0(): Int
 
-    // ─── Feature 1.9 — return-value modification ────────────────────
+    // Feature 1.9 — return-value modification
     external fun attachRetMod(target: Long, modifier: Long): Int
     external fun detachRetMod(target: Long): Int
     external fun retModCount(): Int
@@ -67,7 +67,7 @@ object NativeTestBridge {
     external fun getRetModClamp100Addr(): Long
     external fun getRetModForceDeadAddr(): Long
 
-    // ─── Feature 1.6 — SVC instruction hooking ──────────────────────
+    // Feature 1.6 — SVC instruction hooking
     external fun getSvcGetpidTargetAddr(): Long
     external fun getSvcGetpidSvcAddr(): Long
     external fun getSvcGetppidTargetAddr(): Long
@@ -95,7 +95,7 @@ object NativeTestBridge {
     external fun svcLastArg1(): Long
     external fun svcResetCounters()
 
-    // ─── Feature 2.7 — register state inspection ────────────────────
+    // Feature 2.7 — register state inspection
     external fun getRegInspectGpTargetAddr(): Long
     external fun getRegInspectFpTargetAddr(): Long
     external fun callRegInspectGp(a: Int, b: Int): Int
@@ -105,7 +105,7 @@ object NativeTestBridge {
     external fun regInspectCount(): Int
     external fun regInspectSnapshot(target: Long): LongArray?
 
-    // ─── Feature 2.1 / 2.2 / 2.3 — memory read / write / scan ────────
+    // Feature 2.1 / 2.2 / 2.3 — memory read / write / scan
     external fun getMemTestBufAddr(): Long
     external fun getMemTestRoPageAddr(): Long
     external fun memTestResetRoPage()
@@ -116,15 +116,32 @@ object NativeTestBridge {
                          pattern: ByteArray, mask: ByteArray?,
                          maxOut: Int): LongArray?
 
-    // ─── Feature 2.5 — full maps enumeration ────────────────────────
+    // Feature 2.5 — full maps enumeration
     external fun memEnumMapsAllCount(): Int
     external fun memEnumMapsFiltered(prot_mask: Int, maxEntries: Int): LongArray?
     external fun memEnumMapsPathContains(substr: String): Int
     external fun memEnumMapsDebugDump(): String
     external fun memFindRegionContaining(addr: Long): LongArray?
 
+    // Feature 3.4 — ServiceManager override tables
+    external fun smSetNullOverride(name: String): Boolean
+    external fun smSetAliasOverride(from: String, to: String): Boolean
+    external fun smClearOverrides()
+    external fun smIsNullOverridden(name: String): Boolean
+    external fun smFindAlias(name: String): String?
+    external fun smNullHitCount(): Int
+    external fun smAliasHitCount(): Int
+    external fun installSvcMgrJniHook(): Int
+    external fun uninstallSvcMgrJniHook()
+    external fun svcMgrJniCount(): Int
 
-    // ─── Feature 1.4 — ArtMethod entry/exit trace ───────────────────
+    // Feature 3.4 Path A — BpServiceManager probe
+    external fun bpSmProbe(): Int
+    external fun bpSmInstall(): Int
+    external fun bpSmUninstall()
+    external fun bpSmCount(): Int
+
+    // Feature 1.4 — ArtMethod entry/exit trace
     external fun traceAttach0(method: java.lang.reflect.Method): Int
     external fun traceAttach1(method: java.lang.reflect.Method): Int
     external fun traceAttach2(method: java.lang.reflect.Method): Int

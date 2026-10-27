@@ -25,6 +25,8 @@
 #include "RegInspect.h"
 #include "MemoryOps.h"
 #include "MapsEnum.h"
+#include "ServiceManagerJni.h"
+
 
 #define LOG_TAG "DualCore"
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -68,6 +70,9 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* vm, void*) {
     LOGD("JNI_OnLoad: cached Thread=%p Elem=%p", g_threadCls, g_elemCls);
     return JNI_VERSION_1_6;
 }
+
+// Feature 3.4 Path B — expose cached JavaVM for fast-JNI shim
+extern "C" JavaVM* dualcore_get_vm() { return g_vm; }
 
 static bool IsFrameworkClass(const char* cn) {
     if (!cn) return false;
@@ -362,6 +367,8 @@ extern "C" void RetModResetAll();
 extern "C" void SvcHookResetAll();
 extern "C" void RegInspectResetAll();
 
+extern "C" void ParcelRewriter_ClearServiceManagerOverrides();
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_uninstallAll(JNIEnv*, jobject) {
     UninstallAllHooks();
@@ -370,6 +377,8 @@ Java_com_ims134_hookengine_NativeTestBridge_uninstallAll(JNIEnv*, jobject) {
     RetModResetAll();
     SvcHookResetAll();
     RegInspectResetAll();
+    SvcMgrJniDetach();
+    ParcelRewriter_ClearServiceManagerOverrides();
 }
 
 extern "C" void SetItem4Paths(const char* realDir, const char* fakeDir);
@@ -775,6 +784,35 @@ Java_com_ims134_hookengine_HiddenApiBridge_reflectSetAccessible(
     jboolean r = fut.get();
     env->DeleteGlobalRef(gMember);
     LOGD("reflectSetAccessible: %s", r ? "OK" : "false");
+    return r;
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_com_ims134_hookengine_HiddenApiBridge_reflectGetDeclaredFieldsArray(
+        JNIEnv* env, jobject, jclass cls) {
+    if (!cls) return nullptr;
+    JavaVM* vm = nullptr;
+    env->GetJavaVM(&vm);
+    jobject gCls = env->NewGlobalRef(cls);
+
+    auto fut = std::async(std::launch::async, [vm, gCls]() -> jobject {
+        JNIEnv* e = nullptr;
+        if (vm->AttachCurrentThread(&e, nullptr) != JNI_OK) return nullptr;
+        jclass classCls = e->FindClass("java/lang/Class");
+        jmethodID m = e->GetMethodID(classCls, "getDeclaredFields",
+                                     "()[Ljava/lang/reflect/Field;");
+        jobject res = nullptr;
+        if (m) {
+            res = e->CallObjectMethod(gCls, m);
+            if (e->ExceptionCheck()) { e->ExceptionDescribe(); e->ExceptionClear(); res = nullptr; }
+        }
+        jobject g = res ? e->NewGlobalRef(res) : nullptr;
+        vm->DetachCurrentThread();
+        return g;
+    });
+    jobjectArray r = (jobjectArray)fut.get();
+    env->DeleteGlobalRef(gCls);
+    LOGD("reflectGetDeclaredFieldsArray: %s", r ? "OK" : "null");
     return r;
 }
 
@@ -1709,3 +1747,127 @@ Java_com_ims134_hookengine_NativeTestBridge_memFindRegionContaining(
     env->SetLongArrayRegion(arr, 0, 4, vals);
     return arr;
 }
+
+// ─── Feature 3.4 — ServiceManager lookup override JNI bridges ────────
+extern "C" bool ParcelRewriter_SetServiceManagerNull(const char* name);
+extern "C" bool ParcelRewriter_SetServiceManagerAlias(const char* from, const char* to);
+extern "C" void ParcelRewriter_ClearServiceManagerOverrides();
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_smSetNullOverride(
+        JNIEnv* env, jobject, jstring jname) {
+    if (!env || !jname) return JNI_FALSE;
+    const char* name = env->GetStringUTFChars(jname, nullptr);
+    if (!name) return JNI_FALSE;
+    bool ok = ParcelRewriter_SetServiceManagerNull(name);
+    env->ReleaseStringUTFChars(jname, name);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_smSetAliasOverride(
+        JNIEnv* env, jobject, jstring jfrom, jstring jto) {
+    if (!env || !jfrom || !jto) return JNI_FALSE;
+    const char* from = env->GetStringUTFChars(jfrom, nullptr);
+    const char* to   = env->GetStringUTFChars(jto, nullptr);
+    bool ok = false;
+    if (from && to) ok = ParcelRewriter_SetServiceManagerAlias(from, to);
+    if (from) env->ReleaseStringUTFChars(jfrom, from);
+    if (to)   env->ReleaseStringUTFChars(jto, to);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_smClearOverrides(JNIEnv*, jobject) {
+    ParcelRewriter_ClearServiceManagerOverrides();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_installSvcMgrJniHook(JNIEnv* env, jobject) {
+    return (jint)SvcMgrJniAttach(env);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_uninstallSvcMgrJniHook(JNIEnv*, jobject) {
+    SvcMgrJniDetach();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_svcMgrJniCount(JNIEnv*, jobject) {
+    return (jint)SvcMgrJniCount();
+}
+
+extern "C" bool ParcelRewriter_IsNullOverridden(const char* name);
+extern "C" bool ParcelRewriter_FindAlias(const char* name, char* out_target, size_t out_size);
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_smIsNullOverridden(
+        JNIEnv* env, jobject, jstring jname) {
+    if (!env || !jname) return JNI_FALSE;
+    const char* name = env->GetStringUTFChars(jname, nullptr);
+    if (!name) return JNI_FALSE;
+    bool r = ParcelRewriter_IsNullOverridden(name);
+    env->ReleaseStringUTFChars(jname, name);
+    return r ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_smFindAlias(
+        JNIEnv* env, jobject, jstring jname) {
+    if (!env || !jname) return nullptr;
+    const char* name = env->GetStringUTFChars(jname, nullptr);
+    if (!name) return nullptr;
+    char target[128];
+    bool found = ParcelRewriter_FindAlias(name, target, sizeof(target));
+    env->ReleaseStringUTFChars(jname, name);
+    if (!found) return nullptr;
+    return env->NewStringUTF(target);
+}
+
+extern "C" int ParcelRewriter_SmNullHitCount();
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_smNullHitCount(JNIEnv*, jobject) {
+    return (jint)ParcelRewriter_SmNullHitCount();
+}
+
+extern "C" int ParcelRewriter_SmAliasHitCount();
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_smAliasHitCount(JNIEnv*, jobject) {
+    return (jint)ParcelRewriter_SmAliasHitCount();
+}
+// ─── Feature 3.4 Path A — BpServiceManager native hook attempt ─────
+extern "C" int  BpSmProbe();
+extern "C" int  BpSmInstall();
+extern "C" void BpSmUninstall();
+extern "C" int  BpSmCount();
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_bpSmProbe(JNIEnv*, jobject) {
+    return (jint)BpSmProbe();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_bpSmInstall(JNIEnv*, jobject) {
+    return (jint)BpSmInstall();
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_bpSmUninstall(JNIEnv*, jobject) {
+    BpSmUninstall();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_bpSmCount(JNIEnv*, jobject) {
+    return (jint)BpSmCount();
+}
+
+extern "C" int FastJniFlipAccNative(void* art_method);
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_flipAccNative(
+        JNIEnv*, jobject, jlong addr) {
+    return (jint)FastJniFlipAccNative((void*)(uintptr_t)addr);
+}
+

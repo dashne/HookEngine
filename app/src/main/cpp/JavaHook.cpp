@@ -60,7 +60,6 @@ static void** FindEntrySlot(void* art_method) {
         return nullptr;
     }
     if ((uintptr_t)val < 0x1000) {
-        // The actual safety check that must stay strict — fast-JNI tokens.
         LOGE("FindEntrySlot: data_=%p < 0x1000 fast-JNI token, refusing", val);
         return nullptr;
     }
@@ -72,22 +71,6 @@ static void** FindEntrySlot(void* art_method) {
     LOGD("FindEntrySlot: art_method=%p data_=%p dl_ok=%d exec=%d fname=%s",
          art_method, val, dl_ok ? 1 : 0, exec ? 1 : 0,
          dl_ok ? info.dli_fname : "<anon>");
-
-    // Accept any executable address. Two valid cases:
-    //
-    // 1. data_ resolves via dladdr to a lib (libart/libandroid_runtime/libc/etc).
-    //    The "legacy" native entry — Binder.getCallingUid's path.
-    //
-    // 2. data_ is executable but dladdr fails (JIT-compiled per-method JNI stub
-    //    or runtime trampoline in anon memory). API 34+ ART JIT-compiles JNI
-    //    stubs (art::jit::JniCompiler) for hot native methods. Hooking the JIT
-    //    stub address works — our replacement is called with standard JNI ABI,
-    //    and calling _orig delegates through the stub to the real native.
-    //    This is what BinderProxy.transactNative hits (data_=0x48167000).
-    //
-    // The fast-JNI guard above (`data_ >= 0x1000`) remains the true safety
-    // barrier. Anything below 0x1000 is a token (index into fast-JNI table),
-    // not callable. Executable data_ >= 0x1000 is a real call target.
 
     if (!dl_ok && !exec) {
         LOGE("FindEntrySlot: data_=%p neither dladdr-resolvable nor executable — refusing",
@@ -121,32 +104,16 @@ static bool ReadProt(uintptr_t page, int* out_prot) {
     return false;
 }
 
-extern "C" JavaHook* JavaHookInstall(JNIEnv* env, jobject method_obj,
-                                     void* replacement, void** out_original,
-                                     const char* name) {
-    if (!env || !method_obj || !replacement) return nullptr;
-
-    // Same gate as HookJavaMethod. Refuse on any ART build outside the
-    // verified range instead of patching offsets that may not mean the same
-    // thing. One bad offset = native crash or silent corruption.
-    jint cap = CheckHookCapability();
-    if (cap != HOOK_OK) {
-        LOGE("JavaHookInstall[%s]: capability refused (%d) — not patching",
-             name ? name : "?", (int)cap);
-        return nullptr;
-    }
-
-    jmethodID mid = env->FromReflectedMethod(method_obj);
-    if ((uintptr_t)mid < 0x1000) {
+// Shared install body — called from both public entry points. Caller
+// guarantees env != null, replacement != null, and capability was checked.
+static JavaHook* JavaHookInstallFromArtMethod(JNIEnv* env, void* art_method,
+                                              void* replacement, void** out_original,
+                                              const char* name) {
+    if ((uintptr_t)art_method < 0x1000) {
         LOGE("JavaHookInstall[%s]: fast-JNI intrinsic (mid=0x%lx), cannot ArtMethod-hook",
-             name ? name : "?", (unsigned long)(uintptr_t)mid);
+             name ? name : "?", (unsigned long)(uintptr_t)art_method);
         return nullptr;
     }
-    if (!mid) {
-        LOGE("JavaHookInstall[%s]: FromReflectedMethod null", name ? name : "?");
-        return nullptr;
-    }
-    void* art_method = (void*)mid;
     void** entry_slot = FindEntrySlot(art_method);
     if (!entry_slot) {
         LOGE("JavaHookInstall[%s]: no entry slot", name ? name : "?");
@@ -193,6 +160,47 @@ extern "C" JavaHook* JavaHookInstall(JNIEnv* env, jobject method_obj,
     LOGD("JavaHookInstall[%s]: ok art_method=%p slot=%p orig=%p repl=%p",
          h->name, art_method, entry_slot, original, replacement);
     return h;
+}
+
+extern "C" JavaHook* JavaHookInstall(JNIEnv* env, jobject method_obj,
+                                     void* replacement, void** out_original,
+                                     const char* name) {
+    if (!env || !method_obj || !replacement) return nullptr;
+
+    jint cap = CheckHookCapability();
+    if (cap != HOOK_OK) {
+        LOGE("JavaHookInstall[%s]: capability refused (%d) — not patching",
+             name ? name : "?", (int)cap);
+        return nullptr;
+    }
+
+    jmethodID mid = env->FromReflectedMethod(method_obj);
+    if (!mid) {
+        LOGE("JavaHookInstall[%s]: FromReflectedMethod null", name ? name : "?");
+        return nullptr;
+    }
+    LOGD("JavaHookInstall[%s]: FromReflectedMethod → 0x%lx",
+         name ? name : "?", (unsigned long)(uintptr_t)mid);
+
+    return JavaHookInstallFromArtMethod(env, (void*)mid, replacement, out_original, name);
+}
+
+extern "C" JavaHook* JavaHookInstallByMethodID(JNIEnv* env, jmethodID method_id,
+                                               void* replacement, void** out_original,
+                                               const char* name) {
+    if (!env || !method_id || !replacement) return nullptr;
+
+    jint cap = CheckHookCapability();
+    if (cap != HOOK_OK) {
+        LOGE("JavaHookInstallByMethodID[%s]: capability refused (%d)",
+             name ? name : "?", (int)cap);
+        return nullptr;
+    }
+
+    LOGD("JavaHookInstallByMethodID[%s]: jmethodID=0x%lx",
+         name ? name : "?", (unsigned long)(uintptr_t)method_id);
+
+    return JavaHookInstallFromArtMethod(env, (void*)method_id, replacement, out_original, name);
 }
 
 extern "C" HookResult JavaHookUninstall(JavaHook* hook) {

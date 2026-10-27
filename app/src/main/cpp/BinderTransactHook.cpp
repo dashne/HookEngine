@@ -13,6 +13,7 @@
 #include <link.h>
 #include <vector>
 #include <mutex>
+#include <cstdio>
 #include "HookRegistry.h"
 
 #define TAG "DualCore"
@@ -24,6 +25,8 @@ extern "C" HookResult UninstallInlineHook(void*);
 extern "C" bool ParcelRewriter_Init(JNIEnv* env);
 extern "C" bool ParcelRewriter_MatchesRequest(int code, jlong dataPtr);
 extern "C" bool ParcelRewriter_TryRewriteCallerIdentity(jlong dataPtr, int code);
+extern "C" void ParcelRewriter_TryRewriteServiceManagerLookup(jlong dataPtr, int code);
+extern "C" void ParcelRewriter_AfterServiceManagerLookup(jlong dataPtr, jlong replyPtr, int code);
 
 extern "C" const uint8_t* ParcelRewriter_GetData(jlong parcelPtr);
 extern "C" size_t         ParcelRewriter_GetSize(jlong parcelPtr);
@@ -98,7 +101,11 @@ static std::atomic<int> g_rewrite_count{0};
 static std::atomic<int> g_last_code{0};
 static std::atomic<int> g_inside{0};
 
-// ─── Diagnostic state (Session 11) ──────────────────────────────────
+// Diagnostic counters for Feature 3.4 debugging.
+static std::atomic<int> g_diag_sm_handle0{0};
+static std::atomic<int> g_diag_code12{0};
+
+// ─── Diagnostic state ───────────────────────────────────────────────
 static std::mutex             g_codes_mutex;
 static std::vector<int>       g_codes;
 static std::atomic<int>       g_rewrite_effective_count{0};
@@ -267,14 +274,44 @@ extern "C" int32_t Hook_Transact(void* self, int32_t handle, uint32_t code,
 
     PushCode((int)code);
 
+    // ── Feature 3.4 diagnostic ────────────────────────────────────
+    // Dump first 20 transacts that are either SM (handle==0) or code 1/2.
+    // Tells us the actual parcel byte layout so we can match ReadSmServiceName.
+    bool want_handle0 = (handle == 0);
+    bool want_code12  = (code == 1 || code == 2);
+    if (want_handle0 || want_code12) {
+        int idx0 = want_handle0 ? g_diag_sm_handle0.fetch_add(1) : -1;
+        int idx1 = want_code12  ? g_diag_code12.fetch_add(1)    : -1;
+        int idx  = (idx0 >= 0) ? idx0 : idx1;
+        if (idx < 20) {
+            size_t dataSize = data ? ParcelRewriter_GetSize((jlong)data) : 0;
+            const uint8_t* p = data ? ParcelRewriter_GetData((jlong)data) : nullptr;
+            char hex[96] = {0};
+            int hp = 0;
+            int nbytes = 0;
+            if (p && dataSize > 0) {
+                nbytes = (int)(dataSize < 32 ? dataSize : 32);
+                for (int i = 0; i < nbytes && hp < 90; i++) {
+                    hp += snprintf(hex + hp, sizeof(hex) - hp, "%02x", p[i]);
+                }
+            }
+            LOGD("SM diag[%d]: handle=%d code=%u flags=0x%x dataSize=%zu hex=%s",
+                 idx, (int)handle, code, flags, dataSize, hex);
+        }
+    }
+
     if (!_orig_transact) return -1;
 
     // Session 23 — Wall B: rewrite IStorageManager callingPackage BEFORE
     // forwarding. Session 27 — Wall C2: rewrite IContentProvider
-    // AttributionSource (uid + packageName) for the same reason.
-    // Only for non-oneway transacts with a data parcel. Pure C++, no JNI.
+    // AttributionSource for the same reason.
     if (!(flags & 1) && data) {
         ParcelRewriter_TryRewriteCallerIdentity((jlong)data, (int)code);
+    }
+
+    // Feature 3.4 — ServiceManager lookup interception.
+    if (!(flags & 1) && data && handle == 0) {
+        ParcelRewriter_TryRewriteServiceManagerLookup((jlong)data, (int)code);
     }
 
     bool matched = false;
@@ -285,6 +322,11 @@ extern "C" int32_t Hook_Transact(void* self, int32_t handle, uint32_t code,
     }
 
     int32_t result = _orig_transact(self, handle, code, data, reply, flags);
+
+    // Feature 3.4 — post-transact null override.
+//    if (result == 0 && !(flags & 1) && data && reply && handle == 0) {
+//        ParcelRewriter_AfterServiceManagerLookup((jlong)data, (jlong)reply, (int)code);
+//    }
 
     if (result != 0 || !matched || !reply) return result;
 

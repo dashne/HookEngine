@@ -26,6 +26,10 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         RegInspect.cpp
         MemoryOps.cpp
         MapsEnum.cpp
+        ServiceManagerJni.cpp
+        BpServiceManagerHook.cpp
+        FastJniHook.cpp
+        ServiceManagerShimJni.cpp
         ApplicationProxy.cpp
         GuestBoot.cpp
         test_item1.cpp

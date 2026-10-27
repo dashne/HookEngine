@@ -1,25 +1,32 @@
 // CppParcelRewriter.cpp
 //
-// AIDL prelude rewriter for IStorageManager + IContentProvider.
+// AIDL prelude rewriter for IStorageManager + IContentProvider + ServiceManager lookups.
 //
 // Session 23 — Wall B (IStorageManager callingPackage rewrite).
 // Session 28 — Wall C2 (IContentProvider pkg+uid rewrite for viber).
 // Session 29 — Wall C3 diagnostic (miui.* ifaces, capped).
 // Session 32 — uid resolved via getuid() at call time.
-// Session 33 — two bugs from Session 32 fixed:
-//   1. getpid() from libhookengine returns spoofed 10000 (Fake_getpid
-//      inline hook on libc body fires for all callers). getuid() works
-//      by accident (GOT hook on libjavacore/libopenjdk, not libhookengine).
-//      Fix: use syscall(SYS_getpid) / syscall(SYS_getuid) — bypass both
-//      inline and GOT. Prior prewarm diag showed f4=14755 f8=10431 (real),
-//      and we clobbered f4 with 10000 (spoofed), breaking prewarm.
-//   2. No skip-if-correct. Prewarm already had correct values; we rewrote
-//      unnecessarily. Fix: only rewrite when fields differ from targets.
-//
-// AttributionSource layout on API 37 (confirmed by diag):
-//   own-pkg:  [leading][pid][uid][tagLen][pkgLen][pkg]
-//   viber:    [leading][uid][pid][tagLen][pkgLen][pkg]
-// Two construction paths, two field orders. Route by pkg.
+// Session 33 — syscall() for real pid/uid + skip-if-correct.
+// Session 51 — Feature 3.4: ServiceManager lookup interception.
+//              v4: String16 byte-pattern search instead of prelude parse.
+//              v5: Dropped code filter. On-device diag showed SM transacts
+//                  use code=4 (not 1/2 as on stock AOSP), so the previous
+//                  filter short-circuited on every real getService call.
+//                  Pattern match itself is a sufficient discriminator — a
+//                  String16 encoding of a registered name is unique enough
+//                  that accidental matches in unrelated SM parcels are
+//                  astronomically unlikely.
+//              v6 (51b): Null override retired from reply-mutation
+//                  (mprotect+memset on PROT_READ binder reply mapping =
+//                  EACCES; mmap-swap did not propagate to caller's
+//                  readException path) and reimplemented as a REQUEST
+//                  rewrite: overridden name → '_NOEXIST_SM_OVERRIDE'
+//                  sentinel. Driver's natural "unknown service" reply is
+//                  exceptionCode=0 + null flat_binder_object — exactly
+//                  what the caller expects for "not found". Both null and
+//                  alias paths now increment their own hit counter so
+//                  Rule-12 test assertions can prove each mechanism
+//                  fired (or didn't, in the null-wins-over-alias case).
 
 #include <jni.h>
 #include <android/log.h>
@@ -32,6 +39,10 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstdio>
+#include <mutex>
+#include <atomic>
+#include <cerrno>
+#include <sys/mman.h>
 
 #ifndef CP_REWRITE_UPDATE_LEADING_INT32
 #define CP_REWRITE_UPDATE_LEADING_INT32 0
@@ -254,10 +265,6 @@ extern "C" bool ParcelRewriter_TryRewriteCallerIdentity(jlong dataPtr, int code)
     if (!g_ready || !g_data || !g_dataSize || !g_getPos) return false;
     if (!dataPtr) return false;
 
-    // syscall, not getpid()/getuid() — inline hook on getpid body fires for
-    // libhookengine callers, returning spoofed g_virtualPid (10000).
-    // getuid() works by accident (GOT-only hook, libhookengine skipped),
-    // but use syscall for both to be explicit and future-proof.
     const int32_t realUid = (int32_t)syscall(SYS_getuid);
     const int32_t realPid = (int32_t)syscall(SYS_getpid);
 
@@ -279,7 +286,6 @@ extern "C" bool ParcelRewriter_TryRewriteCallerIdentity(jlong dataPtr, int code)
         const char16_t* iface = SafeReadString16(parcel, &ifaceLen);
         if (!iface) break;
 
-        // ── Wall C3 diagnostic (miui.* iface dump, capped 3) ──
         if (g_miui_dump_count < 3 && ifaceLen > 0 && ifaceLen < 128) {
             char ifaceAscii[128] = {0};
             size_t copyLen = ifaceLen < 127 ? ifaceLen : 127;
@@ -318,15 +324,14 @@ extern "C" bool ParcelRewriter_TryRewriteCallerIdentity(jlong dataPtr, int code)
 
         static const char16_t kOld[] = u"com.viber.voip";
         static const char16_t kNew[] = u"com.ims134.hookengine";
-        constexpr size_t kOldLen = sizeof(kOld)/sizeof(char16_t) - 1;  // 14
-        constexpr size_t kNewLen = sizeof(kNew)/sizeof(char16_t) - 1;  // 21
-        constexpr size_t kOldTotal = 4 + 2*kOldLen + 2 + 2;  // 36
-        constexpr size_t kNewTotal = 4 + 2*kNewLen + 2 + 0;  // 48
-        constexpr size_t kDelta    = kNewTotal - kOldTotal;  // 12
+        constexpr size_t kOldLen = sizeof(kOld)/sizeof(char16_t) - 1;
+        constexpr size_t kNewLen = sizeof(kNew)/sizeof(char16_t) - 1;
+        constexpr size_t kOldTotal = 4 + 2*kOldLen + 2 + 2;
+        constexpr size_t kNewTotal = 4 + 2*kNewLen + 2 + 0;
+        constexpr size_t kDelta    = kNewTotal - kOldTotal;
 
         if (ifaceLen == kStorageIfaceLen &&
             memcmp(iface, kStorageIface, kStorageIfaceLen * sizeof(char16_t)) == 0) {
-            // ── IStorageManager (Wall B) — unchanged ──
             int32_t userId = 0;
             if (!SafeReadInt32(parcel, &userId)) break;
 
@@ -381,12 +386,6 @@ extern "C" bool ParcelRewriter_TryRewriteCallerIdentity(jlong dataPtr, int code)
 
         } else if (ifaceLen == kContentProviderIfaceLen &&
                    memcmp(iface, kContentProviderIface, kContentProviderIfaceLen * sizeof(char16_t)) == 0) {
-            // ── IContentProvider (Wall C2 + Wall C2b) ──
-            // Layouts confirmed:
-            //   own-pkg:  [leading][pid][uid][tagLen][pkgLen][pkg]
-            //   viber:    [leading][uid][pid][tagLen][pkgLen][pkg]
-            // Route by pkg. Skip rewrite if already correct.
-
             size_t aSStart = g_getPos(parcel);
             size_t dataSize = g_dataSize(parcel);
             const uint8_t* pData = g_data(parcel);
@@ -426,7 +425,6 @@ extern "C" bool ParcelRewriter_TryRewriteCallerIdentity(jlong dataPtr, int code)
             bool pkgIsOwn = (cpLen == g_ourPkgLen &&
                              memcmp(cp, g_ourPkg, g_ourPkgLen * sizeof(char16_t)) == 0);
 
-            // Diagnostic: own-pkg calls (first 5)
             if (pkgIsOwn && g_cp_diag_count < 5) {
                 char hexbuf[512];
                 int hpos = snprintf(hexbuf, sizeof(hexbuf),
@@ -443,14 +441,9 @@ extern "C" bool ParcelRewriter_TryRewriteCallerIdentity(jlong dataPtr, int code)
             }
 
             constexpr size_t kPkgLenOffsetInAS = 16;
-            constexpr size_t kSuffixStartInAS  = kPkgLenOffsetInAS + kOldTotal;  // 52
+            constexpr size_t kSuffixStartInAS  = kPkgLenOffsetInAS + kOldTotal;
 
             if (pkgIsOwn) {
-                // ── Wall C2b: own-pkg, [pid][uid] ──
-                // Write realPid to [+4], realUid to [+8]. Same-size swap.
-                // Skip if already correct (prewarm case — f4=realPid, f8=realUid
-                // observed in prior diag; our Session 32 code broke this by
-                // overwriting f4 with spoofed 10000).
                 if (f4 == realPid && f8 == realUid) {
                     LOGD("CP own-pkg already correct (pid=%d uid=%d) — skip rewrite (code=%d)",
                          realPid, realUid, code);
@@ -460,7 +453,7 @@ extern "C" bool ParcelRewriter_TryRewriteCallerIdentity(jlong dataPtr, int code)
                 uint8_t* newBuf = (uint8_t*)malloc(newSize);
                 if (!newBuf) break;
 
-                memcpy(newBuf, pData, aSStart + 4);       // prefix incl leading
+                memcpy(newBuf, pData, aSStart + 4);
                 *(int32_t*)(newBuf + aSStart + 4) = realPid;
                 *(int32_t*)(newBuf + aSStart + 8) = realUid;
                 memcpy(newBuf + aSStart + 12, pData + aSStart + 12,
@@ -484,10 +477,6 @@ extern "C" bool ParcelRewriter_TryRewriteCallerIdentity(jlong dataPtr, int code)
                 break;
 
             } else if (pkgIsViber) {
-                // ── Wall C2: Viber, [uid][pid] ──
-                // Write realUid to [+4] (uid slot), realPid to [+8] (pid slot).
-                // Buffer grows by kDelta (pkg 14→21 chars). Always rewrite
-                // because pkg must be replaced regardless of uid/pid state.
                 size_t pkgLenOffset = aSStart + kPkgLenOffsetInAS;
                 size_t suffixStart  = aSStart + kSuffixStartInAS;
                 if (dataSize < suffixStart) break;
@@ -496,12 +485,12 @@ extern "C" bool ParcelRewriter_TryRewriteCallerIdentity(jlong dataPtr, int code)
                 uint8_t* newBuf = (uint8_t*)malloc(newSize);
                 if (!newBuf) break;
 
-                memcpy(newBuf, pData, aSStart + 4);       // prefix incl leading
+                memcpy(newBuf, pData, aSStart + 4);
 #if CP_REWRITE_UPDATE_LEADING_INT32
                 *(int32_t*)(newBuf + aSStart) = *(const int32_t*)(pData + aSStart) + (int32_t)kDelta;
 #endif
-                *(int32_t*)(newBuf + aSStart + 4) = realUid;   // uid slot
-                *(int32_t*)(newBuf + aSStart + 8) = realPid;   // pid slot
+                *(int32_t*)(newBuf + aSStart + 4) = realUid;
+                *(int32_t*)(newBuf + aSStart + 8) = realPid;
                 memcpy(newBuf + aSStart + 12, pData + aSStart + 12, kPkgLenOffsetInAS - 12);
                 *(int32_t*)(newBuf + pkgLenOffset) = (int32_t)kNewLen;
                 memcpy(newBuf + pkgLenOffset + 4, kNew, kNewLen * sizeof(char16_t));
@@ -546,6 +535,248 @@ extern "C" bool ParcelRewriter_TryRewriteCallerIdentity(jlong dataPtr, int code)
     return rewritten;
 }
 
+// ─── Feature 3.4 — ServiceManager override tables ─────────────────
+
+#define MAX_SM_OVERRIDES 16
+#define MAX_SM_NAME_LEN  128
+
+struct SmNullOverride {
+    bool used;
+    char name[MAX_SM_NAME_LEN];
+};
+
+struct SmAliasOverride {
+    bool used;
+    char from[MAX_SM_NAME_LEN];
+    char to[MAX_SM_NAME_LEN];
+};
+
+static SmNullOverride  g_sm_nulls[MAX_SM_OVERRIDES]   = {};
+static SmAliasOverride g_sm_aliases[MAX_SM_OVERRIDES] = {};
+static std::mutex      g_sm_mutex;
+static std::atomic<int> g_sm_null_hits{0};
+static std::atomic<int> g_sm_alias_hits{0};
+
+static bool IsNullOverriddenUnlocked(const char* name) {
+    for (auto& o : g_sm_nulls) {
+        if (o.used && strcmp(o.name, name) == 0) return true;
+    }
+    return false;
+}
+
+static bool FindAliasUnlocked(const char* name, char* out_target, size_t out_size) {
+    for (auto& a : g_sm_aliases) {
+        if (a.used && strcmp(a.from, name) == 0) {
+            strncpy(out_target, a.to, out_size - 1);
+            out_target[out_size - 1] = '\0';
+            return true;
+        }
+    }
+    return false;
+}
+
+// Scan the parcel buffer for the canonical String16 byte pattern of `name`:
+//   [int32 len=nameLen][char16*nameLen ascii][char16 null]
+// returns pointer to the first content byte (right after the len prefix),
+// or nullptr if not present. 4-byte stride matches Parcel's alignment.
+static const char16_t* FindServiceNamePattern(void* parcel, const char* name) {
+    if (!g_data || !g_dataSize || !name || !name[0]) return nullptr;
+    size_t nameLen = strlen(name);
+    if (nameLen >= MAX_SM_NAME_LEN) return nullptr;
+
+    const uint8_t* data = g_data(parcel);
+    size_t total = g_dataSize(parcel);
+    size_t needed = 4 + nameLen * 2 + 2;
+    if (!data || total < needed) return nullptr;
+
+    char16_t pattern[MAX_SM_NAME_LEN];
+    for (size_t i = 0; i < nameLen; i++) {
+        pattern[i] = (char16_t)(uint8_t)name[i];
+    }
+    pattern[nameLen] = 0;
+
+    int32_t lenPrefix = (int32_t)nameLen;
+    size_t maxOffset = total - (nameLen * 2 + 2);
+    for (size_t off = 4; off <= maxOffset; off += 4) {
+        int32_t lp = *(const int32_t*)(data + off - 4);
+        if (lp != lenPrefix) continue;
+        if (memcmp(data + off, pattern, nameLen * 2) != 0) continue;
+        if (*(const char16_t*)(data + off + nameLen * 2) != 0) continue;
+        return (const char16_t*)(data + off);
+    }
+    return nullptr;
+}
+
+extern "C" bool ParcelRewriter_IsNullOverridden(const char* name) {
+    if (!name || !name[0]) return false;
+    std::lock_guard<std::mutex> lk(g_sm_mutex);
+    return IsNullOverriddenUnlocked(name);
+}
+
+extern "C" bool ParcelRewriter_FindAlias(const char* name, char* out_target, size_t out_size) {
+    if (!name || !name[0] || !out_target || out_size == 0) return false;
+    std::lock_guard<std::mutex> lk(g_sm_mutex);
+    return FindAliasUnlocked(name, out_target, out_size);
+}
+
+extern "C" bool ParcelRewriter_SetServiceManagerNull(const char* name) {
+    if (!name || !name[0] || strlen(name) >= MAX_SM_NAME_LEN) return false;
+    std::lock_guard<std::mutex> lk(g_sm_mutex);
+    for (auto& o : g_sm_nulls) {
+        if (o.used && strcmp(o.name, name) == 0) return true;
+        if (!o.used) {
+            o.used = true;
+            strncpy(o.name, name, MAX_SM_NAME_LEN - 1);
+            return true;
+        }
+    }
+    return false;
+}
+
+extern "C" bool ParcelRewriter_SetServiceManagerAlias(const char* from, const char* to) {
+    if (!from || !from[0] || !to || !to[0]) return false;
+    if (strlen(from) >= MAX_SM_NAME_LEN || strlen(to) >= MAX_SM_NAME_LEN) return false;
+    std::lock_guard<std::mutex> lk(g_sm_mutex);
+    for (auto& a : g_sm_aliases) {
+        if (a.used && strcmp(a.from, from) == 0) {
+            strncpy(a.to, to, MAX_SM_NAME_LEN - 1);
+            return true;
+        }
+        if (!a.used) {
+            a.used = true;
+            strncpy(a.from, from, MAX_SM_NAME_LEN - 1);
+            strncpy(a.to, to, MAX_SM_NAME_LEN - 1);
+            return true;
+        }
+    }
+    return false;
+}
+
+extern "C" void ParcelRewriter_ClearServiceManagerOverrides() {
+    std::lock_guard<std::mutex> lk(g_sm_mutex);
+    memset(g_sm_nulls, 0, sizeof(g_sm_nulls));
+    memset(g_sm_aliases, 0, sizeof(g_sm_aliases));
+}
+
+// ─── RewriteString16InPlace ──────────────────────────────────────
+static bool RewriteString16InPlace(void* parcel,
+                                   const char16_t* old_name, size_t old_len,
+                                   const char16_t* new_name, size_t new_len) {
+    const uint8_t* pData = g_data(parcel);
+    if (!pData) return false;
+    ptrdiff_t nameOffset = (const uint8_t*)old_name - pData;
+    if (nameOffset < 4) return false;
+    size_t nameLenOffset = (size_t)(nameOffset - 4);
+
+    size_t old_str_bytes = old_len * 2;
+    size_t old_total = (4 + old_str_bytes + 2 + 3) & ~(size_t)3;
+    size_t new_str_bytes = new_len * 2;
+    size_t new_total = (4 + new_str_bytes + 2 + 3) & ~(size_t)3;
+    int64_t delta = (int64_t)new_total - (int64_t)old_total;
+
+    size_t dataSize = g_dataSize(parcel);
+    if (dataSize < nameLenOffset + old_total) return false;
+
+    size_t newSize = (size_t)((int64_t)dataSize + delta);
+    uint8_t* newBuf = (uint8_t*)malloc(newSize);
+    if (!newBuf) return false;
+
+    memcpy(newBuf, pData, nameLenOffset);
+    *(int32_t*)(newBuf + nameLenOffset) = (int32_t)new_len;
+    char16_t* dst = (char16_t*)(newBuf + nameLenOffset + 4);
+    memcpy(dst, new_name, new_len * sizeof(char16_t));
+    dst[new_len] = 0;
+    size_t written = 4 + new_str_bytes + 2;
+    if (written < new_total) {
+        memset(newBuf + nameLenOffset + written, 0, new_total - written);
+    }
+    memcpy(newBuf + nameLenOffset + new_total,
+           pData + nameLenOffset + old_total,
+           dataSize - nameLenOffset - old_total);
+
+    void** dataField = (void**)((uint8_t*)parcel + 8);
+    uint8_t* oldBuf  = (uint8_t*)*dataField;
+    *dataField = newBuf;
+    *(size_t*)((uint8_t*)parcel + 16) = newSize;
+    *(size_t*)((uint8_t*)parcel + 24) = newSize;
+    if (oldBuf) free(oldBuf);
+    SafeSetPos(parcel, newSize);
+    return true;
+}
+
+// ─── Primary: transact-level SM alias / null rewrite ──────────────
+//
+// Called on every handle==0 transact regardless of code. On this ROM
+// SM transacts fire on code=4 (not 1/2 as on stock AOSP); removing the
+// code filter is essential. Pattern match is the discriminator — an
+// accidental String16 match of a registered override name in an
+// unrelated SM parcel is effectively impossible.
+//
+// Null overrides are implemented as a REQUEST rewrite: an overridden
+// name is rewritten to '_NOEXIST_SM_OVERRIDE'. The driver's natural
+// reply for an unknown service is exceptionCode=0 + null
+// flat_binder_object — exactly what the caller expects for "not found".
+// This avoids mutating the reply parcel, which is a PROT_READ binder
+// mapping (mprotect RW → EACCES) whose native state cannot be reached
+// from AfterServiceManagerLookup on this ROM.
+//
+// Null loop runs before the alias loop: if the same name is registered
+// under both, null wins.
+
+extern "C" void ParcelRewriter_TryRewriteServiceManagerLookup(jlong dataPtr, int code) {
+    if (!g_ready || !g_data || !g_dataSize || !g_getPos) return;
+    if (!dataPtr) return;
+
+    void* parcel = (void*)dataPtr;
+
+    std::lock_guard<std::mutex> lk(g_sm_mutex);
+
+    // ─── Null overrides first ────────────────────────────────────────
+    static const char16_t kNoexistName[] = u"_NOEXIST_SM_OVERRIDE";
+    constexpr size_t kNoexistLen = sizeof(kNoexistName)/sizeof(char16_t) - 1;
+
+    for (auto& o : g_sm_nulls) {
+        if (!o.used) continue;
+        const char16_t* old_name = FindServiceNamePattern(parcel, o.name);
+        if (!old_name) continue;
+
+        size_t from_len = strlen(o.name);
+        if (RewriteString16InPlace(parcel, old_name, from_len,
+                                   kNoexistName, kNoexistLen)) {
+            g_sm_null_hits.fetch_add(1, std::memory_order_relaxed);
+            LOGD("SM null override (transact): '%s' -> '_NOEXIST_SM_OVERRIDE' "
+                 "(request rewrite, code=%d)", o.name, code);
+        }
+        return;
+    }
+
+    // ─── Alias overrides ────────────────────────────────────────────
+    for (auto& a : g_sm_aliases) {
+        if (!a.used) continue;
+        const char16_t* old_name = FindServiceNamePattern(parcel, a.from);
+        if (!old_name) continue;
+
+        size_t from_len = strlen(a.from);
+        size_t to_len   = strlen(a.to);
+        char16_t to_buf[MAX_SM_NAME_LEN];
+        for (size_t i = 0; i < to_len; i++) to_buf[i] = (char16_t)(uint8_t)a.to[i];
+        to_buf[to_len] = 0;
+
+        if (RewriteString16InPlace(parcel, old_name, from_len, to_buf, to_len)) {
+            g_sm_alias_hits.fetch_add(1, std::memory_order_relaxed);
+            LOGD("SM alias (transact): '%s' -> '%s' (code=%d)", a.from, a.to, code);
+        }
+        return;
+    }
+}
+
+// ─── Post-transact hook — retired ────────────────────────────────
+// Null override is now implemented pre-transact via request rewrite.
+// Kept as a no-op symbol for ABI stability (extern in BinderTransactHook.cpp).
+extern "C" void ParcelRewriter_AfterServiceManagerLookup(jlong dataPtr, jlong replyPtr, int code) {
+    (void)dataPtr; (void)replyPtr; (void)code;
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_parcelRewriterReady(
         JNIEnv*, jobject) {
@@ -565,4 +796,19 @@ extern "C" size_t ParcelRewriter_GetSize(jlong parcelPtr) {
 extern "C" size_t ParcelRewriter_GetPos(jlong parcelPtr) {
     if (!parcelPtr || !g_getPos) return 0;
     return g_getPos((void*)parcelPtr);
+}
+
+extern "C" int ParcelRewriter_SmNullHitCount() {
+    return g_sm_null_hits.load(std::memory_order_relaxed);
+}
+
+extern "C" int ParcelRewriter_SmAliasHitCount() {
+    return g_sm_alias_hits.load(std::memory_order_relaxed);
+}
+
+extern "C" void ParcelRewriter_IncrAliasHit() {
+    g_sm_alias_hits.fetch_add(1, std::memory_order_relaxed);
+}
+extern "C" void ParcelRewriter_IncrNullHit() {
+    g_sm_null_hits.fetch_add(1, std::memory_order_relaxed);
 }
