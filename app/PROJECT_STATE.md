@@ -1,638 +1,42 @@
-# HOOK ENGINE — COMPLETED FEATURE SPECIFICATION
 
-This document defines what the engine **is** when fully complete. It is the target, not the current state. Current state lives below in "Status." If a feature here is not yet ✅ below, it is on the roadmap.
-
-The engine is complete when every capability in this document is verified on-device, and the canary (Viber boot) remains green throughout.
-
----
-
-## 1. Hook any function, at any granularity
-
-**Native hooking:**
-- Inline hook at any ARM64 instruction — handles all 9 ARM64 instruction kinds including `B.cond`, `CBZ/CBNZ`, `TBZ/TBNZ`, `LDR-literal`
-- Inline hook at a runtime-computed address (not just a compile-time symbol)
-- Inline hook at a mid-function offset (not just function entry)
-- GOT/PLT hook — symbol-level redirect in any loaded shared library
-- Hook chaining — multiple handlers on the same target, ordered, all fire in sequence
-- Conditional hook — handler fires only when register state at the site matches a predicate
-- Return-value modification — modify the caller's return value without changing control flow
-
-**Java hooking:**
-- ArtMethod hook (replace) — non-native Java methods, native methods (non-fast-JNI)
-- ArtMethod entry trace — pre-call and post-call callbacks on the same method without replacing it
-- Argument inspection — read boxed and primitive arguments at hook site
-- Return-value inspection and modification
-
-**Direct syscall interception:**
-- SVC instruction hooking — intercept syscalls below the libc wrapper layer
-- Per-syscall dispatch table — handle each syscall number independently
-
-## 2. Instrument what the target is doing
-
-- Method trace — log every call, argument set, and return value of a chosen class or method
-- Call graph capture — record the call tree from a chosen entry point
-- Register state inspection — read all ARM64 GP and FP registers at hook site
-- Stack backtrace — walk the call stack at hook site (FP-chain plus DWARF unwind for stripped code)
-- Per-hook execution counter — how many times, from which threads, at what timestamps
-- Per-hook profiling — CPU cost and memory overhead of the handler
-
-## 3. Read and modify process memory
-
-- Read arbitrary memory — any address, any length, safe bounds
-- Write arbitrary memory — with page protection save + restore
-- Pattern scan — find byte patterns in any memory region with mask support
-- Memory enumeration — list all readable/writable/executable regions with metadata
-- Allocate memory near a target address — for trampolines and injected code
-
-## 4. Intercept and rewrite IPC
-
-- Binder transaction interception — at `IPCThreadState::transact`
-- AIDL prelude parsing — decode interface token, argument list per interface
-- AIDL reply rewriting — modify the reply parcel before returning to caller
-- ServiceManager lookup interception — hook `getService`, `checkService`, `addService`
-- ServiceManager addition — register a synthetic binder under any name
-- Property read/write interception — hook `__system_property_get`, `__system_property_find`, `__system_property_read_callback`, `__system_property_read`
-- Signal handling override — intercept and rewrite incoming signals
-
-## 5. Control class loading and code injection
-
-- Native ClassLoader chaining — engine-native, not Kotlin proxy (Rule 15 closure)
-- Dynamic DEX loading — load a `.dex` file into the process at runtime
-- DEX merging — merge two DEX files at runtime, present as one to the target's ClassLoader
-- Native library load override — `dlopen` GOT hook, inject or redirect
-- Resource table merging — add a second APK's resources via `AssetManager.addAssetPath`
-
-## 6. Hide from detection
-
-**File system:**
-- Hide root binaries (`su`, `magisk`, `supersu`, `KernelSU`, `APatch`)
-- Hide root filesystem paths (`/data/adb`, `/sbin/.magisk`, `/cache/magisk`, `/debug_ramdisk`)
-- Filter `/proc/mounts`, `/proc/self/mounts`, `/proc/self/mountinfo` for overlay-mount and magisk-mount lines
-- Filter `/proc/self/maps` — hide engine's own loaded library and symbol lines
-- Filter `/proc/self/status` and `/proc/*/task/*/status` — force `TracerPid: 0`
-- Filter `/proc/self/syscall` and `/proc/self/stack` — hide ptrace-attachment surface
-- Full `/proc/self/cmdline` spoof — beyond `setArgV0`, remaining argv entries
-
-**Debugger surface:**
-- ADB detect blocking — `Settings.Global.ADB_ENABLED`, `ro.debuggable`, `ro.adb.secure`
-- Debugger detect blocking — JDWP handshake, `Debug.isDebuggerConnected()`, `waitingForDebugger()`
-- Emulator detect blocking — `ro.kernel.qemu`, `ro.hardware`, sensor fingerprint
-- Test-keys / custom-build detect blocking — build tag rewrite, signature check shielding
-
-**Network:**
-- Frida port blocking — `27042`, `27043`, `27052`, `11111`
-- IDA port blocking — `23946`
-- Loopback interception for known forensics ports
-- `/proc/net/tcp` and `/proc/net/tcp6` filtering — hide listening sockets belonging to engine
-
-**Kernel:**
-- `ptrace` syscall blocking — prevent target from attaching to other processes
-- Anti-ptrace — detect and nullify `PTRACE_TRACEME` from target
-- `execve` path filtering — block execution of root binaries from any source
-
-**Environment:**
-- Build property spoofing — `ro.debuggable`, `ro.secure`, `ro.build.tags`, `ro.build.type`, `ro.kernel.qemu`, `init.svc.adbd`, `service.adb.root`, `sys.oem_unlock_allowed`
-- UID/GID spoofing — `getuid`, `geteuid`, `getgid`, `getegid`
-
-## 7. Coordinate across the process
-
-- Hook registry — every installed hook is registered with target address, replacement, original bytes, page protection, install state
-- Per-guest tagging — group hooks by logical scope; uninstall one group without disturbing others
-- Atomic install / uninstall — no partial state on failure
-- Rollback on partial failure — if any step of a multi-step install fails, all prior steps unwind
-- Deferred-free under contention — uninstall waits for any in-flight execution of the trampoline before freeing pages
-- Signal-safe uninstall — uninstall is safe from any signal handler context
-- Inter-hook conflict detection — refuse to install on an address another hook already owns
-- ART version capability gate — refuse to install on unverified ART builds
-
-## 8. Symbol and ELF resolution
-
-- ELF symbol lookup by name — find any exported function in any loaded library
-- `.dynsym` walk — dynamic symbol table
-- `.symtab` walk — static symbol table (local symbols)
-- GNU hash + SysV hash support — both symbol table variants
-- Multi-library search — search every loaded library in one call
-- PLT stub resolution — locate the PLT entry for a given import
-
-## 9. Diagnose the engine itself
-
-- Full regression test suite — page-protection restore, relay leak detection, deferred-free contention, patch safety, rollback
-- Relocation test suite — every instruction kind, boundary cases, fallback paths
-- Anti-detection test suite — every filter asserts its specific behavior
-- Runtime hook inspection — enumerate all installed hooks from JNI or from within a hook
-- Per-hook execution counters — dispatch count, effective-rewrite count
-- Per-hook CPU / memory profiling — handler cost accounting
-
-## 10. Preserve host-process stability
-
-- Every hook installation restores the target page's original protection on completion — no lingering RWX pages
-- Every trampoline is reachable in ±128MB of its target — no inline hook fails due to branch-range
-- Every uninstall restores the exact original bytes at the target — byte-identical
-- No hook install leaves a stale registry entry on any failure path
-- Every engine entry point guards against a target that has been unmapped or re-protected by the host
-- No JNI call in a hook dispatch path may touch a `jobject` on a caller thread with a JIT `BinderProxy.transact` frame above it — all `jobject` operations offload to a fresh attached thread
-
----
-
-## Feature count
-
-Approximate totals when fully complete:
-
-- **Hook mechanisms:** ~15 distinct capabilities across inline / GOT / ArtMethod / dynamic / chained / conditional / return-modify / trace / SVC
-- **Instrumentation:** ~6 capabilities across trace / call-graph / registers / backtrace / counters / profiling
-- **Memory primitives:** ~5 capabilities
-- **IPC / kernel boundary:** ~7 capabilities across Binder / AIDL / ServiceManager / property / signal
-- **Class loading:** ~5 capabilities
-- **Anti-detection:** ~25 distinct filters across filesystem / debugger / network / kernel / environment
-- **Coordination:** ~9 capabilities across registry / tagging / atomic / rollback / deferred-free / signal-safe / conflict / gate
-- **Symbol resolution:** ~6 capabilities
-- **Diagnostics:** ~6 capabilities
-- **Stability invariants:** ~6 guarantees
-
-**~85 distinct capabilities** spread across 10 categories.
-
----
-
-## What the engine is NOT
-
-Not claimed by this specification, and out of scope unless separately approved:
-
-- A full dynamic binary translation (DBI) engine (Frida-Stalker-class instruction-level tracing)
-- A scripting runtime (Lua, JS, embedded interpreter for live hook writing)
-- Cross-process injection into other apps (requires root)
-- Multi-Android-version support (single target: API 37, arm64, ART)
-- Symbolic execution / taint analysis / constraint solvers
-- Kernel-mode hooking / eBPF / kprobes
-
-Those are research-grade instrumentation frameworks, distinct from a hook engine. If needed, they become a separate project with a separate specification.
-
----
-
-## Canary
-
-Viber boot under the engine is a **regression canary**, not a target. Every session ends with `GuestLoadTest` green (`outcome=booted-viber-order`, providers ≥14, no new FATAL). If the canary breaks, an engine feature broke — fix the engine feature, then continue. Viber UI, Viber functionality, Viber network — not in scope, not pursued, not tracked.
-
-**IMPORTANT measurement note:** the canary must be measured from a **fresh process** — a run where `GuestLoadTest` is the only test invoked. Running `GuestLoadTest` inside the full suite (position ~86 of 183) has `elapsedMs=16000+` and `providersAttempted=3, providersSucceeded=2` because 85 test classes have already fragmented the process — providers after the 3rd time out. That is **not** the canary measurement. The canary is: `adb shell am instrument -w -r -e class com.ims134.hookengine.GuestLoadTest ...`. Fresh process. Baseline: `elapsedMs ~1679ms`, `providersAttempted=15`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise).
-
-
-# PROJECT STATE
-
-Last updated: **Session 61 close (2026-10-28)**. Supersedes Session-60-close version. Sessions 41–61 landed on disk and are on-device verified (183 registered, 177 executed, 0 failed, 6 ignored at Session 61 close). Feature 5.10 ADB-detect = ⚠️ PARTIAL (property surface complete; Settings.Global surface architecturally walled — see §5.10 below). Feature 5.11 debugger-detect = ✅ COMPLETE via property-gated JDWP (Debug/VMDebug hook surface walled — see §5.11 below). Feature 5.12 emulator-detect = ✅ COMPLETE via real-device cleanliness + defensive kPropSpoofs (see §5.12 below).
-
----
-
-## What this project is
-
-**An advanced native hook engine for Android arm64 / ART 37.**
-
-The engine's job is to make a live process auditable and patchable at the code level:
-
-- Hook any function, at any instruction, in any loaded library, native or Java
-- Trace method entry/exit, inspect register state, modify return values
-- Scan and patch process memory
-- Rewrite Binder IPC at the AIDL payload level
-- Override syscall-reachable surface (files, /proc, properties, sockets, ptrace)
-- Load and instrument additional code at runtime
-- Survive under active detection
-
-The target is defined by the **feature inventory** below — not by any particular app booting. When Categories 1–8 in the inventory are all ✅, the engine is done.
-
-## What this project is NOT
-
-- **Not a clone app.** Filesystem virtualization, per-clone identity, notification namespacing, AMS task registration, Activity UI rendering — these are clone-app features. Out of scope unless the operator explicitly adds them as separate work.
-- **Not a reference-reproduction project.** `com.excelliance.kxqp.platform.ApplicationProxy` natives are not a goal.
-- **Not a "get Viber to work" project.** Viber is a **regression canary**. Its state is diagnostic data, not a milestone.
-- **Not a coverage-counter project.** The `X/37` ApplicationProxy method count is retired as a progress metric.
-
----
-
-## The drift — acknowledged
-
-Sessions 1–14 built the primitive foundation. Sessions 15–40 did **not** deepen the engine — they built a container around it (dual-Application boot, GuestClassLoader, LoadedApk manipulation, WMS probes). That detour consumed 26 sessions and produced one engine port (`nativeInit`, S38). The container is now the canary; its further development is out of scope.
-
-Sessions 41–61 resumed engine work and delivered **twenty-three** verified primitives — the entire Category 1, the entire Category 2, all seven of Category 3, all of Category 4, and 5.11 debugger-detect, 5.12 emulator-detect. **Four categories complete plus 10 of 16 anti-detection filters:** Categories 1, 2, 3, 4. Phase D closed. Phase E three sessions in.
-
----
-
-## Current verified state
-
-**Engine primitives (verified on-device, all green at Session 61 close):**
-- Inline hook: 9 ARM64 instruction kinds. Verified by RelocTest (49 assertions).
-- GOT hook: 26 sites, works.
-- ArtMethod hook: works (native methods, non-fast-JNI only).
-- ArtMethod entry/exit trace: works on framework natives. Verified by ArtMethodTraceTest (5 tests).
-- Hook chaining: works. Verified by ChainHookTest (6 tests).
-- Conditional hook: predicate gates per-slot handler fire. Verified by ConditionalHookTest (6 tests).
-- Return-value modification: post-call modifier transforms caller-visible x0. Verified by ReturnModTest (6 tests).
-- SVC instruction hooking: BRK-magic + SIGTRAP handler. Verified by SvcHookTest (6 tests).
-- Register state inspection: full ARM64 GP + SP + NZCV + Q register capture. PROBE and PASSTHRU modes. Verified by RegInspectTest (6 tests).
-- Memory read / write / scan: `/proc/self/maps`-validated; MemWrite mprotects each page to RW, writes, restores orig (Rule 10 preserved). Verified by MemoryOpsTest (6 tests).
-- Full maps enumeration: MemEnumMaps, MemEnumMapsFilter, MemFindRegionContaining; per-entry {start, end, prot, offset, dev major/minor, inode, path}. Verified by MapsEnumTest (6 tests).
-- Backtrace from hook site: FP-chain walker with `/proc/self/maps` PC validation, 16-byte alignment guard, monotonic ascending FP guard, cycle detection, bounded at BT_MAX_FRAMES=32. Verified by BacktraceTest (6 tests).
-- Native ClassLoader chaining (`nativeFNLN`): C++ merge of `pathList.dexElements` (host-only prepended to guest, deduped by identity), preserving `ClassLoaderBridge.installFor` API. Rule 15 debt closed. Verified by NativeFnlnTest (6 tests) and prior ClassLoaderBridgeTest (3 tests).
-- Dynamic DEX loading: `DexLoaderCreate(env, dexPath, optimizedDir, parent)` in `DexLoader.cpp` constructs `dalvik/system/DexClassLoader` entirely in C++. Verified by DexLoadTest (6 tests).
-- DEX merging at runtime: multi-path `DexClassLoader("pathA:pathB", ...)` — same native `DexLoaderCreate`, different argument. Merged loader contains one element per source; chains into a guest via 4.2 making all classes from both sources resolvable. Verified by DexMergeTest (6 tests).
-- Dynamic runtime attach: works with alignment/mapped/exec guards. Verified by DynamicAttachTest (6 tests).
-- Hidden-API bypass: works via thread-attached reflection.
-- `IPCThreadState::transact` inline hook: works.
-- AIDL prelude rewrite: works on 4 interfaces.
-- ServiceManager lookup interception (transact-level): alias and null overrides rewrite String16 names in the request parcel before transact. Verified by ServiceManagerTest (8 tests).
-- Signal handling override: sigaction-based per-slot handlers with PASS_THROUGH / SUPPRESS actions, full siginfo capture. Verified by SignalOverrideTest (6 tests).
-- **Native ServiceManager addition** (Feature 3.7): register a synthetic binder under any name so `ServiceManager.getService(name)` returns it. Mechanism: 3.4 alias rewrite makes the driver return a valid BinderProxy in the reply; a C++ inline hook on `android_os_Parcel_nativeReadStrongBinder` (located by `JNINativeMethod`-struct scan in `libandroid_runtime.so`) returns the original Kotlin Binder when `g_isSynthetic` is set. Same-process caller sees the original instance. Verified by SyntheticServiceTest (6 tests).
-- PLT stub resolution: `PltResolveForSymbol(lib, symbol)` walks `.rela.plt` and correlates relocation index to `.plt` (or BTI `.plt.sec`) entry; validates the first instruction is `adrp` or `bti c`. Verified by PltResolveTest (7 tests, including a callable check).
-- **Debugger detect blocking** (Feature 5.11): property-gated JDWP. S59's `kPropSpoofs` carries `ro.debuggable="0"` and `ro.adb.secure="1"`; the AMS never binds a JDWP listener on port 8700; `Debug.isDebuggerConnected()` and `Debug.waitingForDebugger()` return `false` without any further hook. The `Debug.*`/`VMDebug.*` ArtMethod hook surface is architecturally walled (fast-JNI tokens 0x39-0x3f, unstable across processes) — documented in §5.11 as Phase F disassembly work. Verified by DebuggerDetectTest (6 tests). Probes `DebuggerDetectProbeTest` (1 test) and `DebuggerDetectProbe2Test` (2 tests) retained as Phase F entry points.
-- **Emulator detect blocking** (Feature 5.12): real-device + defensive kPropSpoofs. On this physical MediaTek mt6899 (Xiaomi chagall) device, every surface a standard anti-emulator library reads is naturally clean: property surface, filesystem (no goldfish nodes), Build.* fields (real Xiaomi/MediaTek values), sensor list (51 real sensors, 0 goldfish), loaded libraries (0 goldfish/qemu in /proc/self/maps). S59's `kPropSpoofs` defensively forces `ro.kernel.qemu=""` and `ro.boot.qemu=""` (same value as natural denial on real device — cheap insurance). Verified by EmulatorDetectTest (6 tests) across 5 detector-readable surfaces.
-- `nativeCNVM`: decomp-verified, 4 tests green.
-- `nativeInit` (structural): verified Session 38.
-
-**Container / canary (verified on-device, fresh-process):**
-- Viber boots: `outcome=booted-viber-order`, providers 14/15 (MlKit noise), `elapsedMs ~1679ms`.
-- SplashActivity: instantiated, `onCreate`/`onStart`/`onResume` all run.
-- WMS accepts token + allocates Surface when host task visible.
-
----
-
-## Engine feature inventory — the actual target
-
-Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written but unverified
-
-### Category 1 — Hook mechanisms — **9/9 COMPLETE**
-
-| # | Feature | Status |
-|---|---|---|
-| 1.1 | Inline hook at any ARM64 instruction | ✅ |
-| 1.2 | GOT/PLT symbol hook | ✅ |
-| 1.3 | ArtMethod hook (replace) | ✅ |
-| 1.4 | ArtMethod entry/exit trace | ✅ |
-| 1.5 | Dynamic runtime attach by computed address | ✅ |
-| 1.6 | SVC instruction hooking (bypass libc) | ✅ |
-| 1.7 | Hook chaining | ✅ |
-| 1.8 | Conditional hook | ✅ |
-| 1.9 | Return-value modification | ✅ |
-
-### Category 2 — Memory primitives — **7/7 COMPLETE**
-
-| # | Feature | Status |
-|---|---|---|
-| 2.1 | Read memory at arbitrary address | ✅ |
-| 2.2 | Write memory (page-prot safe) | ✅ |
-| 2.3 | Scan memory for pattern | ✅ |
-| 2.4 | Allocate memory near target | ✅ |
-| 2.5 | Enumerate maps | ✅ **S50** |
-| 2.7 | Register state inspection at hook site | ✅ |
-| 2.8 | Backtrace from hook site | ✅ **S53** |
-
-### Category 3 — IPC / kernel boundary — **7/7 COMPLETE**
-
-| # | Feature | Status |
-|---|---|---|
-| 3.1 | Binder transact interception | ✅ |
-| 3.2 | AIDL prelude parse | ✅ |
-| 3.3 | AIDL reply rewrite | ✅ |
-| 3.4 | ServiceManager lookup interception | ✅ **S51** (transact-level; cache-hit blocked by ROM) |
-| 3.5 | Property read/write interception | ✅ |
-| 3.6 | Signal handling override | ✅ **S52** |
-| 3.7 | Native ServiceManager addition | ✅ **S58** (JNI-impl hook on `nativeReadStrongBinder`; same-process only) |
-
-### Category 4 — Class loading / code isolation — **6/6 COMPLETE**
-
-| # | Feature | Status |
-|---|---|---|
-| 4.1 | Custom ClassLoader delegation | ✅ |
-| 4.2 | Native ClassLoader chaining | ✅ **S54** (Rule 15 debt closed) |
-| 4.3 | Dynamic DEX loading | ✅ **S55** |
-| 4.4 | DEX merging at runtime | ✅ **S56** |
-| 4.5 | Resource merging | ✅ |
-| 4.6 | Native library load override | ✅ |
-
-### Category 5 — Anti-detection
-
-| # | Feature | Status |
-|---|---|---|
-| 5.1–5.5 | File/maps/status/mounts filters | ✅ (5 items) |
-| 5.6 | Build property spoofing | ⚠️ (9 props) |
-| 5.7 | UID/GID spoofing | ✅ |
-| 5.8 | Frida/IDA port blocking | ✅ |
-| 5.9 | ptrace blocking | ✅ |
-| 5.10 | ADB detect blocking | ⚠️ **S59** (property surface ✅; Settings.Global walled — see §5.10) |
-| 5.11 | Debugger detect (JDWP full) | ✅ **S60** (property-gated JDWP; hook surface walled — see §5.11) |
-| 5.12 | Emulator detect blocking | ✅ **S61** (real-device cleanliness + defensive kPropSpoofs — see §5.12) |
-| 5.13 | Test-keys detect blocking | ❌ |
-| 5.14 | /proc/net/tcp analysis blocking | ❌ |
-| 5.15 | /proc/self/cmdline full spoof | ⚠️ |
-| 5.16 | /proc/self/syscall + stack filter | ❌ |
-
-### Category 6 — Safety / correctness
-
-| # | Feature | Status |
-|---|---|---|
-| 6.1 | Hook registry | ✅ |
-| 6.2 | Per-guest tags | ❌ (phantom S42 batch — never shipped) |
-| 6.3 | Atomic install / uninstall | ✅ |
-| 6.4 | Deferred-free under contention | ✅ |
-| 6.5 | Rollback on partial failure | ✅ |
-| 6.6 | Page protection read + restore | ✅ |
-| 6.7 | Inter-hook conflict detection | ✅ |
-| 6.8 | Signal-safe uninstall | ⚠️ |
-| 6.9 | Capability gate (ART version) | ✅ |
-
-### Category 7 — Symbol / ELF utilities
-
-| # | Feature | Status |
-|---|---|---|
-| 7.1 | ELF symbol resolution (unified API) | ⚠️ (scattered ad-hoc implementations) |
-| 7.2 | .dynsym walk | ✅ |
-| 7.3 | .symtab walk | ✅ |
-| 7.4 | GNU + SysV hash support | ✅ |
-| 7.5 | Multi-lib search | ✅ |
-| 7.6 | PLT stub resolution | ✅ **S57** |
-
-### Category 8 — Runtime diagnostics
-
-| # | Feature | Status |
-|---|---|---|
-| 8.1 | Per-hook execution counter | ✅ |
-| 8.2 | Per-hook argument logging | ⚠️ |
-| 8.3 | Runtime hook inspection | ✅ |
-| 8.4 | Regression test suite | ✅ |
-| 8.5 | Reloc test suite | ✅ |
-| 8.6 | Anti-detection test suite | ✅ |
-| 8.7 | Profiling (CPU / memory per hook) | ❌ |
-
-### Totals
-
-- **✅ verified complete:** 56 features (~84% of 67 tracked)
-- **⚠️ partial:** 6 features (5.6, 5.10, 5.15, 6.8, 7.1, 8.2)
-- **❌ not started:** 5 features (5.13, 5.14, 5.16, 6.2, 8.7)
-
-**Engine completion requires ~14 more sessions.**
-
----
-
-## Engine roadmap — Session 61 to Session 75
-
-### Phase A — Foundation (Sessions 41–44) — CLOSED
-### Phase B — Hook mechanism depth (Sessions 45–48) — CLOSED (Category 1 9/9)
-### Phase C — Memory + kernel boundary (Sessions 49–53) — CLOSED (Category 2 7/7)
-### Phase D — Class loading + symbol depth (Sessions 54–58) — CLOSED
-
-| Session | Feature | Exit |
-|---|---|---|
-| 54 | 4.2 Native `nativeFNLN` (Rule 15 debt closure) | ✅ `NativeFnlnTest` (6 tests) |
-| 55 | 4.3 Dynamic DEX loading | ✅ `DexLoadTest` (6 tests) |
-| 56 | 4.4 DEX merging at runtime | ✅ `DexMergeTest` (6 tests) |
-| 57 | 7.6 PLT stub resolution | ✅ `PltResolveTest` (7 tests) |
-| 58 | 3.7 Native ServiceManager addition | ✅ `SyntheticServiceTest` (6 tests) |
-
-### Phase E — Anti-detection completion (Sessions 59–64)
-
-| Session | Feature | Exit |
-|---|---|---|
-| 59 | 5.10 ADB detect blocking | ⚠️ PARTIAL — `AdbDetectTest` (6 tests, 2 ignored). Property surface ✅; Settings.Global walled (§5.10). |
-| 60 | 5.11 Debugger detect (JDWP full) | ✅ COMPLETE — `DebuggerDetectTest` (6 tests). Property-gated JDWP; hook surface walled (§5.11). |
-| **61** | **5.12 Emulator detect blocking** | **✅ COMPLETE — `EmulatorDetectTest` (6 tests). Real-device cleanliness + defensive kPropSpoofs (§5.12).** |
-| 62 | 5.13 Test-keys / custom build detect | `BuildPropTest` (6 tests) — probe first: Build.* static final fields vs property surface |
-| 63 | 5.14 /proc/net/tcp blocking | `NetTcpTest` (6 tests) |
-| 64 | 5.15 /proc/self/cmdline + 5.16 syscall/stack filter | `CmdlineStackTest` (6 tests) |
-
-### Phase F — Polish + close (Sessions 65–75)
-
-| Session | Feature | Exit |
-|---|---|---|
-| 65 | 6.8 Signal-safe uninstall | `SignalSafeUninstallTest` |
-| 66 | 8.7 Profiling (CPU / memory per hook) | `HookProfileTest` |
-| 67–73 | Address any ⚠️ partials surfaced by prior phases. Includes: 5.10 Settings.Global disassembly, 5.11 Debug/VMDebug fast-JNI disassembly, 7.1 unified ELF API, 8.2 arg logging | Depends |
-| 74 | Full engine regression run + `PROJECT_STATE.md` final close | All suites + canary green |
-| 75 | Reserved | Depends |
-
----
-
-## §Cache-hit wall — measured, documented, closed
-
-**Feature 3.4 as originally spec'd is complete.** The `ServiceManager` transact-level rewriter fires on every `handle==0` transact whose request parcel carries a String16 name matching an override. Alias and null overrides both work. 8 green tests.
-
-The Session 51 **cache-hit aspiration** — intercepting `ServiceManager.getService("activity")` when the framework serves it from a cached binder without dispatching through `IPCThreadState::transact` — is a measured architectural wall on MIUI/API 37. **Fifteen-plus mechanisms were tried. Every one was blocked by a specific MIUI hardening. The definitive on-device close:**
-
-### The three fast-JNI tokens
-
-`rawGetService FromReflectedMethod = 0x3d`
-`getService FromReflectedMethod = 0x3f`
-`checkService FromReflectedMethod = 0x41`
-
-All three return small integer tokens, not ArtMethod pointers. These are ART's encoding of fast-JNI dispatch-table indices. Every ArtMethod-based interception path for these three methods is architecturally impossible on this ROM.
-
-### The `+32` slot is not a callable code address
-
-`ArtMethod*+32` for `getService` holds `0x38000970eceb68`, not in `/proc/self/maps`. Cannot be inline-hooked. Patching `+32` to our shim succeeds at write level but never affects dispatch.
-
-### `SimpleArrayMap.get(sCache)` is JIT-inlined
-
-Hooking `SimpleArrayMap.get(Object)` succeeds but the shim fires on unrelated ArrayMap lookups, not the actual `sCache.get(name)` from `getService`. MIUI JIT-inlines the call.
-
-### The `sCache` field is a decoy
-
-MIUI's `rawGetService` never puts into `sCache` — only `initServiceCache()` at process startup does. Actual cache is in `getIServiceManager().getService2(name)`.
-
-### Future work
-
-Cache-hit interception on MIUI/API 37 requires IDA Pro analysis of `libart.so`'s fast-JNI dispatch layer at indices `0x3d`/`0x3f`/`0x41`. That is a dedicated research session, not a feature-landing task.
-
----
-
-## §5.10 ADB-detect — four measured walls (Session 59)
-
-**Property surface — COMPLETE.** `ro.debuggable`, `init.svc.adbd`,
-`ro.adb.secure`, `service.adb.root` return spoofed values.
-`libandroid_runtime.so` added to `ShouldHookProperty` so reflection-based
-`SystemProperties.get` fires 5.6's existing spoof. Verified by
-`AdbDetectTest.roDebuggableSpoofed` / `initSvcAdbdSpoofed`.
-
-**Settings.Global surface — ARCHITECTURALLY WALLED.** Four hypotheses
-measured, four refuted on-device:
-
-| # | Mechanism | Refuted by |
-|---|---|---|
-| 1 | `NameValueCache.mValues` poison | Write persists forever (`pre-write map='0'`), framework read bypasses (`getString` returns `'1'`). |
-| 2 | `mGenerationTrackers` sync | Field exists but stays `ArrayMap size=0`. Not the invalidation scheme here. |
-| 3 | `mReadableFieldsWithRedactedValue` special path | These two keys are the only map entries; redacted "0" is a fallback for unprivileged callers, we're privileged so real value returned. |
-| 4 | `IContentProvider.call()` via transact | S59 probe: 0 transacts fired for 3 ADB/DEV reads (`fireDelta=0`, `codes=[]`, `elapsed=0ms`). Control `Settings.Secure` read fired code 21 with 368-byte Bundle reply. The reads never leave the process. |
-
-**What the CP reply reveals (for Phase F):** MIUI's cache-miss reply is a
-`Bundle` containing `_track_generation` marker + `android.util.MemoryIntArray`
-+ `android.os.ParcelFileDescriptor` + `value`. The framework uses
-  **shared-memory generation tracking**, not `mGenerationTrackers` ArrayMap.
-  The `adb_enabled` shared-mem region was populated at process boot, before
-  hook install — no user-space intercept point exists after boot.
-
-**Correct Phase F entry point:** disassemble
-`framework.jar!classes3.dex`'s `Settings$NameValueCache.getStringForUser`
-on this ROM and trace the shared-memory read path. IDA/Ghidra work, not an
-engine-primitive session. The `CP diag` instrumentation in
-`BinderTransactHook.cpp` and the field dump in `AdbSpoof.install()` are
-retained as Phase F entry points.
-
-**Meta-lesson (recurring):** "install success ≠ interception success."
-Same class as S51's `SimpleArrayMap.get()` (installed, never dispatched)
-and S58's `JavaHookInstall` (installed, quick-ABI mismatch). The
-`AdbSpoof.poison()` return value is "code ran," not "framework returns 0."
-The `post-poison getString=... getInt=...` diagnostic line is the ground
-truth.
-
-**Test-isolation lesson (S60):** `AdbDetectProbeTest` — a diagnostic class
-that runs before the graded `AdbDetectTest` alphabetically — calls
-`NativeTestBridge.uninstallAll()` in both `@Before` and `@After`, which
-tears down the startup-installed GOT hooks. Any subsequent test that
-depends on those hooks (property reads, file IO, connect blocking) must
-call `NativeTestBridge.installFileHooks()` / `installAntiDetection()` in
-its own `@Before`. `installFileHooks()` is idempotent. `AntiDetectionE2ETest`,
-`DebuggerDetectTest`, and `EmulatorDetectTest` all follow this pattern;
-`AdbDetectTest` was fixed in S60 and paid the cost as 2 reds in the S59
-full-suite gate. Rule 12 preserved — the assertion could fail, and did,
-revealing real state pollution.
-
----
-
-## §5.11 Debugger-detect — property-gated JDWP (Session 60)
-
-**Functional goal:** make `Debug.isDebuggerConnected()`,
-`Debug.waitingForDebugger()`, and the JDWP handshake surface all appear
-clean to detector code running inside this process.
-
-**Mechanism — property gate prevents JDWP binding.**
-
-S59's `kPropSpoofs` in `Hooks.cpp` already carries `ro.debuggable="0"` and
-`ro.adb.secure="1"`. `ShouldHookProperty` routes `libandroid_runtime.so`
-through the GOT hook so `SystemProperties.get()` reflects the spoof.
-
-AMS reads `ro.debuggable` at `ActivityThread.attach` time and only binds a
-JDWP listener if it's `"1"`. With the spoof live:
-- No listener is bound on port 8700 → `DebuggerDetectTest.jdwpPortUnreachable` gets `ECONNREFUSED`
-- `Debug.isDebuggerConnected()` returns `false` forever
-- `Debug.waitingForDebugger()` returns `false` forever
-
-**The functional goal is achieved by S59's property spoof alone.** No
-new hook is needed. This is architecturally stronger than a hook-based
-approach: a hook has a call site an attacker could bypass, but a property
-spoof has no call site — the debugger endpoint simply doesn't exist.
-
-Verified by `DebuggerDetectTest` (6 assertions, all green).
-
-**Hook-based interception of `Debug.*` / `VMDebug.*` is WALLED.**
-
-Probe 1 (`DebuggerDetectProbeTest`, proc 4356) and Probe 2
-(`DebuggerDetectProbe2Test`, proc 9843) measured every method on both
-layers:
-
-| Method | Probe 1 | Probe 2 | Wall class |
-|---|---|---|---|
-| `Debug.isDebuggerConnected` | **0x39** | **0x3d** | fast-JNI |
-| `Debug.waitingForDebugger` | **0x3b** | **0x3f** | fast-JNI |
-| `Debug.waitForDebugger` | — | **0x3b** | fast-JNI |
-| `VMDebug.isDebuggerConnected` | — | **0x39** | fast-JNI |
-
-All values are `< 0x1000`. `JavaHookInstall` refuses each one with the
-fast-JNI guard (same class as `Binder.getCallingUid` before S44's successful
-hook — the difference is that these are declared `native=false` on the
-metadata layer but the token says fast-JNI intrinsic on the dispatch layer).
-
-**The tokens shift between processes.** `Debug.isDebuggerConnected`: `0x39`
-(probe 1) → `0x3d` (probe 2), `+4`. `Debug.waitingForDebugger`: `0x3b` →
-`0x3f`, `+4`. Each token is a **per-process dispatch-table index**, not a
-stable ArtMethod identity — assigned lazily on first `FromReflectedMethod`
-call based on the current process's dispatch-table state. Same wall class
-as S51's ServiceManager (`0x3d`/`0x3f`/`0x41`) and S58's
-`getService2`/`checkService2`.
-
-**VMDebug is stripped on this ROM.** Only 3 methods on `dalvik.system.VMDebug`:
-- `allowHiddenApiReflectionFrom(Class)` — native
-- `dumpReferenceTables()` — native
-- `isDebuggerConnected()` — native
-
-The AOSP-documented `getIsDebuggerConnected()` and `waitingForDebugger()` do
-not exist. `Debug.isDebuggerConnected` does not delegate through
-`VMDebug.getIsDebuggerConnected` — MIUI has rewritten the debug path to
-bypass the AOSP delegation chain. So there is no non-fast-JNI hook target
-one level down either.
-
-**Correct Phase F entry point:** IDA/Ghidra disassembly of `libart.so`'s
-fast-JNI dispatch table at indices `0x39`–`0x3f`. Same disassembly surface
-as S51's cache-hit wall and S58's fast-JNI tokens. Not a hook-engine
-primitive session. The retained Phase F entry points:
-`DebuggerDetectProbeTest.kt` and `DebuggerDetectProbe2Test.kt`.
-
-**Meta-lesson (S60, extends S59 class):** "spec-predicted mechanism ≠ the
-only mechanism that achieves the goal." The spec anticipated a hook-based
-approach for `Debug.isDebuggerConnected` / `waitingForDebugger`. The probe
-proved that layer is walled. But the goal — detector sees a clean process —
-was already achieved by S59's property spoof. **When a hook-based approach
-is walled but the goal is functionally achieved by an already-landed
-mechanism, prove the outcome and stop chasing the hook.** Recurring
-anti-pattern family:
-- S51 — cache-hit hooks refused; transact-level landed
-- S58 — `JavaHookInstall` refused; JNI-impl hook landed
-- S59 — Settings.Global path refused; property surface landed
-- S60 — `Debug.*`/`VMDebug.*` hooks refused; property-gated JDWP landed
-- S61 — no hook refused at all; the goal was naturally achieved
-
-The mechanism is *how*; the exit assertion is *whether*. Verify *whether*.
-
-**Test-isolation note:** `DebuggerDetectTest.@Before` calls
-`NativeTestBridge.installFileHooks()` for the same reason `AdbDetectTest.@Before`
-does — `ConditionalHookTest` immediately precedes it alphabetically and calls
-`NativeTestBridge.uninstallAll()` in its `@After`. Documented in the class
-header. `installFileHooks()` is idempotent (returns 0 whether hooks are
-already present or need re-install).
-
----
-
-## §5.12 Emulator-detect — real-device cleanliness + defensive kPropSpoofs (Session 61)
-
-**Functional goal:** make the process look like a real physical device on
-every surface a standard anti-emulator library (SafetyNet, RootBeer,
-VMProtect) reads.
-
-**Mechanism — no new hook code. Two contributions:**
-
-1. **The target device is physically real.** MediaTek mt6899 (Xiaomi 2602DPT53G / chagall_global), MIUI/API 37. Every physical-identity signal is a genuine MediaTek/Xiaomi value; no goldfish/qemu string appears anywhere a detector reads.
-
-2. **S59's `kPropSpoofs` carries two defensive entries** for the emulator-classification properties:
-  - `ro.kernel.qemu` → `""`
-  - `ro.boot.qemu` → `""`
-
-   On a real device, property service naturally returns `""` for these (they're not set). On an emulator, they'd be `"1"`. Forcing them to `""` is cheap insurance that costs zero on this device and future-proofs the engine if it's ever run on a device where those properties happen to be set.
-
-Verified by `EmulatorDetectTest` (6 assertions, all green).
-
-**Probe measurements (Session 61 close, on-device):**
-
-| Surface | Result |
-|---|---|
-| Property: `ro.kernel.qemu`, `ro.boot.qemu`, `ro.boot.qemu.avd_name`, `ro.boot.qemu.gltransport`, `ro.boot.qemu.hw.mainkeys` | All `""` |
-| Property: `ro.hardware`, `ro.boot.hardware` | Both `"mt6899"` (real MediaTek) |
-| Property: `ro.product.model` | `"2602DPT53G"` (real Xiaomi) |
-| Property: `ro.build.fingerprint` | `"Xiaomi/chagall_global/chagall:17/...:user/release-keys"` (real) |
-| Property: `ro.build.tags`, `ro.build.type`, `ro.secure` | `"release-keys"`, `"user"`, `"1"` (real + S59 spoofs agree) |
-| Filesystem: `/dev/qemu_pipe`, `/dev/goldfish_pipe`, `/dev/goldfish_sync`, `/dev/socket/qemud`, 6× `libgoldfish*.so`, `/system/bin/qemu-props`, `/system/bin/qemud`, `/init.goldfish.rc` | All `false` (0 of 15 exist) |
-| Build.*: `HARDWARE`, `DEVICE`, `PRODUCT`, `BOARD`, `MODEL`, `MANUFACTURER`, `BRAND`, `TAGS`, `TYPE`, `ID`, `DISPLAY`, `HOST`, `USER` | All real Xiaomi/MediaTek values; no `goldfish`/`ranchu`/`qemu`/`sdk` tokens |
-| Sensors: count, goldfish-named | 51 sensors, **0 suspicious** — `icm45621_acc`/tdk, `mmc5603`/memsic, `tcs3720_als`/ams, etc. |
-| Loaded libs: `/proc/self/maps` goldfish/qemu count | 3858 lines, **0 matching** |
-
-**The 6 assertions in `EmulatorDetectTest`:**
-
-1. `qemuPropertySpoofed` — `ro.kernel.qemu=""`, `ro.boot.qemu=""`. Fails if property GOT hook regresses OR device is emulator.
-2. `qemuPipeAbsent` — `/dev/qemu_pipe` does not exist. Fails on emulator.
-3. `goldfishPipeAbsent` — `/dev/goldfish_pipe` does not exist. Fails on emulator.
-4. `buildHardwareNotEmulator` — `Build.HARDWARE` does not contain `goldfish`/`ranchu`/`qemu`/`emulator`/`sdk`. Fails on emulator.
-5. `noGoldfishSensors` — no goldfish/qemu/emulator-named sensors in `SensorManager.getSensorList(TYPE_ALL)`. Fails on emulator.
-6. `noGoldfishLibsLoaded` — no goldfish/qemu paths in `/proc/self/maps`. Fails on emulator.
-
-All six are Rule-12 falsifiable — every one fails if a specific real signal (emulator, broken hook, or file-hide regression) occurs.
-
-**What the wall would look like if this device WERE an emulator** (for Phase F / future ports): the goldfish-named sensors and the `libgoldfish*.so` loaded libraries are two surfaces that would need spoofing, and both are filesystem/reflection-adjacent. `HiddenPaths.h` already returns ENOENT for arbitrary paths — adding `/dev/qemu_pipe` etc. would be one addition. Sensor spoofing would need `SensorManager.getSensorList` interception, likely via `JavaHookInstall` on the AOSP sensor API (but that's a `ManagerService` bind, so same-process-invisible unless we hook the java layer). Not pursued here — the device isn't an emulator.
-
-**Meta-lesson (S61, extends S59/S60 class):** "the functional goal may already be achieved by the process's real state." Three sessions in a row (S59, S60, S61) have confirmed that the anti-detection goals for THIS target are best verified, not engineered. S59 added the property surface (real work). S60 needed zero new mechanism. S61 needed zero new mechanism. The engine's actual work for Phase E is measuring what's already clean and writing falsifiable regression guards. `HiddenPaths.h` and `kPropSpoofs` cover the surfaces that need defending; everything else is naturally clean because the device is real.
-
-**Test-isolation note:** `EmulatorDetectTest.@Before` calls `NativeTestBridge.installFileHooks()` — same reason as `AdbDetectTest` and `DebuggerDetectTest`. Documented in the class header.
+These are genuine physical-device signals. On a bootloader-unlocked device
+they would read `'orange'` / `'0'` / `'unlocked'` / `'enforcing'` — a real
+detector signal that cannot be spoofed from an app-domain engine because
+AMS/system_server reads them from the bootloader at boot time. Not
+asserted by `BuildPropTest` (would fail on a legitimately-unlocked device
+without the engine being at fault). Documented as physical-device
+characteristic, same honest position as §5.12's device-is-real position.
+
+### The 6 assertions in `BuildPropTest` (all Rule-12 falsifiable)
+
+1. `roBuildTagsRelease` — `sysProp("ro.build.tags") == "release-keys"`. Fails if property GOT hook regresses, device is test-keys-signed, or kPropSpoofs entry removed.
+2. `buildTagsStaticRelease` — `Build.TAGS == "release-keys"` and does not contain `"test-keys"`. Fails on a test-keys device (honest position).
+3. `roSecureIsOne` — `sysProp("ro.secure") == "1"`. Fails on a debuggable build or if kPropSpoofs loses ro.secure.
+4. `buildTagsPropertyMatchesStatic` — property surface and static-final surface agree. Fails on a future port to a test-keys device where the property spoof returns "release-keys" while `Build.TAGS` stays "test-keys". Honest-position cross-check.
+5. `signatureNulledLegacy` — `getPackageInfo(own, GET_SIGNATURES).signatures` is null/empty. Regression guard for S18 path.
+6. `signatureNulledModern` — `getPackageInfo(own, GET_SIGNING_CERTIFICATES).signingInfo.apkContentsSigners` is null/empty. Regression guard for S62 path.
+
+Every assertion is falsifiable — a real regression, device swap, or state
+pollution fails one or more.
+
+### Meta-lesson (S62, extends S59/S60/S61 class)
+
+**"A single surface can be defended by multiple independent walls; each
+requires its own bypass."** The signature null-out needed four distinct
+bypasses in sequence (top-level `api=blocked`, field rename, silent
+`declaredFields` filter, multiple Signature[] fields). Each wall was a
+different mechanism; getting past one did not get past the next.
+**Instrument every step and log the state at each hop, or you will chase
+the wrong wall.**
+
+Complements S61: S61 said "the functional goal may already be achieved by
+the process's real state." S62 adds: "even when the functional goal IS
+achieved by real state, a related surface may still need engineering —
+distinguish the goal from the surface."
+
+**Test-isolation note:** `BuildPropTest.@Before` calls
+`NativeTestBridge.installFileHooks()` — same pattern as AdbDetectTest,
+DebuggerDetectTest, EmulatorDetectTest. Documented in the class header.
 
 ---
 
@@ -644,17 +48,17 @@ Viber is used for **one purpose**: verify that the engine primitives still work 
 - `booted-viber-order` + no new FATAL + providers ≥14 = canary green
 - Any new FATAL, any boot regression, any provider count drop = canary red
 
-**Canary state at Session 61 close (fresh process):** `outcome=booted-viber-order`, `elapsedMs=1679ms`, `providersAttempted=15`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise). Verified from a fresh process at S61 close.
+**Canary state at Session 62 close (fresh process):** `outcome=booted-viber-order`, `elapsedMs=1691ms`, `providersAttempted=15`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise, unchanged from S61). Verified from a fresh process at S62 close.
 
-**Measurement discipline:** canary must be measured from fresh process — `-e class com.ims134.hookengine.GuestLoadTest` as the only class. In-suite readings (~position 86 of 183) show `providersAttempted=3, providersSucceeded=2` because 85 test classes fragment the process — that is **not** the canary measurement.
+**Measurement discipline:** canary must be measured from fresh process — `-e class com.ims134.hookengine.GuestLoadTest` as the only class. In-suite readings (~position 100 of 191) show `providersAttempted=3, providersSucceeded=2` because 100 test classes fragment the process — that is **not** the canary measurement.
 
 ---
 
-## Test suite state (as of Session 61 close)
+## Test suite state (as of Session 62 close)
 
-**Executed:** 177 · **Registered:** 183 · **Ignored:** 6 · **Failed:** 0
+**Executed:** 185 · **Registered:** 191 · **Ignored:** 6 · **Failed:** 0
 
-Registered test classes (post-S61):
+Registered test classes (post-S62):
 
 | Class | Tests | Status |
 |---|---|---|
@@ -693,11 +97,12 @@ Registered test classes (post-S61):
 | SyntheticServiceTest | 6 | ✅ S58 |
 | AdbDetectTest | 6 (2 ignored) | ⚠️ S59 |
 | DebuggerDetectTest | 6 | ✅ S60 |
-| **EmulatorDetectTest** | **6** | **✅ S61** |
+| EmulatorDetectTest | 6 | ✅ S61 |
+| **BuildPropTest** | **6** | **✅ S62** |
 | GuestLoadTest | 1 | ✅ (canary) |
 | ActivityBootProbeTest | 1 | 🔒 ignored |
 | IntegrationTest | 1 | ✅ |
-| Diagnostic probes | several (incl. DebuggerDetectProbeTest 1, DebuggerDetectProbe2Test 2, EmulatorDetectProbeTest 1) | non-gating |
+| Diagnostic probes | several (incl. DebuggerDetectProbeTest 1, DebuggerDetectProbe2Test 2, EmulatorDetectProbeTest 1, **BuildPropProbeTest 1**) | non-gating |
 
 **Test count history (registered; the count includes `@Ignore`'d test methods):**
 - S40: 51 · S41: 51 · S42: 57 · S43: 63 · S44: 68 · S45: 74 · S46: 80 · S47: 86 · S48: 92 · S49: 98
@@ -707,39 +112,30 @@ Registered test classes (post-S61):
 - S58 close: 155 (+6 SyntheticServiceTest)
 - S59 close: 168 (per full-suite gate)
 - S60 close: 177 (+9: DebuggerDetectTest 6, DebuggerDetectProbe2Test 2, DebuggerDetectProbeTest 1)
-- **S61 close: 183** (+6: EmulatorDetectTest 6; the probe `EmulatorDetectProbeTest` was added with the class but is not counted in the "graded" total — it's a diagnostic probe)
+- S61 close: 183 per handoff / **184 measured in-session** (small drift; handoff undercounted by 1). The 184 figure is the S62 baseline.
+- **S62 close: 191** (+7: BuildPropProbeTest 1, BuildPropTest 6). Handoff predicted 189 assuming baseline 183; actual baseline was 184 so the arithmetic lands at 191.
 
 ---
 
-## Session 62 first actions (authoritative)
+## Session 63 first actions (authoritative)
 
-1. Confirm Session 61 commit landed (`git log --oneline -3`).
-2. **Fresh-process canary rerun** to confirm S61 no-regression. Expected
+1. Confirm Session 62 commit landed (`git log --oneline -3`).
+2. **Fresh-process canary rerun** to confirm S62 no-regression. Expected
    `outcome=booted-viber-order`, `providersAttempted=15`, `providersSucceeded=14`.
-3. **Probe the test-keys / build-tag surface first.** Before writing any spoof code:
-  - `SystemProperties.get` for `ro.build.tags`, `ro.build.type`, `ro.secure`,
-    `ro.build.fingerprint`, `ro.boot.verifiedbootstate`, `ro.boot.flash.locked`
-  - `Build.TAGS`, `Build.TYPE`, `Build.FINGERPRINT`, `Build.HOST`, `Build.USER`
-    — Java static final fields populated from ro.build.* at zygote init
-  - Memory protection check on the Build class page — is the static final
-    writable via reflection / direct memory write?
-  - Reflection write probe: try `Build.TAGS = "release-keys"` via
-    `HiddenApiBridge.reflectGetDeclaredField` + `setAccessible` + `Field.set`
-  - `PackageManager.getPackageInfo(own_pkg, GET_SIGNATURES)` — is signature
-    nulled by PmSpoof already (from S18)?
-  - `PackageManager.getPackageInfo(own_pkg, GET_SIGNING_CERTIFICATES)`
-4. Write Feature 5.13 (test-keys / custom build detect blocking) with
-   probe-first discipline. Two surfaces likely:
-  - Property surface — already covered by S59's `kPropSpoofs`
-  - Java static final surface (`Build.TAGS` etc.) — may be writable, may
-    be walled if the field is in a read-only memory page (Phase F work
-    if walled; test verifies clean state if writable or naturally clean)
+3. **Probe the `/proc/net/tcp` surface first.** Before writing any filter:
+  - Enumerate `/proc/net/tcp`, `/proc/net/tcp6`, `/proc/net/udp`, `/proc/net/udp6`
+  - Count sockets the process itself has open that appear in these tables
+  - Check whether the engine's own listener (if any) appears
+  - Measure: is loopback listening present in the default view? Which lines belong to us?
+  - Probe via both `File("/proc/net/tcp").readLines()` (Java path — `libjavacore` GOT hook possible) and direct `openat` syscall (kernel view — would need `/proc/net/tcp` file rewrite or `getdents64` filtering of `/proc/net/`)
+  - Determine if the only reliable interception point is a per-read rewrite of the `/proc/net/tcp` content (via `Hooks.cpp` `Fake_open` extension — new `IsNetTcpPath`) or requires intercepting `getdents64` on `/proc/net/`
+4. Write Feature 5.14 (`/proc/net/tcp analysis blocking`) with probe-first discipline.
+   Expected mechanism: new `IsNetTcpPath` in `Hooks.cpp` + `BuildFilteredNetTcp()` analogous to `BuildFilteredMaps` / `BuildFilteredStatus`, filtering out engine's own socket lines. `NetTcpTest.kt` with 6 falsifiable assertions.
 5. Build + install (`.\build-and-install.ps1`).
-6. `am instrument` BuildPropTest. Expect `OK (6 tests)`.
-7. Full suite. Expect `OK (183 tests)` (registered rises to 189 if new test
-   class added: 183 + 6 = 189; executed 183). Verify exact numbers from run.
+6. `am instrument` `NetTcpTest`. Expect `OK (6 tests)`.
+7. Full suite. Expect `OK (191 tests)` (registered rises to 197: 191 + 6 = 197; executed 191).
 8. Canary from fresh process.
-9. Commit, mark 5.13 → ✅.
+9. Commit, mark 5.14 → ✅.
 
 ---
 
@@ -760,12 +156,13 @@ Registered test classes (post-S61):
 - **The S59 meta-lesson:** install success ≠ interception success.
 - **The S60 meta-lesson:** spec-predicted mechanism ≠ the only mechanism that achieves the goal. Verify *whether*, not *how*.
 - **The S61 meta-lesson:** the functional goal may already be achieved by the process's real state. Probe before assuming a mechanism is needed.
+- **The S62 meta-lesson:** a single surface can be defended by multiple independent walls; each requires its own bypass. Instrument every step and log the state at each hop, or you will chase the wrong wall.
 
 ---
 
 ## Hard-won facts (canonical reference)
 
-Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–61:
+Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–62:
 
 - `SYS_getpid` / `SYS_getuid` via `syscall()` bypass both inline and GOT hooks. (S33, verified S34.)
 - AttributionSource layout differs by construction path. (S32/33, verified S34.)
@@ -829,41 +226,30 @@ Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–61:
     - **Prefer `.plt.sec` when present** (BTI-enabled layout on API 37+). Each 16-byte `.plt.sec` entry = one `.rela.plt` slot, 0-based index into `.plt.sec`.
     - **Fallback to `.plt`** (no `.plt.sec`) — try base offsets 32 and 48 (linker convention varies); validate by reading the first instruction word — must be `adrp` (mask `0x9F000000 == 0x90000000`) or `bti c` (`0xD503245F`).
   - Returned address is the first byte of the PLT stub. Calling it as `open()` is the definitive test — `PltResolveTest.pltEntryCallableForOpen` does exactly that and requires a valid fd return.
-  - Test-set: 7 assertions in `PltResolveTest.kt` — `pltResolveOpenNonZero`, `pltResolveMissingSymbolZero`, `pltResolveMissingLibZero`, `pltEntryIsExecutable`, `pltEntryStubStructure`, `pltDistinctSymbolsDiffer`, `pltEntryCallableForOpen`.
 - Feature 3.7 — Native ServiceManager addition (verified on-device S58).
   - **Primary mechanism:** JNI-impl inline hook on `android_os_Parcel_nativeReadStrongBinder` in `libandroid_runtime.so`.
   - **The symbol is NOT exported** — dynsym walk fails. Must scan the .so's mapped memory for the string `"nativeReadStrongBinder\0"` and then find the 8-byte value equal to that string's address (that's the `JNINativeMethod.name` field). fnPtr is at `+16` from there.
-  - **Composition with 3.4:** alias rewrite (`name -> "activity"`) is essential — it forces the driver to return a valid `BinderProxy`. Any attempt to swap the reply Parcel (`mData` replace, `mObjects` patch, `mDataPos` reset, mprotect RW, `mObjectList` injection) crashes inside MIUI's post-transact Parcel validation on this ROM. **Do not pursue reply-Parcel mutation — it does not work on MIUI/API 37.**
+  - **Composition with 3.4:** alias rewrite (`name -> "activity"`) is essential — it forces the driver to return a valid `BinderProxy`.
   - **ART fast-JNI wall extends to `ServiceManagerProxy.getService2` (0x3d) and `checkService2` (0x3f).** Same class of wall as S51's outer SM methods.
   - **ArtMethod hook on `Parcel.readStrongBinder()` Java wrapper fails:** caller's JIT code expects the method's original `data_` = quick stub, not a JNI-ABI function. Do not replace `data_` on a Java method's ArtMethod — JIT-ABI managed return (compressed ref in w0) will be truncated to 32 bits and SIGSEGV.
   - **Only the JNI-impl function** (found via `JNINativeMethod` struct scan) is safe to hook — ART's intact JNI trampoline handles compressed-ref conversion on return.
   - **Same-process only.** Cross-process callers still see a `BinderProxy` — the driver has no handle for our synthetic name.
-  - Pre-intercept + post-intercept contract for 3.7: `PreIntercept` sets `g_isSynthetic` when it sees the synthetic name in the request; `PostIntercept` (after transact) must NOT clear `g_isSynthetic` — it's cleared only by `FakeNativeReadStrongBinder` when the caller's `readStrongBinder` fires. If `PostIntercept` clears it early, the hook fires on the wrong read (e.g., an unrelated `readStrongBinder` call elsewhere) and the mechanism breaks.
-- Feature 5.11 — Debugger detect, property-gated JDWP (verified on-device S60).
-  - The functional goal is achieved by S59's property spoof alone. AMS reads `ro.debuggable` at `ActivityThread.attach` time and only binds a JDWP listener if `"1"`. With `ro.debuggable="0"`, no listener on port 8700, so `Debug.isDebuggerConnected()` / `Debug.waitingForDebugger()` return `false` forever, and port 8700 refuses `ECONNREFUSED`.
-  - **`Debug.isDebuggerConnected` and `Debug.waitingForDebugger` are fast-JNI dispatch tokens on this ROM.** Probe 1 measured `0x39`/`0x3b`; probe 2 measured `0x3d`/`0x3f`. All `< 0x1000`, all refused by `JavaHookInstall`'s fast-JNI guard.
-  - **The tokens are NOT stable across processes.** They shift by +4 between probe sessions because they are per-process dispatch-table indices assigned lazily on first `FromReflectedMethod` call.
-  - **`dalvik.system.VMDebug` on this ROM is stripped to 3 methods:** `allowHiddenApiReflectionFrom`, `dumpReferenceTables`, `isDebuggerConnected`. AOSP-documented `getIsDebuggerConnected` and `waitingForDebugger` **do not exist**. `Debug.isDebuggerConnected` does not delegate through `VMDebug.getIsDebuggerConnected` — MIUI rewrote the debug path.
-  - The `VMDebug.isDebuggerConnected` at probe 2 measured `0x39` — the same fast-JNI wall. **There is no non-fast-JNI hook target one level down.**
-  - **Correct Phase F entry:** IDA/Ghidra disassembly of `libart.so`'s fast-JNI dispatch table at indices `0x39`–`0x3f`. Same disassembly surface as S51's cache-hit wall.
-  - **Test-isolation:** `DebuggerDetectTest.@Before` calls `NativeTestBridge.installFileHooks()` because `ConditionalHookTest` (immediately preceding alphabetically) calls `NativeTestBridge.uninstallAll()`. Idempotent — safe to call whether hooks are already present or wiped.
-  - **`installFileHooks()` re-install diagnostic:** in a fresh process, logs `InstallHooks: done (0 hooks, narrow scope)` — meaning all hooks were already present, all `PATCH_ALIAS` were `HOOK_ALREADY_HOOKED`, no new installs. In a polluted process (hooks wiped by a prior test), logs `InstallHooks: done (29 hooks, narrow scope)` or higher — meaning the re-install actually fired. Both count as success.
-- Feature 5.12 — Emulator detect blocking (verified on-device S61).
-  - **On physical MediaTek mt6899 (Xiaomi chagall_global) MIUI/API 37, the emulator-detect surface is naturally clean across all five detector-readable layers:**
-    - Property surface: `ro.kernel.qemu=''`, `ro.boot.qemu=''`, all `ro.boot.qemu.*=''`, `ro.hardware='mt6899'`, `ro.product.model='2602DPT53G'`, `ro.build.fingerprint` real Xiaomi
-    - Filesystem: **0 of 15** emulator-specific files exist (`/dev/qemu_pipe`, `/dev/goldfish_pipe`, all `libgoldfish*.so`, `/system/bin/qemu-props`, `/init.goldfish.rc`, etc.)
-    - Build.* fields: all real Xiaomi/MediaTek values, no `goldfish`/`ranchu`/`qemu`/`sdk` token in `HARDWARE`/`DEVICE`/`PRODUCT`/`BOARD`
-    - Sensors: 51 real sensors (`icm45621_acc`/tdk, `mmc5603`/memsic, `tcs3720_als`/ams), 0 goldfish-named
-    - Loaded libraries: 3858 lines in `/proc/self/maps`, **0 goldfish/qemu** paths
-  - **S59's `kPropSpoofs` carries two defensive entries** for emulator-classification: `ro.kernel.qemu=""`, `ro.boot.qemu=""`. On a real device these match the natural value (`""`); on an emulator they force `""` regardless of actual device state. Cheap insurance; same GOT hook as debug/ADB properties.
-  - **No new hook code needed for 5.12.** The 6 `EmulatorDetectTest` assertions are regression guards that fail if (a) the property GOT hook regresses, (b) the device is replaced with an emulator, (c) the file-hide logic is regressed. Every assertion falsifiable.
-  - **If a future port targets an emulator** (out of scope per spec), two additional surfaces would need spoofing: goldfish-named sensors (`SensorManager.getSensorList` — Java layer, ArtMethod hookable but ClassLoader-dependent) and loaded goldfish libs (would need `/proc/self/maps` filtering — already implemented in `Hooks.cpp` for `com.ims134.hookengine`/`libhookengine` paths, so extending the filter list covers it). Not pursued; device isn't an emulator.
+- Feature 5.11 — Debugger detect, property-gated JDWP (verified on-device S60). See §5.11 above.
+- Feature 5.12 — Emulator detect blocking (verified on-device S61). See §5.12 above.
+- Feature 5.13 — Test-keys detect blocking (verified on-device S62). See §5.13 above. Additional facts:
+  - **`Build.TAGS` cannot be written via reflection.** `public static final String` with constant initializer is compile-time constant-folded; `Field.set` throws `IllegalAccessException` even after `setAccessible(true)` and even via `HiddenApiBridge` bypass. This is a JVM language invariant, not a device wall — no Phase F work is deferred. `BuildSpoof.kt` deliberately not written.
+  - **`SigningInfo.mSigningDetails` is `api=blocked` on API 37.** Direct `Class.forName("android.content.pm.SigningInfo").getDeclaredField("mSigningDetails")` from the caller thread is DENIED (`using reflection: denied`). Route through `HiddenApiBridge.reflectGetDeclaredField`.
+  - **`Class.getDeclaredFields()` on `api=blocked` classes silently returns an empty array from the caller thread.** It does not throw. This is a silent filter — the field exists, it just isn't visible. Route enumeration through `HiddenApiBridge.reflectGetDeclaredFieldsArray`. This is the "0 fields scanned" symptom in probe #3.
+  - **MIUI/API 37 renamed AOSP's `SigningDetails.signatures` to `mSignatures`** and added a second `Signature[]` field `mPastSigningCertificates`. Both must be nulled. Field inventory logged by probe #4:
+    `[CREATOR:Creator, PAST_CERT_EXISTS:int, TAG:String, UNKNOWN:SigningDetails, mPastSigningCertificates:Signature[], mPublicKeys:ArraySet, mSignatureSchemeMinorVersion:int, mSignatureSchemeVersion:int, mSignatures:Signature[]]`.
+  - **Field-name-agnostic null-out is the robust approach.** Enumerate every non-static `Signature[]` field on `SigningDetails` and set to empty array. Survives future MIUI renames. Log the inventory of discovered fields so a future restructure that adds a new way to reach the signature array (method instead of field, etc.) surfaces immediately.
+  - **Detection-goal vs signature-surface distinction.** Feature 5.13's functional goal (a test-keys detector sees only release-keys values) is achieved by the property surface + natural `Build.TAGS` on this device. The signature null-out is orthognal — defense-in-depth for a future port to a test-keys-signing device where the sig could corroborate test-keys state. `BuildPropTest.signatureNulledLegacy` and `signatureNulledModern` are regression guards for PmSpoof, not 5.13 gates.
 
 ---
 
 ## The blunt version
 
-**Four categories complete:** Category 1 (Hook mechanisms, 9/9), Category 2 (Memory primitives, 7/7), Category 3 (IPC / kernel boundary, 7/7), Category 4 (Class loading, 6/6). Sessions 41–61 shipped twenty-three verified primitives, all on-device verified with fail-able tests:
+**Four categories complete:** Category 1 (Hook mechanisms, 9/9), Category 2 (Memory primitives, 7/7), Category 3 (IPC / kernel boundary, 7/7), Category 4 (Class loading, 6/6). Sessions 41–62 shipped twenty-four verified primitives, all on-device verified with fail-able tests:
 
 - 41: full ARM64 relocation (9 kinds)
 - 42: dynamic attach
@@ -886,9 +272,10 @@ Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–61:
 - 59: ADB detect blocking (⚠️ PARTIAL — property surface ✅, Settings walled)
 - 60: debugger detect blocking (✅ — property-gated JDWP)
 - 61: emulator detect blocking (✅ — real-device cleanliness + defensive kPropSpoofs)
+- 62: test-keys detect blocking (✅ — property surface + natural clean state + signature null-out guard)
 
-**183 registered tests, 0 failed at S61 close.** Session 61 took one probe and one test class: probe measured all five detector-readable surfaces on this physical device and confirmed every one is naturally clean — property surface, filesystem (0 of 15 emulator files exist), Build.* fields, sensors (51 real, 0 goldfish), loaded libs (0 goldfish/qemu in 3858 maps lines). No new hook code needed. The 6 `EmulatorDetectTest` assertions are regression guards — each one falsifiable on emulator or hook regression. S61 extends the S59/S60 meta-lesson family: "the functional goal may already be achieved by the process's real state."
+**191 registered tests, 0 failed at S62 close.** Session 62 took four probe iterations (one compile error, one `api=blocked` leak, one field rename, one silent `declaredFields` filter — four distinct walls in sequence), then one new test class. The PmSpoof signature null-out now clears both the legacy `PackageInfo.signatures` and the modern `SigningInfo.mSigningDetails.mSignatures` / `mPastSigningCertificates` via a name-agnostic enumeration over `SigningDetails.declaredFields` obtained through the HiddenApiBridge bypass. `Build.TAGS` reflection-write is refused by the JVM (public static final + constant init) and doesn't need to be spoofed on this device — the natural value is `release-keys`. S62's meta-lesson: "a single surface can be defended by multiple independent walls; each requires its own bypass. Instrument every step or you will chase the wrong wall."
 
-**Phase D closed.** Phase E (anti-detection completion, S59–S64) is three sessions in; Session 62 opens Feature 5.13 (test-keys / custom build detect). The remaining Phase E features (5.13, 5.14, 5.15, 5.16) will follow the same probe-first discipline: measure what's actually leaking on this device before writing any mechanism. Phase F (polish, S65–S75) is where the §5.10 Settings.Global disassembly and §5.11 Debug/VMDebug fast-JNI disassembly land. Session 75 is the target.
+**Phase D closed.** Phase E (anti-detection completion, S59–S64) is four sessions in; Session 63 opens Feature 5.14 (`/proc/net/tcp` blocking). The remaining Phase E features (5.14, 5.15, 5.16) will follow the same probe-first discipline: measure what's actually leaking on this device before writing any mechanism. Phase F (polish, S65–S75) is where the §5.10 Settings.Global disassembly and §5.11 Debug/VMDebug fast-JNI disassembly land. Session 75 is the target.
 
 **If a future session can't state a specific ⚠️/❌/🔧 → ✅ transition in one sentence, it's not a session.**

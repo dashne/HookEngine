@@ -13,6 +13,7 @@ import android.util.Log
 import java.lang.reflect.Field
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.InvocationTargetException
+import java.lang.reflect.Modifier
 import java.lang.reflect.Proxy
 
 object PmSpoof {
@@ -20,23 +21,12 @@ object PmSpoof {
 
     @Volatile var hiddenPackages: Set<String> = emptySet()
 
-    /**
-     * Session 18d — packages whose signatures should be nulled out on
-     * getPackageInfo. Superset of ownPkg because DualHost may load a
-     * guest whose own signature check must pass under our process.
-     */
     @Volatile var signatureNullOutPackages: Set<String> = emptySet()
 
-    /**
-     * Session 21 — guest archive paths for provider synthesis.
-     * Package name -> staged APK absolute path.
-     */
     @Volatile var guestArchives: Map<String, String> = emptyMap()
 
-    /** Host PackageManager captured at install — used for archive reads. */
     @Volatile private var hostPm: android.content.pm.PackageManager? = null
 
-    /** True only if proxy + list field are both in place. */
     fun isInstalled(): Boolean = storedProxy != null && listFieldResolved
 
     @Volatile private var storedProxy: Any? = null
@@ -95,7 +85,6 @@ object PmSpoof {
         val pkgName = ctx.packageName
 
         val handler = InvocationHandler { _, method, args ->
-            // Session 21b — first-line diagnostic
             if (method.name == "getProviderInfo" || method.name == "resolveContentProvider"
                 || method.name == "getServiceInfo" || method.name == "getActivityInfo"
                 || method.name == "getReceiverInfo") {
@@ -108,7 +97,6 @@ object PmSpoof {
             } catch (e: InvocationTargetException) {
                 val target = e.targetException
 
-                // getProviderInfo synthesis
                 if (method.name == "getProviderInfo" &&
                     target is android.content.pm.PackageManager.NameNotFoundException) {
                     val synthetic = synthesizeGuestProviderInfo(args)
@@ -117,7 +105,6 @@ object PmSpoof {
                         return@InvocationHandler synthetic
                     }
                 }
-                // getApplicationInfo synthesis
                 if (method.name == "getApplicationInfo" &&
                     target is android.content.pm.PackageManager.NameNotFoundException) {
                     val synthetic = synthesizeGuestApplicationInfo(args)
@@ -126,7 +113,6 @@ object PmSpoof {
                         return@InvocationHandler synthetic
                     }
                 }
-                // Session 22 — Service/Activity/Receiver synthesis (exception path)
                 if (method.name == "getServiceInfo" &&
                     target is android.content.pm.PackageManager.NameNotFoundException) {
                     val syn = synthesizeGuestComponentInfo(args, "getServiceInfo")
@@ -154,7 +140,6 @@ object PmSpoof {
                 throw target
             }
 
-            // getProviderInfo null-path
             if (result == null && method.name == "getProviderInfo") {
                 val synthetic = synthesizeGuestProviderInfo(args)
                 if (synthetic != null) {
@@ -162,7 +147,6 @@ object PmSpoof {
                     return@InvocationHandler synthetic
                 }
             }
-            // getApplicationInfo null-path
             if (result == null && method.name == "getApplicationInfo") {
                 val synthetic = synthesizeGuestApplicationInfo(args)
                 if (synthetic != null) {
@@ -170,7 +154,6 @@ object PmSpoof {
                     return@InvocationHandler synthetic
                 }
             }
-            // Session 22 — Service/Activity/Receiver synthesis (null path)
             if (result == null && method.name == "getServiceInfo") {
                 val syn = synthesizeGuestComponentInfo(args, "getServiceInfo")
                 if (syn != null) {
@@ -284,40 +267,16 @@ object PmSpoof {
         return result
     }
 
-    /**
-     * Session 21 — synthesize a ProviderInfo for a guest provider.
-     */
     private fun synthesizeGuestProviderInfo(args: Array<Any?>?): ProviderInfo? {
-        if (args == null || args.isEmpty()) {
-            Log.w(TAG, "synth: no args")
-            return null
-        }
-        val comp = args[0] as? ComponentName
-        if (comp == null) {
-            Log.w(TAG, "synth: args[0] is not ComponentName — actual ${args[0]?.javaClass?.name}")
-            return null
-        }
-        val guestApk = guestArchives[comp.packageName]
-        if (guestApk == null) {
-            Log.d(TAG, "synth: package ${comp.packageName} not in guestArchives ${guestArchives.keys}")
-            return null
-        }
-        val pm = hostPm
-        if (pm == null) {
-            Log.w(TAG, "synth: hostPm null")
-            return null
-        }
-
+        if (args == null || args.isEmpty()) return null
+        val comp = args[0] as? ComponentName ?: return null
+        val guestApk = guestArchives[comp.packageName] ?: return null
+        val pm = hostPm ?: return null
         val archives = try {
-            pm.getPackageArchiveInfo(
-                guestApk,
+            pm.getPackageArchiveInfo(guestApk,
                 android.content.pm.PackageManager.GET_PROVIDERS or
                         android.content.pm.PackageManager.GET_META_DATA)
-        } catch (t: Throwable) {
-            Log.w(TAG, "synthesizeGuestProviderInfo: archive read failed: $t")
-            return null
-        } ?: return null
-
+        } catch (_: Throwable) { null } ?: return null
         val providers = archives.providers ?: return null
         val wanted = comp.className
         val matching = providers.firstOrNull { p ->
@@ -325,12 +284,7 @@ object PmSpoof {
             name == wanted ||
                     (name.startsWith(".") && comp.packageName + name == wanted) ||
                     (!name.contains(".") && comp.packageName + "." + name == wanted)
-        } ?: run {
-            Log.d(TAG, "synthesizeGuestProviderInfo: no match for $wanted " +
-                    "in ${providers.size} providers")
-            return null
-        }
-
+        } ?: return null
         val ai = archives.applicationInfo ?: ApplicationInfo().apply {
             packageName = comp.packageName
             sourceDir = guestApk
@@ -339,15 +293,11 @@ object PmSpoof {
         ai.sourceDir = guestApk
         ai.publicSourceDir = guestApk
         if (ai.packageName.isNullOrEmpty()) ai.packageName = comp.packageName
-
         matching.packageName = comp.packageName
         matching.applicationInfo = ai
-        Log.d(TAG, "synthesizeGuestProviderInfo: OK for ${comp.flattenToString()} " +
-                "metaData=${matching.metaData?.keySet()?.joinToString(",") ?: "null"}")
         return matching
     }
 
-    /** Session 22 — synthesize ApplicationInfo for guest package. */
     private fun synthesizeGuestApplicationInfo(args: Array<Any?>?): ApplicationInfo? {
         if (args == null || args.isEmpty()) return null
         val pkg = args[0] as? String ?: return null
@@ -358,78 +308,47 @@ object PmSpoof {
         ai.sourceDir = guestApk
         ai.publicSourceDir = guestApk
         if (ai.packageName.isNullOrEmpty()) ai.packageName = pkg
-        Log.d(TAG, "synthesizeGuestApplicationInfo: OK for $pkg")
         return ai
     }
 
-    /**
-     * Session 22 — synthesize a ServiceInfo / ActivityInfo / ReceiverInfo
-     * for a guest component. Called on both null-return and exception paths
-     * of the proxy. Viber's onCreate (and pre-engine code) resolves its own
-     * components via PackageManager; AMS rejects (guest not installed) or
-     * returns null. Read the component from the archive and return it.
-     */
     private fun synthesizeGuestComponentInfo(
         args: Array<Any?>?,
         which: String
     ): ComponentInfo? {
-        if (args == null || args.isEmpty()) {
-            Log.d(TAG, "synth $which: no args")
-            return null
-        }
-        val comp = args[0] as? ComponentName ?: run {
-            Log.d(TAG, "synth $which: args[0] not ComponentName (${args[0]?.javaClass?.name})")
-            return null
-        }
-        val guestApk = guestArchives[comp.packageName] ?: run {
-            Log.d(TAG, "synth $which: pkg ${comp.packageName} not registered")
-            return null
-        }
+        if (args == null || args.isEmpty()) return null
+        val comp = args[0] as? ComponentName ?: return null
+        val guestApk = guestArchives[comp.packageName] ?: return null
         val pm = hostPm ?: return null
-
         val archives = try {
             pm.getPackageArchiveInfo(guestApk,
                 android.content.pm.PackageManager.GET_SERVICES or
                         android.content.pm.PackageManager.GET_ACTIVITIES or
                         android.content.pm.PackageManager.GET_RECEIVERS or
                         android.content.pm.PackageManager.GET_META_DATA)
-        } catch (t: Throwable) {
-            Log.w(TAG, "synth $which: archive read failed: $t")
-            return null
-        } ?: return null
-
+        } catch (_: Throwable) { null } ?: return null
         val candidates: List<ComponentInfo> = when (which) {
             "getServiceInfo"  -> archives.services?.toList() ?: emptyList()
             "getActivityInfo" -> archives.activities?.toList() ?: emptyList()
             "getReceiverInfo" -> archives.receivers?.toList() ?: emptyList()
             else -> return null
         }.filterNotNull()
-
         val wanted = comp.className
         val match = candidates.firstOrNull { c ->
             val name = c.name ?: return@firstOrNull false
             name == wanted ||
                     (name.startsWith(".") && comp.packageName + name == wanted) ||
                     (!name.contains(".") && comp.packageName + "." + name == wanted)
-        } ?: run {
-            Log.d(TAG, "synth $which: no match for $wanted in ${candidates.size} candidates " +
-                    "(all=${candidates.mapNotNull { it.name }})")
-            return null
-        }
-
-        val ai = archives.applicationInfo ?: run {
-            ApplicationInfo().apply {
-                packageName = comp.packageName
-                sourceDir = guestApk
-                publicSourceDir = guestApk
-            }
+        } ?: return null
+        val ai = archives.applicationInfo ?: ApplicationInfo().apply {
+            packageName = comp.packageName
+            sourceDir = guestApk
+            publicSourceDir = guestApk
         }
         ai.sourceDir = guestApk
         ai.publicSourceDir = guestApk
         if (ai.packageName.isNullOrEmpty()) ai.packageName = comp.packageName
         match.packageName = comp.packageName
         match.applicationInfo = ai
-        Log.d(TAG, "synth $which: OK for ${comp.flattenToString()}")
         return match
     }
 
@@ -439,10 +358,7 @@ object PmSpoof {
             val filtered = result.filter(keep)
             return if (filtered.size == result.size) result else filtered
         }
-        val field = cachedListField ?: run {
-            Log.w(TAG, "PmSpoof: no cached list field — returning unchanged")
-            return result
-        }
+        val field = cachedListField ?: return result
         val list = try {
             @Suppress("UNCHECKED_CAST")
             field.get(result) as? List<*>
@@ -451,11 +367,9 @@ object PmSpoof {
             null
         } ?: return result
         val filtered = list.filter(keep)
-        Log.d(TAG, "PmSpoof: filter ${list.size} -> ${filtered.size} (${result.javaClass.simpleName})")
         if (filtered.size == list.size) return result
         try {
             field.set(result, filtered)
-            Log.d(TAG, "PmSpoof: field.set OK size=${filtered.size}")
             return result
         } catch (t: Throwable) {
             Log.e(TAG, "PmSpoof: field.set failed: $t")
@@ -463,29 +377,120 @@ object PmSpoof {
         }
     }
 
+    /**
+     * Session 62 — signature null-out, probe iteration #3.
+     *
+     * ─── History ────────────────────────────────────────────────────
+     *
+     * Iteration 1: direct reflection, both paths. Legacy `signatures`
+     * nulled fine (api=unsupported); modern `signingInfo.mSigningDetails
+     * .signatures` refused with IllegalAccessException (api=blocked).
+     *
+     * Iteration 2: routing `mSigningDetails` through HiddenApiBridge got
+     * past the field-lookup wall, but `SigningDetails.signatures` threw
+     * NoSuchFieldException. The AOSP field name doesn't exist here.
+     *
+     * Iteration 3 (this): iterating `sdCls.declaredFields` from the
+     * caller thread returned 0 fields. That is the app-domain
+     * hidden-api filter on `api=blocked` classes: `getDeclaredFields()`
+     * returns an empty array without throwing. The field exists, it just
+     * isn't visible to an app-domain caller.
+     *
+     * ─── Fix ────────────────────────────────────────────────────────
+     *
+     * Route the field enumeration through
+     * `HiddenApiBridge.reflectGetDeclaredFieldsArray` — same bypass
+     * thread that reveals hidden fields. Then null EVERY non-static
+     * `Signature[]` field we find, name-agnostic. Log the full field
+     * inventory (name:type) so that on a future MIUI restructure we
+     * immediately see what the ROM has.
+     *
+     * ─── Strategic note ─────────────────────────────────────────────
+     *
+     * On THIS device, the signature is the real Xiaomi release
+     * signature — no test-keys detector triggers on it. The null-out is
+     * defense-in-depth for a future port or a device that happens to be
+     * test-keys-signed. Feature 5.13 (test-keys / custom-build detect)
+     * is satisfied by the property surface + natural Build.TAGS state
+     * regardless of this function's outcome. If the bypass route still
+     * fails, we document the modern-signature-path wall for Phase F
+     * and close 5.13 on the property/natural surface.
+     */
     internal fun nullOutSignatures(pi: PackageInfo) {
         try {
             val sigCls = Class.forName("android.content.pm.Signature")
             val empty = java.lang.reflect.Array.newInstance(sigCls, 0)
-            @Suppress("DEPRECATION")
-            val sigFld = PackageInfo::class.java.getDeclaredField("signatures")
-            sigFld.isAccessible = true
-            sigFld.set(pi, empty)
+
+            // ─── Legacy path — PackageInfo.signatures ────────────────
             try {
-                val siFld = PackageInfo::class.java.getDeclaredField("signingInfo")
-                siFld.isAccessible = true
+                @Suppress("DEPRECATION")
+                val sigFld = PackageInfo::class.java.getDeclaredField("signatures")
+                sigFld.isAccessible = true
+                sigFld.set(pi, empty)
+            } catch (t: Throwable) {
+                Log.w(TAG, "PmSpoof: legacy signatures null-out: " +
+                        "${t.javaClass.simpleName}: ${t.message}")
+            }
+
+            // ─── Modern path — PackageInfo.signingInfo.mSigningDetails ─
+            try {
+                val siFld = HiddenApiBridge.reflectGetDeclaredField(
+                    PackageInfo::class.java, "signingInfo")
+                if (siFld == null) return
+                if (!HiddenApiBridge.reflectSetAccessible(siFld)) return
                 val si = siFld.get(pi) ?: return
+
                 val siCls = Class.forName("android.content.pm.SigningInfo")
-                val sdFld = siCls.getDeclaredField("mSigningDetails")
-                sdFld.isAccessible = true
+                val sdFld = HiddenApiBridge.reflectGetDeclaredField(siCls, "mSigningDetails")
+                if (sdFld == null) return
+                if (!HiddenApiBridge.reflectSetAccessible(sdFld)) return
                 val sd = sdFld.get(si) ?: return
+
                 val sdCls = Class.forName("android.content.pm.SigningDetails")
-                val sigsFld = sdCls.getDeclaredField("signatures")
-                sigsFld.isAccessible = true
-                sigsFld.set(sd, empty)
-            } catch (_: Throwable) {}
+
+                // Enumerate fields through the bypass thread. Direct
+                // `sdCls.declaredFields` from the caller returns an empty
+                // array (probe #3: "0 fields scanned").
+                val fieldsArr = HiddenApiBridge.reflectGetDeclaredFieldsArray(sdCls)
+                if (fieldsArr == null) {
+                    Log.w(TAG, "PmSpoof: reflectGetDeclaredFieldsArray(SigningDetails) returned null")
+                    return
+                }
+                val fieldSummary = fieldsArr.joinToString(limit = 20) {
+                    "${it.name}:${it.type.simpleName}"
+                }
+                Log.d(TAG, "PmSpoof: SigningDetails fields via bypass = ${fieldsArr.size}: [$fieldSummary]")
+
+                var nulled = 0
+                for (f in fieldsArr) {
+                    if (Modifier.isStatic(f.modifiers)) continue
+                    if (!f.type.isArray) continue
+                    if (f.type.componentType != sigCls) continue
+                    if (!HiddenApiBridge.reflectSetAccessible(f)) {
+                        Log.w(TAG, "PmSpoof: setAccessible(SigningDetails.${f.name}) failed")
+                        continue
+                    }
+                    try {
+                        f.set(sd, empty)
+                        nulled++
+                        Log.d(TAG, "PmSpoof: nulled SigningDetails.${f.name}")
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "PmSpoof: failed to null SigningDetails.${f.name}: " +
+                                "${t.javaClass.simpleName}: ${t.message}")
+                    }
+                }
+                if (nulled == 0) {
+                    Log.w(TAG, "PmSpoof: no Signature[] field to null on SigningDetails " +
+                            "(${fieldsArr.size} fields scanned, inventory above)")
+                } else {
+                    Log.d(TAG, "PmSpoof: nulled $nulled Signature[] field(s) on SigningDetails")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "PmSpoof: signingInfo null-out: " +
+                        "${t.javaClass.simpleName}: ${t.message}")
+            }
         } catch (t: Throwable) {
-            Log.e(TAG, "PmSpoof: null-out failed: $t")
+            Log.e(TAG, "PmSpoof: null-out failed: ${t.javaClass.simpleName}: ${t.message}")
         }
     }
 }
