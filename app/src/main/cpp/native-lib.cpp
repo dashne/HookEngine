@@ -1870,4 +1870,48 @@ Java_com_ims134_hookengine_NativeTestBridge_flipAccNative(
         JNIEnv*, jobject, jlong addr) {
     return (jint)FastJniFlipAccNative((void*)(uintptr_t)addr);
 }
+// ─── Feature 6.8 — Signal-safe deferred uninstall JNI bridges ────────
+extern "C" int SignalSafeUninstallArm();
+extern "C" int SignalSafeUninstallDisarm();
+extern "C" int SignalSafeUninstallFromHandler(void* target);
+extern "C" int SignalSafeUninstallWaitFor(void* target, int timeoutMs);
+extern "C" void SignalSafeUninstallStats(long out[4]);
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_signalSafeUninstallArm(JNIEnv*, jobject) {
+    return (jint)SignalSafeUninstallArm();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_signalSafeUninstallDisarm(JNIEnv*, jobject) {
+    return (jint)SignalSafeUninstallDisarm();
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_signalSafeUninstallFromHandler(
+        JNIEnv*, jobject, jlong target) {
+    return (jint)SignalSafeUninstallFromHandler((void*)(uintptr_t)target);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_signalSafeUninstallWaitFor(
+        JNIEnv*, jobject, jlong target, jint timeoutMs) {
+    return (jint)SignalSafeUninstallWaitFor((void*)(uintptr_t)target, (int)timeoutMs);
+}
+
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_signalSafeUninstallStats(
+        JNIEnv* env, jobject) {
+    long stats[4] = {0, 0, 0, 0};
+    SignalSafeUninstallStats(stats);
+    jlongArray arr = env->NewLongArray(4);
+    if (arr) {
+        jlong vals[4] = {
+                (jlong)stats[0], (jlong)stats[1],
+                (jlong)stats[2], (jlong)stats[3]
+        };
+        env->SetLongArrayRegion(arr, 0, 4, vals);
+    }
+    return arr;
+}
 

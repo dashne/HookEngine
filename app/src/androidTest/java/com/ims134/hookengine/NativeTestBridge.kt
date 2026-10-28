@@ -191,4 +191,20 @@ object NativeTestBridge {
     external fun syntheticRemove(name: String): Int
     external fun syntheticCount(): Int
     external fun syntheticClearAll()
+
+    // ─── Feature 6.8 — Signal-safe deferred uninstall (S65) ──────────
+    // Arm() spawns the deferred worker thread and creates the eventfd.
+    // MUST be called from normal thread context before any signal-handler
+    // enqueue can succeed. Idempotent — second call returns 0.
+    external fun signalSafeUninstallArm(): Int
+    external fun signalSafeUninstallDisarm(): Int
+    // Async-signal-safe enqueue. Called from within a signal handler.
+    // Returns 0 on enqueue, -1 on queue full, -2 on null target, -3 if
+    // not armed. Never blocks and never allocates.
+    external fun signalSafeUninstallFromHandler(target: Long): Int
+    // Polls FindHandle(target) until null or timeout (normal context).
+    // Returns 0 if hook was uninstalled within timeout, -1 on timeout.
+    external fun signalSafeUninstallWaitFor(target: Long, timeoutMs: Int): Int
+    // Returns {enqueued, completed, failed, dropped} atomically.
+    external fun signalSafeUninstallStats(): LongArray
 }

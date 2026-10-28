@@ -27,6 +27,7 @@ struct SO_Slot {
 static SO_Slot          g_slots[kNSig] = {};
 static pthread_mutex_t  g_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+
 // Async-signal-safe dispatch. No locks, no allocs, no JNI.
 static void so_dispatch(int signo, siginfo_t* info, void* ucv) {
     if (signo <= 0 || signo >= kNSig) return;

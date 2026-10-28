@@ -5,6 +5,10 @@
 #include <android/log.h>
 #include <errno.h>
 #include <mutex>
+#include <sys/eventfd.h>
+#include <poll.h>
+#include <pthread.h>
+#include <time.h>
 #include "arm64_reloc.h"
 #include "HookRegistry.h"
 
@@ -59,35 +63,46 @@ static bool ReadPageProt(uintptr_t page, int *outProt) {
     return ok;
 }
 
+// ─── AllocateMemoryNear — Session 65 rewrite ─────────────────────────
+//
+// Old algorithm tried 1024 page offsets + 119 MB offsets — a fixed set of
+// SPECIFIC pages. When two targets are close together (e.g., two fixtures
+// in the same .so, a few KB apart), the first install consumes the free
+// pages near both targets; the second install's fixed offsets all land on
+// occupied pages and it returns nullptr even though plenty of free pages
+// exist further out. Session 65 replaced the fixed-offset list with a
+// page-by-page outward scan bounded by ±120MB. Fast case still 1-10
+// iterations; worst case ~30K (30ms of failed mmap(2) with MAP_FIXED_NOREPLACE,
+// which returns EEXIST immediately for occupied pages).
 void* AllocateMemoryNear(void* target, size_t size) {
     long pageSize = sysconf(_SC_PAGESIZE);
+    if (pageSize <= 0) return nullptr;
     uintptr_t targetAddr = (uintptr_t)target;
+    uintptr_t targetPage = targetAddr & ~(uintptr_t)(pageSize - 1);
     const uintptr_t MAX_DIST = 120UL * 1024 * 1024;
 
-    auto tryOffset = [&](uintptr_t off) -> void* {
-        uintptr_t cand[2];
-        int n = 0;
-        if (targetAddr >= off)       cand[n++] = (targetAddr - off) & ~(pageSize - 1);
-        if (targetAddr + off > off)  cand[n++] = (targetAddr + off) & ~(pageSize - 1);
-        for (int k = 0; k < n; k++) {
-            void* hint = (void*)cand[k];
-            void* m = mmap(hint, size, PROT_READ | PROT_WRITE | PROT_EXEC,
-                           MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-            if (m == MAP_FAILED) continue;
-            if (m != hint) { munmap(m, size); continue; }
-            uintptr_t got = (uintptr_t)m;
-            if (got > targetAddr + MAX_DIST || targetAddr > got + MAX_DIST) {
-                munmap(m, size); continue;
-            }
-            return m;
+    auto tryOnce = [&](uintptr_t cand) -> void* {
+        void* m = mmap((void*)cand, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
+        if (m == MAP_FAILED) return nullptr;
+        if (m != (void*)cand) { munmap(m, size); return nullptr; }
+        uintptr_t got = (uintptr_t)m;
+        if (got > targetAddr + MAX_DIST || targetAddr > got + MAX_DIST) {
+            munmap(m, size);
+            return nullptr;
         }
-        return nullptr;
+        return m;
     };
-    for (int i = 1; i <= 1024; i++) {
-        void* m = tryOffset((uintptr_t)i * pageSize); if (m) return m;
-    }
-    for (int i = 1; i < 120; i++) {
-        void* m = tryOffset((uintptr_t)i * 1024 * 1024); if (m) return m;
+
+    for (uintptr_t off = (uintptr_t)pageSize; off < MAX_DIST; off += (uintptr_t)pageSize) {
+        if (targetPage >= off) {
+            void* m = tryOnce(targetPage - off);
+            if (m) return m;
+        }
+        if (targetPage <= UINTPTR_MAX - off) {
+            void* m = tryOnce(targetPage + off);
+            if (m) return m;
+        }
     }
     return nullptr;
 }
@@ -303,22 +318,6 @@ extern "C" HookResult UninstallInlineHook(void* targetFunc) {
 }
 
 // ─── Feature 1.5 — dynamic runtime attach by computed address ──────
-//
-// InstallInlineHookEx already accepts any void* target, so the primitive
-// exists. AttachRuntime is the *engine-facing* API for callers that have
-// only a numeric address (dlsym result, /proc/maps walk, pattern scan,
-// captured return address) — not a symbol reference. It adds:
-//
-//   - Alignment guard (refuse addr & 3 != 0; write is 4 bytes)
-//   - Mapped-page guard (ReadPageProt must find the page)
-//   - Executable-page guard (refuse rw-/r-- targets — CPU would SIGSEGV
-//     the instant control reaches the patched page)
-//   - Replacement executable guard (same reason; relay branches straight
-//     into repl)
-//
-// Then delegates to InstallInlineHookEx. Refusal paths return
-// HOOK_TARGET_INVALID so callers can distinguish "bad input" from
-// "install machinery failed".
 
 extern "C" HookResult AttachRuntime(uint64_t addr, void* replacement, void** outOrig) {
     if (addr == 0 || replacement == nullptr) return HOOK_INTERNAL_ERROR;
@@ -330,13 +329,9 @@ extern "C" HookResult AttachRuntime(uint64_t addr, void* replacement, void** out
     uintptr_t targetPage = (uintptr_t)addr & ~((uintptr_t)pageSize - 1);
     int targetProt = 0;
     if (!ReadPageProt(targetPage, &targetProt)) {
-        // Not present in /proc/self/maps: address is unmapped.
         return HOOK_TARGET_INVALID;
     }
     if ((targetProt & PROT_EXEC) == 0) {
-        // Mapped but non-executable (data page, .bss, heap). Writing a
-        // B.imm26 there would corrupt data; if the CPU ever reached the
-        // patched word it would SIGSEGV on the non-exec page.
         return HOOK_TARGET_INVALID;
     }
 
@@ -351,4 +346,197 @@ extern "C" HookResult AttachRuntime(uint64_t addr, void* replacement, void** out
 extern "C" HookResult DetachRuntime(uint64_t addr) {
     if (addr == 0) return HOOK_INTERNAL_ERROR;
     return UninstallInlineHook((void*)(uintptr_t)addr);
+}
+
+// ─── Feature 6.8 — Signal-safe deferred uninstall ────────────────────
+//
+// UninstallInlineHook() is NOT async-signal-safe:
+//   - std::lock_guard<mutex>(g_hook_mutex) — pthread_mutex_lock, not on
+//     the POSIX async-signal-safe list
+//   - FindHandle / RegistryFree — second mutex (g_reg_mutex)
+//   - nanosleep(100ms) — not sig-safe, blocks handler for full grace
+//   Self-deadlock if signal fires on the thread already holding the lock.
+//
+// Deferred design: the signal handler enqueues the target into a
+// spinlock-protected SPSC ring buffer and writes one byte to an eventfd.
+// A dedicated worker thread (spawned by SignalSafeUninstallArm) drains
+// the queue and calls UninstallInlineHook() from normal thread context —
+// all existing mutex/nanosleep/munmap calls are safe there.
+//
+// Signal-handler stack usage: < 256 bytes (MINSIGSTKSZ is 8192 = 32×).
+// Signal-handler runtime: microseconds (CAS acquire + memcpy + write).
+// Zero changes to UninstallInlineHook — it stays normal-context.
+
+#define SIG_UNINSTALL_QUEUE_N 64
+
+static void*         g_sig_queue[SIG_UNINSTALL_QUEUE_N];
+static volatile long g_sig_head       = 0;
+static volatile long g_sig_tail       = 0;
+static volatile int  g_sig_prod_lock  = 0;
+static int           g_sig_wakeup_fd  = -1;
+static pthread_t     g_sig_worker;
+static volatile int  g_sig_armed      = 0;
+static volatile int  g_sig_shutdown   = 0;
+static volatile long g_sig_enqueued   = 0;
+static volatile long g_sig_completed  = 0;
+static volatile long g_sig_dropped    = 0;
+static volatile long g_sig_failed     = 0;
+
+static long SigUninstallNowMs() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
+static int SigUninstallEnqueue(void* target) {
+    int spins = 0;
+    while (__atomic_exchange_n(&g_sig_prod_lock, 1, __ATOMIC_ACQ_REL) != 0) {
+        if (++spins > 10000) {
+            __atomic_fetch_add(&g_sig_dropped, 1, __ATOMIC_RELAXED);
+            return -1;
+        }
+        __asm__ volatile("yield" ::: "memory");
+    }
+    long h = g_sig_head;
+    long t = __atomic_load_n(&g_sig_tail, __ATOMIC_ACQUIRE);
+    if (h - t >= SIG_UNINSTALL_QUEUE_N) {
+        __atomic_store_n(&g_sig_prod_lock, 0, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&g_sig_dropped, 1, __ATOMIC_RELAXED);
+        return -1;
+    }
+    g_sig_queue[h % SIG_UNINSTALL_QUEUE_N] = target;
+    __atomic_store_n(&g_sig_head, h + 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_sig_prod_lock, 0, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&g_sig_enqueued, 1, __ATOMIC_RELAXED);
+    return 0;
+}
+
+static int SigUninstallDequeue(void** out) {
+    long t = g_sig_tail;
+    long h = __atomic_load_n(&g_sig_head, __ATOMIC_ACQUIRE);
+    if (t == h) return 0;
+    *out = g_sig_queue[t % SIG_UNINSTALL_QUEUE_N];
+    __atomic_store_n(&g_sig_tail, t + 1, __ATOMIC_RELEASE);
+    return 1;
+}
+
+static void* SigUninstallWorkerMain(void*) {
+    while (true) {
+        struct pollfd pfd = { g_sig_wakeup_fd, POLLIN, 0 };
+        int pr = poll(&pfd, 1, 500);
+        if (pr > 0 && (pfd.revents & POLLIN)) {
+            uint64_t v = 0;
+            (void)read(g_sig_wakeup_fd, &v, sizeof(v));
+        }
+        void* target = nullptr;
+        while (SigUninstallDequeue(&target)) {
+            HookResult r = UninstallInlineHook(target);
+            if (r == HOOK_OK || r == HOOK_NOT_HOOKED) {
+                __atomic_fetch_add(&g_sig_completed, 1, __ATOMIC_RELAXED);
+            } else {
+                __atomic_fetch_add(&g_sig_failed, 1, __ATOMIC_RELAXED);
+                LOGE("SigUninstallWorker: UninstallInlineHook(%p) r=%d", target, (int)r);
+            }
+        }
+        if (__atomic_load_n(&g_sig_shutdown, __ATOMIC_ACQUIRE)) break;
+    }
+    return nullptr;
+}
+
+extern "C" int SignalSafeUninstallArm() {
+    if (__atomic_load_n(&g_sig_armed, __ATOMIC_ACQUIRE)) return 0;
+    // Session 65 fix: reset counters on fresh arm so each Arm/Disarm cycle
+    // observes only its own enqueue/completed/failed/dropped counts. Without
+    // this, counters accumulate across tests and stats assertions see stale
+    // values from prior Arm/Disarm cycles in the same process.
+    __atomic_store_n(&g_sig_enqueued,  0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_sig_completed, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_sig_failed,    0, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_sig_dropped,   0, __ATOMIC_RELAXED);
+    int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+    if (fd < 0) {
+        LOGE("SignalSafeUninstallArm: eventfd failed errno=%d", errno);
+        return -1;
+    }
+    g_sig_wakeup_fd = fd;
+    __atomic_store_n(&g_sig_shutdown, 0, __ATOMIC_RELEASE);
+    int rc = pthread_create(&g_sig_worker, nullptr, SigUninstallWorkerMain, nullptr);
+    if (rc != 0) {
+        LOGE("SignalSafeUninstallArm: pthread_create rc=%d", rc);
+        close(fd);
+        g_sig_wakeup_fd = -1;
+        return -2;
+    }
+    __atomic_store_n(&g_sig_armed, 1, __ATOMIC_RELEASE);
+    LOGD("SignalSafeUninstallArm: armed, wakeup_fd=%d", fd);
+    return 0;
+}
+
+extern "C" int SignalSafeUninstallDisarm() {
+    if (!__atomic_load_n(&g_sig_armed, __ATOMIC_ACQUIRE)) return 0;
+    __atomic_store_n(&g_sig_shutdown, 1, __ATOMIC_RELEASE);
+    if (g_sig_wakeup_fd >= 0) {
+        uint64_t v = 1;
+        (void)write(g_sig_wakeup_fd, &v, sizeof(v));
+    }
+    pthread_join(g_sig_worker, nullptr);
+    if (g_sig_wakeup_fd >= 0) {
+        close(g_sig_wakeup_fd);
+        g_sig_wakeup_fd = -1;
+    }
+    __atomic_store_n(&g_sig_armed, 0, __ATOMIC_RELEASE);
+    LOGD("SignalSafeUninstallDisarm: (enq=%ld done=%ld fail=%ld drop=%ld)",
+         __atomic_load_n(&g_sig_enqueued, __ATOMIC_RELAXED),
+         __atomic_load_n(&g_sig_completed, __ATOMIC_RELAXED),
+         __atomic_load_n(&g_sig_failed, __ATOMIC_RELAXED),
+         __atomic_load_n(&g_sig_dropped, __ATOMIC_RELAXED));
+    return 0;
+}
+
+extern "C" int SignalSafeUninstallFromHandler(void* target) {
+    if (!target) return -2;
+    if (!__atomic_load_n(&g_sig_armed, __ATOMIC_ACQUIRE)) return -3;
+    int rc = SigUninstallEnqueue(target);
+    if (rc != 0) return rc;
+    if (g_sig_wakeup_fd >= 0) {
+        uint64_t v = 1;
+        ssize_t w = write(g_sig_wakeup_fd, &v, sizeof(v));
+        (void)w;
+    }
+    return 0;
+}
+
+// Session 65 fix: WaitFor must wait for TWO things, not one:
+//   1. Target out of the registry (FindHandle==null)  — happens mid-UninstallInlineHook
+//   2. Stats counters reflect the enqueue             — happens AFTER
+//      UninstallInlineHook returns (i.e., after the 100ms nanosleep grace)
+// Without #2, WaitFor returns while the worker is still in its deferred-free
+// sleep; a caller that then reads stats sees completed=0 and thinks the
+// worker failed. The stats read must happen after BOTH conditions.
+extern "C" int SignalSafeUninstallWaitFor(void* target, int timeoutMs) {
+    if (!target) return -1;
+    long deadline = SigUninstallNowMs() + timeoutMs;
+    while (SigUninstallNowMs() < deadline) {
+        bool reg_clear = !FindHandle(target);
+        long enq  = __atomic_load_n(&g_sig_enqueued,  __ATOMIC_ACQUIRE);
+        long done = __atomic_load_n(&g_sig_completed, __ATOMIC_ACQUIRE);
+        long fail = __atomic_load_n(&g_sig_failed,    __ATOMIC_ACQUIRE);
+        if (reg_clear && (done + fail) >= enq) return 0;
+        struct timespec ts = { 0, 5 * 1000000L };
+        nanosleep(&ts, nullptr);
+    }
+    bool reg_clear = !FindHandle(target);
+    long enq  = __atomic_load_n(&g_sig_enqueued,  __ATOMIC_ACQUIRE);
+    long done = __atomic_load_n(&g_sig_completed, __ATOMIC_ACQUIRE);
+    long fail = __atomic_load_n(&g_sig_failed,    __ATOMIC_ACQUIRE);
+    if (reg_clear && (done + fail) >= enq) return 0;
+    return -1;
+}
+
+extern "C" void SignalSafeUninstallStats(long out[4]) {
+    if (!out) return;
+    out[0] = __atomic_load_n(&g_sig_enqueued,  __ATOMIC_RELAXED);
+    out[1] = __atomic_load_n(&g_sig_completed, __ATOMIC_RELAXED);
+    out[2] = __atomic_load_n(&g_sig_failed,    __ATOMIC_RELAXED);
+    out[3] = __atomic_load_n(&g_sig_dropped,   __ATOMIC_RELAXED);
 }

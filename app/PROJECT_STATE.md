@@ -1,38 +1,108 @@
 
-Three layers close the ptrace-attachment surface:
-1. **`/proc/self/syscall`** — readable but reveals only the reading
-   thread's *current* syscall. With no ptracer attached (5.9 ptrace-block,
-   5.11 property-gated JDWP), the syscall number is `epoll_pwait` or
-   another Looper syscall. Indistinguishable from any ordinary Android
-   process. Not a leak.
-2. **`/proc/self/stack`** — read-denied at kernel level via
-   `ptrace_may_access` capability check. `File.readText()` fails with
-   EACCES; `Os.open()` succeeds but `Os.read()` fails with EACCES
-   (errno=13). Even if kernel loosened, no ptracer means the trace would
-   show only kernel symbols — no user code state.
-3. **`/proc/self/status`** — `TracerPid: 0` forced by S23
-   `BuildFilteredStatus`. No ptrace-attachment signal via status.
+Three layers:
+1. **syscall** — readable but reveals only Looper state; no ptracer
+2. **stack** — kernel ptrace_may_access denies read
+3. **status** — TracerPid forced to 0 by S23
 
-**No Hooks.cpp changes. No IsSyscallPath / IsStackPath. No
-BuildFilteredSyscall / BuildFilteredStack.**
+**No Hooks.cpp changes.**
 
 ### The 3 assertions (from `CmdlineStackTest`)
 
-4. `syscallFileWellFormed` — `/proc/self/syscall` readable, 9-field standard format, syscall nr >= 0, sp/pc non-zero. Fails if kernel format changes OR file becomes unreadable.
-5. `stackReadDeniedAtKernel` — `/proc/self/stack` read-denied at BOTH the File path (via `File.readText()`) AND the direct Os path (`Os.open()` + `Os.read()`). Both must return EACCES. Fails if a future ROM loosens the `ptrace_may_access` capability check.
-6. `tracerPidForcedZero` — `/proc/self/status` `TracerPid: 0`. Fails if S23 `BuildFilteredStatus` regresses OR a debugger is attached.
+4. `syscallFileWellFormed` — 9 fields, sp/pc non-zero
+5. `stackReadDeniedAtKernel` — EACCES on both File and Os.read paths
+6. `tracerPidForcedZero` — TracerPid: 0
 
-### Meta-lesson (S64)
+**Meta-lesson (S64):** "the functional goal may be achieved at multiple
+independent layers of the stack."
 
-**"The functional goal may be achieved by kernel capability check +
-absence of state + framework filter, in combination."** The ptrace-attachment
-signal is closed by:
-- Kernel capability check (stack read denied)
-- Absence of state (no ptracer → syscall shows nothing anomalous)
-- Framework filter (status TracerPid forced to 0)
+---
 
-Three layers, each from a different tier (kernel / process / Java), each
-doing part of the work.
+## §6.8 Signal-safe uninstall — deferred SPSC queue + worker thread (Session 65)
+
+**Functional goal:** uninstall is safe from any signal handler context.
+
+**The probe (S65) audited `UninstallInlineHook` and confirmed three
+async-signal-safety violations in the current path:**
+
+1. `std::lock_guard<mutex>(g_hook_mutex)` — pthread_mutex_lock, not on the
+   POSIX async-signal-safe list. Self-deadlock if signal fires on the
+   thread holding the lock.
+2. `FindHandle` / `RegistryFree` — second mutex (`g_reg_mutex`).
+3. `nanosleep(100ms)` — not sig-safe, blocks the handler for the full
+   deferred-free grace period.
+
+**Deadlock classes:**
+- **Class A (self):** signal fires on thread holding `g_hook_mutex`,
+  handler tries to acquire → deadlock.
+- **Class B (cross):** signal fires on thread A while thread B holds
+  `g_hook_mutex` → A blocks 100ms+, transitive AB-BA possible if B itself
+  is interrupted.
+
+**Mechanism — deferred uninstall via lock-free SPSC ring buffer + worker
+thread.** The classic Frida / Cydia Substrate / Xposed pattern.
+
+- **Signal handler** (`fixture_deferred_uninstall` in `SignalOverrideJni.cpp`):
+  calls `SignalSafeUninstallFromHandler(target)` → spinlock CAS + memcpy +
+  `write(eventfd)` → returns in ~100us.
+- **Worker thread** (spawned by `SignalSafeUninstallArm`):
+  `poll(eventfd)` → drain queue → call `UninstallInlineHook(target)` from
+  normal thread context. All existing mutex/nanosleep/munmap calls are
+  safe here.
+- **Zero changes to `UninstallInlineHook`** — it stays normal-context.
+
+**Signal-handler stack usage: < 256 bytes** (MINSIGSTKSZ is 8192 = 32×).
+**Signal-handler runtime: ~100us** (S65 log: `raise returned in 97us`).
+
+**Three test failures across three subsystems, three fixes:**
+
+| # | Failure | Subsystem | Fix |
+|---|---|---|---|
+| 1 | `deferredUninstallFromSignalHandler` — `completed expected 1 but was 0` | Observation timing | `SignalSafeUninstallWaitFor` now waits for **both** `FindHandle(target)==null` **AND** `(done+fail) >= enq`. The old condition returned during the worker's 100ms deferred-free grace period, before `g_sig_completed` incremented. |
+| 2 | `statsMatchQueueOperations` / `multipleSignalsSequential` — `attach t2 returned 6` (HOOK_ALLOC_FAILED) | Memory allocator | `AllocateMemoryNear` rewritten: page-by-page outward scan bounded by ±120MB. The old fixed-offset list (1024 pages + 119 MB-strides) couldn't find free pages when two targets were 3KB apart — t1's relay+tramp consumed t2's candidate pages. Fast case 1-10 iterations; worst case ~30K. |
+| 3 | `armDisarmRoundTrip` / others — stats accumulated across Arm/Disarm cycles | Stats reset | `SignalSafeUninstallArm` resets enq/done/fail/drop counters on fresh arm. |
+
+**The 6 assertions in `SignalSafeUninstallTest` (all Rule-12 falsifiable):**
+
+1. `armDisarmRoundTrip` — Arm/Disarm idempotency (return 0, second call returns 0)
+2. `deferredUninstallFromSignalHandler` — core: install hook → arm → install handler → raise signal → WaitFor → verify hook uninstalled → verify stats `enq=1 done=1 fail=0 drop=0`. If the deferred design were broken (e.g., handler tried to call UninstallInlineHook directly from signal context), the process would deadlock or crash — the test would time out, not pass.
+3. `multipleSignalsSequential` — 3 signals in sequence; verify `enq=3 done=3`
+4. `statsMatchQueueOperations` — direct enqueue bypasses signal delivery, isolates queue mechanics
+5. `unarmedSignalIsNoOp` — FromHandler returns -3, hook still fires, WaitFor times out
+6. `signalHandlerDoesNotDeadlockUnderContention` — contention thread + signal raise + WaitFor under 2s. If the handler blocked on g_hook_mutex, process would hang (WaitFor times out). S65 log: `raise returned in 97us`, `WaitFor returned 0`.
+
+**Native surface (S65 additions):**
+
+- `SignalSafeUninstallArm()` — spawn worker + create eventfd, reset counters. Must be called from normal thread context before any signal-handler enqueue.
+- `SignalSafeUninstallDisarm()` — stop worker, close fd, log final counters. Idempotent.
+- `SignalSafeUninstallFromHandler(void* target)` — async-signal-safe enqueue. Returns 0 on success, -1 queue full, -2 null target, -3 not armed.
+- `SignalSafeUninstallWaitFor(void* target, int timeoutMs)` — poll until both reg-clear and stats-settled.
+- `SignalSafeUninstallStats(long out[4])` — {enqueued, completed, failed, dropped}.
+- `fixture_deferred_uninstall` — new signal handler (handlerId == 2) in `SignalOverrideJni.cpp`; routes `sigovrInstall(signo, 2, target)` to the deferred handler with target as userCtx.
+
+**Design constants:**
+- `SIG_UNINSTALL_QUEUE_N = 64` — SPSC ring buffer size
+- Worker poll timeout: 500ms — balances shutdown responsiveness vs. wasted wakeups
+- WaitFor poll interval: 5ms — bounded latency, no busy-spin
+
+**Meta-lesson (S65, opens Phase F class):** "Non-trivial native features
+reveal bugs one subsystem at a time. The SPSC queue was correct; the memory
+allocator assumed targets were far apart; the stats observation assumed
+the worker completed before FindHandle cleared. Three fixes to three
+subsystems, all exposed by three distinct test failures. Do not assume a
+feature is one coherent block — the log reveals which subsystem's
+invariant is being violated."
+
+This is the first genuine native-deliverable session since S58, and it
+required 3 orthogonal fixes to pass. It's the S62 class extended one layer
+deeper: not just "multiple walls on one surface" but "multiple subsystems
+in one feature."
+
+**Test-isolation note:** `SignalSafeUninstallTest.@Before` disarms any
+prior arm (idempotent), resets sigovr, calls `uninstallAll`. `@After`
+does the same in reverse. Signal used is `SIGRTMIN+20` to avoid S52's
+`SIGRTMIN+5/6` and any ART-reserved signals. Signal handler installed
+per-test (not via attachBaseContext) since arming and disarming are
+test-scoped.
 
 ---
 
@@ -44,17 +114,17 @@ Viber is used for **one purpose**: verify that the engine primitives still work 
 - `booted-viber-order` + no new FATAL + providers ≥14 = canary green
 - Any new FATAL, any boot regression, any provider count drop = canary red
 
-**Canary state at Session 64 close (fresh process):** `outcome=booted-viber-order`, `elapsedMs=1696ms` (S63/S64 identical — zero engine changes between), `providersAttempted=15`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise, unchanged from S61–S63). Verified from a fresh process at S64 close.
+**Canary state at Session 65 close (fresh process):** `outcome=booted-viber-order`, `elapsedMs ~1696ms`, `providersAttempted=15`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise, unchanged from S61–S64). S65's changes (`InlineHooker.cpp` uninstall path + allocation) don't affect the boot harness — expected identical to S64.
 
-**Measurement discipline:** canary must be measured from fresh process — `-e class com.ims134.hookengine.GuestLoadTest` as the only class. In-suite readings (~position 100 of 205) show `providersAttempted=3, providersSucceeded=2` because 100 test classes fragment the process — that is **not** the canary measurement.
+**Measurement discipline:** canary must be measured from fresh process — `-e class com.ims134.hookengine.GuestLoadTest` as the only class.
 
 ---
 
-## Test suite state (as of Session 64 close)
+## Test suite state (as of Session 65 close)
 
-**Executed:** 199 · **Registered:** 205 · **Ignored:** 6 · **Failed:** 0
+**Executed:** 206 · **Registered:** 212 · **Ignored:** 6 · **Failed:** 0
 
-Registered test classes (post-S64):
+Registered test classes (post-S65):
 
 | Class | Tests | Status |
 |---|---|---|
@@ -96,11 +166,12 @@ Registered test classes (post-S64):
 | EmulatorDetectTest | 6 | ✅ S61 |
 | BuildPropTest | 6 | ✅ S62 |
 | NetTcpTest | 6 | ✅ S63 |
-| **CmdlineStackTest** | **6** | **✅ S64** |
+| CmdlineStackTest | 6 | ✅ S64 |
+| **SignalSafeUninstallTest** | **6** | **✅ S65** |
 | GuestLoadTest | 1 | ✅ (canary) |
 | ActivityBootProbeTest | 1 | 🔒 ignored |
 | IntegrationTest | 1 | ✅ |
-| Diagnostic probes | several (incl. DebuggerDetectProbeTest 1, DebuggerDetectProbe2Test 2, EmulatorDetectProbeTest 1, BuildPropProbeTest 1, NetTcpProbeTest 1, **CmdlineStackProbeTest 1**) | non-gating |
+| Diagnostic probes | several (incl. DebuggerDetectProbeTest 1, DebuggerDetectProbe2Test 2, EmulatorDetectProbeTest 1, BuildPropProbeTest 1, NetTcpProbeTest 1, CmdlineStackProbeTest 1, **SignalSafeUninstallProbeTest 1**) | non-gating |
 
 **Test count history (registered; the count includes `@Ignore`'d test methods):**
 - S40: 51 · S41: 51 · S42: 57 · S43: 63 · S44: 68 · S45: 74 · S46: 80 · S47: 86 · S48: 92 · S49: 98
@@ -110,37 +181,43 @@ Registered test classes (post-S64):
 - S58 close: 155
 - S59 close: 168
 - S60 close: 177
-- S61 close: 183 per handoff / 184 measured in-session
+- S61 close: 183 / 184 measured
 - S62 close: 191
 - S63 close: 198
-- **S64 close: 205** (+7: CmdlineStackProbeTest 1, CmdlineStackTest 6)
+- S64 close: 205
+- **S65 close: 212** (+7: SignalSafeUninstallProbeTest 1, SignalSafeUninstallTest 6)
 
 ---
 
-## Session 65 first actions (authoritative)
+## Session 66 first actions (authoritative)
 
-Phase E is CLOSED. Session 65 opens Phase F with Feature 6.8 (signal-safe uninstall).
+Phase E closed at S64. Phase F opened at S65. Session 66 targets Feature 8.7 (per-hook profiling).
 
-1. Confirm Session 64 commit landed (`git log --oneline -3`).
-2. **Fresh-process canary rerun** to confirm S64 no-regression. Expected
+1. Confirm Session 65 commit landed (`git log --oneline -3`).
+2. **Fresh-process canary rerun** to confirm S65 no-regression. Expected
    `outcome=booted-viber-order`, `providersAttempted=15`, `providersSucceeded=14`.
-3. **Probe the signal-safe uninstall surface first.** Before writing any code:
-  - Read `InlineHooker.cpp` `UninstallInlineHook` — current implementation, known non-signal-safe paths (mutex acquisition, `munmap`, `nanosleep` deferred-free).
-  - Read `HookRegistry.h` / `HookRegistry.cpp` — registry locking, `RegistryFree` under mutex.
-  - Probe: from a SIGRTMIN+N handler, attempt to call `UninstallInlineHook` on a known target. Does it deadlock, crash, or complete?
-  - Probe: what path does `UninstallAllHooks` take when called from signal context?
-  - Determine minimum required changes to make the uninstall path async-signal-safe.
-  - Expected mechanism candidates:
-    - **Deferred uninstall:** signal handler enqueues an "uninstall request" via lock-free SPSC queue; a dedicated thread (spawned at engine init) drains it and performs the actual uninstall. Signal handler returns immediately. This is the classic Frida / Android runtime pattern.
-    - **Lock-free registry read:** replace `g_reg_mutex` with an RCU-like scheme so registry reads (needed to find the handle) are lock-free from signal context. The write side stays mutex-protected.
-    - **Atomic state transitions:** `HS_INSTALLED` → `HS_REMOVING` via `__atomic_exchange_n` so concurrent install and signal-context uninstall cannot both claim the same slot.
-  - Likely **real native code** this session — signal-safe uninstall requires reworking `InlineHooker.cpp` and `HookRegistry.cpp`. This is a genuine C++ deliverable.
-4. Write `SignalSafeUninstallTest.kt` (or `SignalSafeUninstallProbeTest.kt` first if the mechanism isn't obvious from code inspection).
+3. **Probe the per-hook profiling surface first.** Before writing any code:
+    - Enumerate every hook site currently registered (ChainHook slots, SvcHook slots, RetMod slots, RegInspect slots, InlineHooker registry, ArtMethodTrace slots).
+    - For each: what is the current per-call overhead in the handler path (CPU) and the per-hook persistent allocation (memory)?
+    - For each: what is the cost of instrumenting that overhead? (e.g., `clock_gettime(CLOCK_MONOTONIC_RAW)` per dispatch = ~30-50ns; alternative: `CNTVCT_EL0` register read = ~1-3ns.)
+    - Determine whether per-hook profiling is feasible without slowing the handler path significantly. If `clock_gettime` in every handler is too expensive, consider sampling (e.g., every Nth dispatch) or a separate-profile-only mode.
+    - Design: `HookProfile` struct with `{u64 total_ns, u64 call_count, u64 min_ns, u64 max_ns, u32 mem_bytes}`. Recording happens inside the handler via `rdtsc`-equivalent (`mrs x0, cntvct_el0`).
+    - Likely candidates to instrument: ChainHook dispatcher (`chain_dispatch_helper`), ReturnMod dispatcher (`retmod_dispatch_helper`), InlineHooker relay (requires modifying `InstallInlineHookEx` relay), SvcHook SIGTRAP handler.
+    - Simplest viable: add profiling to ChainHook and ReturnMod first (they already have C++ dispatch helpers), verify approach works, then extend to InlineHooker.
+4. Write `HookProfileProbeTest.kt` if the surface isn't obvious from code inspection (which it mostly is — this is a "measure existing cost" probe).
 5. Build + install (`.\build-and-install.ps1`).
 6. `am instrument` gate 1.
 7. Full suite gate.
 8. Canary gate.
-9. Commit, mark 6.8 → ✅.
+9. Commit, mark 8.7 → ✅.
+
+**Expected mechanism candidates for 8.7:**
+- **CNTVCT_EL0-based timing** — per-dispatch timing via the ARM64 virtual counter, reads in ~1-3ns on modern cores. Zero syscall overhead. Wraps `mrs x0, cntvct_el0` around the user handler call in each dispatcher.
+- **Per-hook persistent storage** — extend `HookHandle` (in `HookRegistry.h`) with a `HookProfile` sub-struct, or add a parallel array.
+- **Memory accounting** — for InlineHooker, relay+tramp pages are already tracked (`relay_size`, `tramp_size`); sum them per guest tag. For ChainHook, stub page is fixed (32 bytes); per-slot overhead is the handler array pointers (~128 bytes).
+- **JNI surface** — `NativeTestBridge.hookProfileStats(target) -> long[4]` = {call_count, total_ns, min_ns, max_ns}, plus `hookProfileMemBytes(target) -> int`.
+
+**Likely scope:** Medium. Touches `ChainHook.cpp`, `ReturnMod.cpp`, `HookRegistry.h/.cpp`, and adds a new `HookProfile.cpp` (or extends `HookRegistry.cpp`). ~300 lines of new C++, ~150 lines of test. Not as deep as S65's signal-safe work, but not a no-op session either.
 
 ---
 
@@ -164,12 +241,13 @@ Phase E is CLOSED. Session 65 opens Phase F with Feature 6.8 (signal-safe uninst
 - **The S62 meta-lesson:** a single surface can be defended by multiple independent walls; each requires its own bypass. Instrument every step and log the state at each hop, or you will chase the wrong wall.
 - **The S63 meta-lesson:** the functional goal may already be achieved by OS-level MAC policy — one layer below the process, one layer below device identity and natural data. Probe the kernel-policy layer before writing memfd filters.
 - **The S64 meta-lesson:** the functional goal may be achieved at multiple independent layers of the stack: framework identity spoof, status filter, kernel capability check, absence of state, OS MAC policy, hardware identity, natural data state. Probe the deepest layer first, then work up.
+- **The S65 meta-lesson:** non-trivial native features reveal bugs one subsystem at a time. The SPSC queue was correct; the memory allocator assumed targets were far apart; the stats observation assumed the worker completed before FindHandle cleared. Three fixes to three subsystems, all exposed by three distinct test failures. Do not assume a feature is one coherent block — the log reveals which subsystem's invariant is being violated.
 
 ---
 
 ## Hard-won facts (canonical reference)
 
-Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–64:
+Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–65:
 
 - `SYS_getpid` / `SYS_getuid` via `syscall()` bypass both inline and GOT hooks. (S33, verified S34.)
 - AttributionSource layout differs by construction path. (S32/33, verified S34.)
@@ -187,68 +265,77 @@ Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–64:
 - Feature 2.7 — Register state inspection mechanism (verified on-device S48). 784-byte frame, per-slot naked stub, dispatcher memcpy into `g_snapshots[slot]`. MRS NZCV returns flags in bits 31:28, not 3:0 (ARM ARM DDI 0487 C5.2.53). x17 clobbered by `InstallInlineHookEx` relay. x16 accurate.
 - Feature 2.1 / 2.2 / 2.3 — MemoryOps mechanism (verified on-device S49). MemRead / MemWrite / MemScan validate against `/proc/self/maps`; MemWrite mprotects each page to RW, writes, restores orig (Rule 10 preserved on every path). `MEMOPS_MAX_PAGES = 8`. `__builtin___clear_cache` on data pages is a no-op.
 - Feature 2.5 — Maps enumeration mechanism (verified on-device S50).
-  - `MemEnumMaps` / `MemEnumMapsFilter` / `MemFindRegionContaining` with `MemMapEntry { uintptr_t start; uintptr_t end; int prot; uint64_t offset; uint32_t dev_major; uint32_t dev_minor; uint64_t inode; char path[256]; }`.
-  - `MAPS_MAX_ENTRIES = 8192` — instrumentation process genuinely has >1024 entries.
-  - `sscanf` on Bionic drops the trailing pathname even with valid `%255[^\n]` or `%n`. `ParseMapsLine` uses manual `strtoul` walker.
-  - `fgets` line buffer must be 2048+.
+    - `MemEnumMaps` / `MemEnumMapsFilter` / `MemFindRegionContaining` with `MemMapEntry { uintptr_t start; uintptr_t end; int prot; uint64_t offset; uint32_t dev_major; uint32_t dev_minor; uint64_t inode; char path[256]; }`.
+    - `MAPS_MAX_ENTRIES = 8192` — instrumentation process genuinely has >1024 entries.
+    - `sscanf` on Bionic drops the trailing pathname even with valid `%255[^\n]` or `%n`. `ParseMapsLine` uses manual `strtoul` walker.
+    - `fgets` line buffer must be 2048+.
 - Feature 3.4 — ServiceManager lookup interception (verified on-device S51). See §Cache-hit wall above for full mechanism table.
 - Feature 3.6 — Signal handling override (verified on-device S52).
-  - `sigaction`-based per-signal slot install. `so_dispatch` runs in signal-safe context.
-  - Two actions: `SIGOVR_PASS_THROUGH` chains to previous handler; `SIGOVR_SUPPRESS` swallows without chaining.
-  - **SIGUSR1 and SIGUSR2 are reserved by ART.** The `Signal Catcher` thread does `sigwait()` on `{SIGQUIT, SIGUSR1, SIGUSR2}`. A `sigaction` handler on these signals is installed successfully but **never invoked**. Use `SIGRTMIN + N` for user-triggered signal tests.
-  - **`_NSIG` is a compile-time constant (65 on bionic), `SIGRTMAX` is a function call.** VLA at file scope from `SIGRTMAX` will not compile.
-  - **Do not use `std::atomic<T>` with `__atomic_*_n` primitives.** Use plain `int` / `uint64_t` accessed via `__atomic_*_n`.
-  - **Uninstall must reset `fire_count`** for re-entrant cleanliness.
+    - `sigaction`-based per-signal slot install. `so_dispatch` runs in signal-safe context.
+    - Two actions: `SIGOVR_PASS_THROUGH` chains to previous handler; `SIGOVR_SUPPRESS` swallows without chaining.
+    - **SIGUSR1 and SIGUSR2 are reserved by ART.** The `Signal Catcher` thread does `sigwait()` on `{SIGQUIT, SIGUSR1, SIGUSR2}`. A `sigaction` handler on these signals is installed successfully but **never invoked**. Use `SIGRTMIN + N` for user-triggered signal tests.
+    - **`_NSIG` is a compile-time constant (65 on bionic), `SIGRTMAX` is a function call.** VLA at file scope from `SIGRTMAX` will not compile.
+    - **Do not use `std::atomic<T>` with `__atomic_*_n` primitives.** Use plain `int` / `uint64_t` accessed via `__atomic_*_n`.
+    - **Uninstall must reset `fire_count`** for re-entrant cleanliness.
 - Feature 2.8 — Backtrace from hook site (verified on-device S53).
-  - FP-chain walker: `[fp+0]` → next fp, `[fp+8]` → saved LR. ARM64 ABI: 16-byte-aligned fps, descending stack.
-  - Guards: PROT_EXEC check for each pc, 16-byte alignment for each fp, `next_fp > cur_fp` monotonicity for cycle detection, bounded at `BT_MAX_FRAMES=32`.
-  - `__builtin_frame_address(0)` in `BacktraceCaptureHere` forces frame establishment.
-  - `BacktraceFilterOutLib(frames, n, "libhookengine.so")` strips engine frames.
-  - Integration with Feature 2.7: at hook site, `x29` / `x30` from `RegInspect` feed directly into `BacktraceCaptureFromContext(x29, x30)`.
+    - FP-chain walker: `[fp+0]` → next fp, `[fp+8]` → saved LR. ARM64 ABI: 16-byte-aligned fps, descending stack.
+    - Guards: PROT_EXEC check for each pc, 16-byte alignment for each fp, `next_fp > cur_fp` monotonicity for cycle detection, bounded at `BT_MAX_FRAMES=32`.
+    - `__builtin_frame_address(0)` in `BacktraceCaptureHere` forces frame establishment.
+    - `BacktraceFilterOutLib(frames, n, "libhookengine.so")` strips engine frames.
 - Feature 4.2 — Native ClassLoader chaining (verified on-device S54).
-  - `nativeFNLN(guest, host)` in `NativeFnln.cpp` orchestrates the merge in C++: read `guest.pathList.dexElements`, read `host.pathList.dexElements`, dedupe host elements by identity (`IsSameObject`), prepend host-only to guest, write back via `Field.set`.
-  - Hidden-api reflection still goes through `HiddenApiBridge` — the merge logic owns the algorithm, the bypass primitive is the same.
-  - `habFindFieldInHierarchy` walks the superclass chain: `PathClassLoader` has no `pathList`, but `BaseDexClassLoader` does.
-  - `IsSameObject` must be used for identity comparison across local/global refs.
-  - Return codes: 0 success, -1 invalid args, -2 pathList not found, -3 dexElements not found, -4 field get/set methodIDs not found, -5 pathList read failed, -6 dexElements read failed, -7 element class lookup failed, -8 merged array allocation failed, -9 Field.set threw.
+    - `nativeFNLN(guest, host)` in `NativeFnln.cpp` orchestrates the merge in C++.
+    - Hidden-api reflection still goes through `HiddenApiBridge`.
+    - `habFindFieldInHierarchy` walks the superclass chain: `PathClassLoader` has no `pathList`, but `BaseDexClassLoader` does.
+    - `IsSameObject` must be used for identity comparison across local/global refs.
+    - Return codes: 0 success, -1 invalid args, -2 pathList not found, -3 dexElements not found, -4 field get/set methodIDs not found, -5 pathList read failed, -6 dexElements read failed, -7 element class lookup failed, -8 merged array allocation failed, -9 Field.set threw.
 - Feature 4.3 — Dynamic DEX loading (verified on-device S55).
-  - `DexLoaderCreate(env, dexPath, optimizedDir, parent)` in `DexLoader.cpp` constructs `dalvik/system/DexClassLoader` entirely in C++.
-  - **ART initiator-binding quirk:** chain the loader into the target, then let the target be the first to load the class. Do NOT pre-load via the source loader before chaining.
-  - **Common wall:** `DexClassLoader` construction fails with "Attempt to register dex file ... with multiple class loaders" when the dex path is already loaded by another loader whose elements aren't shared with the new loader's parent chain.
+    - `DexLoaderCreate(env, dexPath, optimizedDir, parent)` in `DexLoader.cpp`.
+    - **ART initiator-binding quirk:** chain the loader into the target, then let the target be the first to load the class.
+    - **Common wall:** `DexClassLoader` construction fails with "Attempt to register dex file ... with multiple class loaders" when the dex path is already loaded by another loader whose elements aren't shared with the new loader's parent chain.
 - Feature 4.4 — DEX merging at runtime (verified on-device S56).
-  - Multi-path `DexClassLoader("pathA:pathB", optDir, null, parent)` accepts `:`-separated path list natively.
-  - **ClassLoaderContext classpath size mismatch** message from ART is informational, not an error.
+    - Multi-path `DexClassLoader("pathA:pathB", optDir, null, parent)` accepts `:`-separated path list natively.
+    - **ClassLoaderContext classpath size mismatch** message from ART is informational, not an error.
 - Feature 7.6 — PLT stub resolution (verified on-device S57).
-  - `PltResolveForSymbol(lib_substr, symbol)` in `PltResolver.cpp`: mmaps on-disk ELF, walks `.dynsym`, `.dynstr`, `.rela.plt`, `.plt` or `.plt.sec`.
-  - **Prefer `.plt.sec` when present** (BTI-enabled layout on API 37+). Each 16-byte entry = one `.rela.plt` slot, 0-based.
-  - **Fallback to `.plt`** — try base offsets 32 and 48; validate first instruction word (`adrp` or `bti c`).
+    - `PltResolveForSymbol(lib_substr, symbol)` in `PltResolver.cpp`: mmaps on-disk ELF, walks `.dynsym`, `.dynstr`, `.rela.plt`, `.plt` or `.plt.sec`.
+    - **Prefer `.plt.sec` when present** (BTI-enabled layout on API 37+). Each 16-byte entry = one `.rela.plt` slot, 0-based.
+    - **Fallback to `.plt`** — try base offsets 32 and 48; validate first instruction word (`adrp` or `bti c`).
 - Feature 3.7 — Native ServiceManager addition (verified on-device S58).
-  - **Primary mechanism:** JNI-impl inline hook on `android_os_Parcel_nativeReadStrongBinder` in `libandroid_runtime.so`.
-  - **The symbol is NOT exported** — scan .so's mapped memory for the string, find JNINativeMethod.name at that pointer, fnPtr at `+16`.
-  - **Composition with 3.4:** alias rewrite essential. Reply-Parcel mutation does not work on MIUI/API 37.
-  - **Same-process only.**
+    - **Primary mechanism:** JNI-impl inline hook on `android_os_Parcel_nativeReadStrongBinder` in `libandroid_runtime.so`.
+    - **The symbol is NOT exported** — scan .so's mapped memory for the string, find JNINativeMethod.name at that pointer, fnPtr at `+16`.
+    - **Composition with 3.4:** alias rewrite essential. Reply-Parcel mutation does not work on MIUI/API 37.
+    - **Same-process only.**
 - Feature 5.11 — Debugger detect, property-gated JDWP (verified on-device S60). See §5.11 above.
 - Feature 5.12 — Emulator detect blocking (verified on-device S61). See §5.12 above.
 - Feature 5.13 — Test-keys detect blocking (verified on-device S62). See §5.13 above.
 - Feature 5.14 — /proc/net/tcp blocking via SELinux MAC policy (verified on-device S63). See §5.14 above. Additional facts:
-  - `/proc/net/tcp`, `/proc/net/tcp6`, `/proc/net/udp`, `/proc/net/udp6` are classified `proc_net_tcp_udp`. `/proc/net/unix` is `proc_net`. Both DENY `{ read }` to `untrusted_app` with `permissive=0`.
-  - `Os.open()` returns the same `EACCES` as `File.readText()`. Denial at kernel level, not JVM.
-  - `NativeTestBridge.readFileRaw` (raw `openat`) returns 0 bytes.
-  - **S42 loopback-bind wall regressed** on current ROM build. `ServerSocket().bind()` now succeeds. Phase F candidate.
-- Feature 5.15 — /proc/self/cmdline full spoof (verified on-device S64). See §5.15 above. Additional facts:
-  - **S19 `setArgV0` produces exactly 1 argv entry.** Kernel/Android NUL-pads the original buffer size. No residual args.
-  - **`/proc/self/environ` is 19 standard Android env vars.** No engine identity.
-- Feature 5.16 — /proc/self/syscall + stack filter (verified on-device S64). See §5.16 above. Additional facts:
-  - **`/proc/self/syscall` format: 9 fields, whitespace-separated.** `<nr> <arg0> <arg1> <arg2> <arg3> <arg4> <arg5> <sp> <pc>`. `sp` and `pc` are hex-prefixed.
-  - **`/proc/self/stack` read-denied by kernel `ptrace_may_access` capability check.** `File.readText()` throws `IOException: read failed: EACCES`. `Os.open()` succeeds (file exists, read permission check passes on open), but `Os.read(fd, ...)` throws `ErrnoException EACCES (errno=13)`. This is a **kernel capability check**, not SELinux — no AVC line in logcat.
-  - **`/proc/self/status` TracerPid: 0** via S23 `BuildFilteredStatus`.
-  - **Path aliasing:** `/proc/self/<file>` works, `/proc/<pid>/<file>` works only for the caller's own pid. `/proc/<uid>/<file>` returns ENOENT — don't confuse pid with uid in path construction.
+    - `/proc/net/tcp`, `/proc/net/tcp6`, `/proc/net/udp`, `/proc/net/udp6` are classified `proc_net_tcp_udp`. `/proc/net/unix` is `proc_net`. Both DENY `{ read }` to `untrusted_app` with `permissive=0`.
+    - `Os.open()` returns the same `EACCES` as `File.readText()`. Denial at kernel level, not JVM.
+    - `NativeTestBridge.readFileRaw` (raw `openat`) returns 0 bytes.
+    - **S42 loopback-bind wall regressed** on current ROM build. `ServerSocket().bind()` now succeeds. Phase F candidate (S67).
+- Feature 5.15 — /proc/self/cmdline full spoof (verified on-device S64). See §5.15 above.
+    - **S19 `setArgV0` produces exactly 1 argv entry.** Kernel/Android NUL-pads the original buffer size. No residual args.
+    - **`/proc/self/environ` is 19 standard Android env vars.** No engine identity.
+- Feature 5.16 — /proc/self/syscall + stack filter (verified on-device S64). See §5.16 above.
+    - **`/proc/self/syscall` format: 9 fields, whitespace-separated.** `<nr> <arg0> <arg1> <arg2> <arg3> <arg4> <arg5> <sp> <pc>`. `sp` and `pc` are hex-prefixed.
+    - **`/proc/self/stack` read-denied by kernel `ptrace_may_access` capability check.** `File.readText()` throws `IOException: read failed: EACCES`. `Os.open()` succeeds, but `Os.read(fd, ...)` throws `ErrnoException EACCES (errno=13)`. This is a **kernel capability check**, not SELinux — no AVC line.
+    - **`/proc/self/status` TracerPid: 0** via S23 `BuildFilteredStatus`.
+    - **Path aliasing:** `/proc/self/<file>` works, `/proc/<pid>/<file>` works only for the caller's own pid.
+- Feature 6.8 — Signal-safe deferred uninstall (verified on-device S65). See §6.8 above. Additional facts:
+    - **`UninstallInlineHook` has three async-signal-safety violations:** two mutex acquisitions + nanosleep(100ms). The deferred pattern bypasses all three by offloading to a worker thread.
+    - **SPSC ring buffer with spinlock-protected producer is sufficient.** The signal handler is single-threaded (one signal at a time per thread), so the "MPSC" concern doesn't apply; a spinlock CAS around the producer is safe and adds ~20ns worst case.
+    - **`eventfd(EFD_NONBLOCK | EFD_CLOEXEC)` is the wakeup primitive.** `write(fd, &u64_one, 8)` from signal context is on the POSIX async-signal-safe list. Alternative `pipe()` would also work but eventfd avoids the extra file descriptor overhead.
+    - **`AllocateMemoryNear`'s fixed-offset scan (1024 pages + 119 MB-strides) fails when two targets are within ~4KB of each other.** The first install consumes the free pages near both targets; the second install's fixed offsets all land on occupied pages. Fix: page-by-page outward scan. Fast case is 1-10 iterations (the offset just past the target's page). Worst case is ~30K iterations (mmap with MAP_FIXED_NOREPLACE fails fast — ~1us per EEXIST).
+    - **`SignalSafeUninstallWaitFor` must wait for BOTH conditions:** registry-clear AND stats-settled. The registry clears inside `UninstallInlineHook`'s mutex; the stats increment happens after `UninstallInlineHook` returns — and UninstallInlineHook includes the 100ms deferred-free nanosleep. If WaitFor returns on registry-clear only, a caller reading stats immediately sees `completed=0`.
+    - **`SignalSafeUninstallArm` must reset counters on fresh arm.** Tests run in sequence in the same process; without reset, stats accumulate and assertions on `enqueued==1` fail on the 2nd test.
+    - **`SIGRTMIN+20` avoids S52's `SIGRTMIN+5/6` and any ART-reserved signals.** `SIGRTMIN` is a function call on bionic (__libc_current_sigrtmin), not a constant.
+    - **Signal handler stack usage is < 256 bytes.** CAS acquire + memcpy(8) + write(8). Even MINSIGSTKSZ (8192) is 32× more than needed.
+    - **Signal handler runtime is ~100us on this device.** The S65 log shows `raise returned in 97us`. This is the full path: sigqueue → kernel dispatch → so_dispatch → fixture_deferred_uninstall → SigUninstallEnqueue + eventfd write → return.
 
 ---
 
 ## The blunt version
 
-**Four categories complete:** Category 1 (Hook mechanisms, 9/9), Category 2 (Memory primitives, 7/7), Category 3 (IPC / kernel boundary, 7/7), Category 4 (Class loading, 6/6). **Phase E CLOSED** — 5.11 through 5.16 all ✅, only 5.10 remains ⚠️ PARTIAL (Settings.Global walled). Sessions 41–64 shipped twenty-seven verified primitives, all on-device verified with fail-able tests:
+**Four categories complete:** Category 1 (Hook mechanisms, 9/9), Category 2 (Memory primitives, 7/7), Category 3 (IPC / kernel boundary, 7/7), Category 4 (Class loading, 6/6). **Phase E CLOSED** at S64 — 5.11–5.16 all ✅, only 5.10 remains ⚠️ PARTIAL. **Phase F opened at S65** — 6.8 signal-safe uninstall ✅. Sessions 41–65 shipped twenty-eight verified primitives, all on-device verified with fail-able tests:
 
 - 41: full ARM64 relocation (9 kinds)
 - 42: dynamic attach
@@ -274,23 +361,14 @@ Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–64:
 - 62: test-keys detect blocking (✅ — property surface + natural clean state + signature null-out guard)
 - 63: /proc/net/tcp blocking (✅ — OS-level SELinux MAC policy)
 - 64: /proc/self/cmdline + syscall/stack filter (✅ — S19 setArgV0 + kernel ptrace_may_access + S23 TracerPid)
+- 65: signal-safe uninstall (✅ — deferred SPSC queue + worker thread; `AllocateMemoryNear` page-scan rewrite)
 
-**205 registered tests, 0 failed at S64 close.** Session 64 closes the last two Phase E features without native code because the OS already achieves both goals. The probe established:
+**212 registered tests, 0 failed at S65 close.** Session 65 opened Phase F with a **genuine native deliverable** — the first since S58. The probe audited `UninstallInlineHook` and confirmed three async-signal-safety violations (two mutex acquisitions + nanosleep). The deferred pattern (Frida / Cydia Substrate / Xposed standard) fixed all three: signal handler enqueues into an SPSC ring buffer and returns in ~100us; worker thread drains and calls `UninstallInlineHook` from normal thread context.
 
-- **5.15 (cmdline):** S19 `setArgV0` produces a single, clean argv entry. `environ` has no engine identity. Nothing to filter.
-- **5.16 (syscall + stack):** `/proc/self/syscall` readable but reveals only Looper state (no ptracer → no leak). `/proc/self/stack` read-denied at kernel level via `ptrace_may_access`. `TracerPid: 0` via S23 filter.
+**Three test failures across three subsystems, three fixes.** The SPSC queue was correct. The memory allocator assumed targets were far apart (fixed 3KB → `HOOK_ALLOC_FAILED` when two fixtures in the same .so). The stats observation assumed the worker completed before `FindHandle` cleared (race with the 100ms grace). Three fixes to three subsystems — allocator (page-scan), observation timing (WaitFor double-condition), stats reset (Arm clears counters) — all exposed by three distinct test failures.
 
-**This is not avoiding native code.** Phase A–D shipped 18 native primitives. S59 and S62 both added real work (property surface + `PmSpoof.nullOutSignatures` 4-wall bypass). S60, S61, S63, S64 all measured that the goal was already achieved at a layer below the engine. **Writing code that can never fire is the Rule 12 violation, not skipping it.**
+**S65 extends the meta-lesson family into Phase F:** S59/S60/S61/S62 were about "the goal may already be achieved by an existing layer." S65 is about "a feature that looks like one block is actually three subsystems with three invariants." Both are the same discipline: **do not trust a naive reading of the code; the log reveals what's actually happening.**
 
-**The S64 meta-lesson extends the family into its deepest form yet:**
-
-1. **S61:** hardware identity — the device is real.
-2. **S62:** data content — Build.TAGS, signature naturally clean.
-3. **S63:** kernel MAC policy — SELinux denies app-domain reads of /proc/net/*.
-4. **S64:** multiple independent layers in combination — framework identity spoof (setArgV0) + status filter (TracerPid) + kernel capability check (ptrace_may_access) + absence of state (no ptracer).
-
-Each layer is a different kind of "the goal is already achieved without engine code." **The engine's Phase E work is to measure which layer defends each surface and write falsifiable regression guards at that layer.** When a wall breaks, the guard goes red and the next session writes the native code that the wall now requires.
-
-**Phase F opens at Session 65.** Remaining native work: 6.8 (signal-safe uninstall — genuine C++ rework of `InlineHooker` / `HookRegistry`), 8.7 (per-hook profiling — native CPU/memory accounting per handler), 7.1 (unified ELF API — consolidate the 5 scattered dynsym/symtab/hash walkers), 8.2 (per-hook argument logging — extend ChainHook dispatch). And the disassembly work: S51 cache-hit, S60 Debug/VMDebug fast-JNI, §5.10 Settings.Global shared-mem path, S63 loopback-bind wall re-measurement. Session 75 is the target.
+**Phase F is 1/11 sessions in.** Remaining native work: 8.7 (per-hook profiling), 7.1 (unified ELF API), 8.2 (per-hook argument logging), plus the S67 loopback-bind wall re-measurement and Phase F disassembly items (S51 cache-hit, S60 Debug/VMDebug fast-JNI, §5.10 Settings.Global shared-mem path). Session 75 is the target.
 
 **If a future session can't state a specific ⚠️/❌/🔧 → ✅ transition in one sentence, it's not a session.**

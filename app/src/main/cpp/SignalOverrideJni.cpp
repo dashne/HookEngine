@@ -43,6 +43,25 @@ static SignalOverrideAction fixture_suppress_record(int, siginfo_t* info, void* 
     return SIGOVR_SUPPRESS;
 }
 
+// ─── Session 65 — Feature 6.8 deferred uninstall fixture ─────────────
+// Runs in signal context. Enqueues the target (passed via user_ctx)
+// into the signal-safe queue; the deferred worker thread performs the
+// actual UninstallInlineHook from normal thread context. Returns
+// SIGOVR_SUPPRESS so the signal doesn't chain to any prior handler.
+// Enqueue path is <10us: spinlock CAS + memcpy + write(eventfd).
+extern "C" int SignalSafeUninstallFromHandler(void* target);
+
+static SignalOverrideAction fixture_deferred_uninstall(int, siginfo_t*, void*, void* ctx) {
+    void* target = ctx;
+    if (target) {
+        int rc = SignalSafeUninstallFromHandler(target);
+        if (rc != 0) {
+            LOGD("fixture_deferred_uninstall: enqueue failed rc=%d target=%p", rc, target);
+        }
+    }
+    return SIGOVR_SUPPRESS;
+}
+
 // ─── Raw sigaction installation for chain-to-previous tests ──────────
 static int               g_raw_sigaction_count = 0;
 static void raw_sigaction_handler(int, siginfo_t*, void*) {
@@ -55,12 +74,13 @@ static int               g_raw_installed[kNSig] = {};
 
 extern "C" JNIEXPORT jint JNICALL
 Java_com_ims134_hookengine_NativeTestBridge_sigovrInstall(
-        JNIEnv*, jobject, jint signo, jint handlerId, jlong /*userCtx*/) {
+        JNIEnv*, jobject, jint signo, jint handlerId, jlong userCtx) {
     SignalOverrideHandler h = nullptr;
     if (handlerId == 0) h = fixture_pass_record;
     else if (handlerId == 1) h = fixture_suppress_record;
+    else if (handlerId == 2) h = fixture_deferred_uninstall;   // S65
     else return -1;
-    return (jint)SignalOverrideInstall((int)signo, h, nullptr);
+    return (jint)SignalOverrideInstall((int)signo, h, (void*)(uintptr_t)userCtx);
 }
 
 extern "C" JNIEXPORT jint JNICALL
