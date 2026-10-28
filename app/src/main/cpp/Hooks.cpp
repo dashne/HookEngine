@@ -111,6 +111,27 @@ static const PropSpoof kPropSpoofs[] = {
         {"ro.build.type","user"}, {"ro.kernel.qemu",""}, {"ro.boot.qemu",""},
         {"init.svc.adbd","stopped"}, {"service.adb.root",""}, {"sys.oem_unlock_allowed","0"},
         {"ro.adb.secure","1"},   // Session 59 — Feature 5.10
+        // Session 70 — Feature 5.6: bootloader-integrity tell set.
+        //
+        // These five are the canonical "unlocked bootloader / modified
+        // system" signals read by common Android detection libraries.
+        // Values below are the clean-device values. On THIS device the
+        // real values were measured clean at S70 start (see PROJECT_STATE
+        // §5.6), so these entries are behavior-neutral here and exist to
+        // guarantee the clean answer survives a ROM update or a port to a
+        // device whose real values are tampered. On a device where any of
+        // these really is the tampered value, the entry is load-bearing and
+        // BuildPropTest fails honestly if it is removed.
+        //
+        // Do NOT add ro.product.first_api_level or
+        // ro.build.version.security_patch — a fabricated value for either
+        // manufactures an inconsistency with Build.VERSION.* and the APK's
+        // minSdk, which is a louder tell than the real value. See §5.6.
+        {"ro.boot.verifiedbootstate", "green"},
+        {"ro.boot.flash.locked",      "1"},
+        {"ro.boot.veritymode",        "enforcing"},
+        {"ro.boot.warranty_bit",      "0"},
+        {"ro.warranty_bit",           "0"},
         {nullptr, nullptr}
 };
 
@@ -123,14 +144,25 @@ static const char* LookupSpoof(const char* name) {
 
 #define PROP_VALUE_MAX 92
 struct FakeProp { uint32_t serial; char value[PROP_VALUE_MAX]; char name[64]; int in_use; };
-static FakeProp g_fakeProps[16];
+// Session 70 — Feature 5.6: pool raised from 16 to 32. Slots are allocated
+// one-per-distinct-spoofed-name and are never released (in_use stays 1 for
+// the lifetime of the process), so this array size is the hard ceiling on
+// how many spoofed names can ever be `__system_property_find`-able. At 16
+// slots and 15 spoofed names the old ceiling had zero headroom. The
+// static_assert below turns any future overflow into a build failure
+// instead of a silent Fake___system_property_find returning nullptr.
+static FakeProp g_fakeProps[32];
 static std::mutex g_fakePropMutex;
+
+static_assert((sizeof(kPropSpoofs) / sizeof(kPropSpoofs[0]) - 1) <=
+              (sizeof(g_fakeProps) / sizeof(g_fakeProps[0])),
+              "kPropSpoofs exceeds g_fakeProps pool — raise g_fakeProps size");
 
 static FakeProp* AllocFakeProp(const char* name, const char* value) {
     std::lock_guard<std::mutex> lock(g_fakePropMutex);
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 32; i++)
         if (g_fakeProps[i].in_use && strcmp(g_fakeProps[i].name, name) == 0) return &g_fakeProps[i];
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < 32; i++) {
         if (!g_fakeProps[i].in_use) {
             g_fakeProps[i].in_use = 1;
             g_fakeProps[i].serial = 1;

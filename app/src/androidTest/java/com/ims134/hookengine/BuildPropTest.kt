@@ -15,95 +15,86 @@ import org.junit.runner.RunWith
 
 /**
  * Session 62 — Feature 5.13: test-keys / custom-build detect blocking.
+ * Session 70 — Feature 5.6:  build-property coverage (bootloader-integrity
+ *                            tell set added to kPropSpoofs).
  *
- * ─── Mechanism: two surfaces, four assertions on detect + two on sig ──
+ * ─── Mechanism: property surface + device real state ───────────────
  *
- * A test-keys detector reads two surfaces:
+ * A test-keys / integrity detector reads two surfaces:
  *
- *   (1) PROPERTY SURFACE — `SystemProperties.get("ro.build.tags")` etc.
- *       S59's kPropSpoofs in Hooks.cpp already forces:
+ *   (1) PROPERTY SURFACE — `SystemProperties.get("ro.build.tags")`, etc.
+ *       S59's kPropSpoofs in Hooks.cpp already forced:
  *         ro.build.tags     -> "release-keys"
  *         ro.build.type     -> "user"
  *         ro.secure         -> "1"
  *         ro.debuggable     -> "0"
  *         ro.adb.secure     -> "1"
- *       via the GOT hook on libandroid_runtime.so. Verified live by
- *       BuildPropProbeTest Q1 (S62 probes #1–#4).
+ *       via the GOT hook on libandroid_runtime.so.
+ *
+ *       S70 extends kPropSpoofs with the bootloader-integrity tell set
+ *       that detection libraries read as "unlocked bootloader / modified
+ *       system":
+ *         ro.boot.verifiedbootstate -> "green"
+ *         ro.boot.flash.locked      -> "1"
+ *         ro.boot.veritymode        -> "enforcing"
+ *         ro.boot.warranty_bit      -> "0"
+ *         ro.warranty_bit           -> "0"
+ *       On THIS device the real values were measured clean at S70 start,
+ *       so the entries are behavior-neutral here and exist to guarantee the
+ *       clean answer survives a ROM update or a port. On a device where any
+ *       of these really is the tampered value, the entry is load-bearing
+ *       and the assertions below fail honestly if it is removed.
  *
  *   (2) JAVA STATIC-FINAL SURFACE — `Build.TAGS`, `Build.TYPE`, etc.
  *       Populated at zygote init from ro.build.* BEFORE any hook can
  *       land. Not affected by the property spoof. Writing to these
  *       fields is refused by the JVM (S62 probe #1, Q3:
- *       `IllegalAccessException: Cannot set public static final field`)
- *       because a `public static final String` with a constant
- *       initializer is compile-time constant-folded into bytecode.
- *       This is a JVM language invariant, not a defeatable wall, so
- *       no BuildSpoof.kt is written. On THIS device they read
- *       naturally clean ("release-keys" / "user") because the device
- *       is a release-signed Xiaomi build.
+ *       `IllegalAccessException: Cannot set public static final field`).
+ *       This is a JVM language invariant, not a defeatable wall. On THIS
+ *       device they read naturally clean ("release-keys" / "user")
+ *       because the device is a release-signed Xiaomi build.
  *
- * The functional goal — a detector reading test-keys indicators sees
- * only release-keys values — is achieved by the property surface plus
- * the device's real state.
+ * ─── Signature surface (paired regression guard) ───────────────────
  *
- * ─── Signature surface (paired regression guard) ──────────────────
- *
- * Test-keys detection is sometimes paired with signature-check
- * shielding (a detector verifies the APK's signing certificate to
- * confirm test-keys signing, or the reverse — hiding that a real
- * signature is present). S18's PmSpoof.nullOutSignatures clears the
- * legacy `PackageInfo.signatures`. S62 extended it to cover the modern
+ * Test-keys detection is sometimes paired with signature-check shielding.
+ * S18's PmSpoof.nullOutSignatures clears the legacy `PackageInfo.signatures`.
+ * S62 extended it to cover the modern
  * `PackageInfo.signingInfo.mSigningDetails.{mSignatures,
- * mPastSigningCertificates}` path — MIUI/API 37 renamed AOSP's
- * `signatures` field AND added a second Signature[] field, AND the
- * whole class was `api=blocked` for reflection. The S62 fix uses the
- * HiddenApiBridge bypass to enumerate SigningDetails.declaredFields
- * (which a caller-side read filters to an empty array) and nulls
- * every non-static Signature[] found. See PROJECT_STATE §5.13 for the
- * four-wall iteration history.
- *
- * Both signature paths are asserted here as regression guards — they
- * don't gate 5.13 per se, but a PmSpoof regression would re-open a
- * distinct signature-leak surface that a detector could use as
- * corroborating evidence.
+ * mPastSigningCertificates}` path. Both are asserted here as regression
+ * guards.
  *
  * ─── Rule 12 — every assertion is falsifiable ─────────────────────
  *
- *   1. roBuildTagsRelease           — fails if property GOT hook
- *                                     regresses, OR device is test-keys-
- *                                     signed, OR S59 kPropSpoofs entry
- *                                     removed.
- *   2. buildTagsStaticRelease       — fails if Build.TAGS contains
- *                                     "test-keys" (device-side or
- *                                     corruption) OR is not
- *                                     "release-keys".
- *   3. roSecureIsOne                — fails on a production build with
- *                                     ro.secure != "1" OR if S59
- *                                     kPropSpoofs loses ro.secure.
- *   4. buildTagsPropertyMatchesStatic — cross-check; fails if the two
- *                                     surfaces diverge (would reveal a
- *                                     future port to a test-keys device
- *                                     where the spoof returns
- *                                     "release-keys" but Build.TAGS
- *                                     still says "test-keys"). This is
- *                                     the honest-position guard.
- *   5. signatureNulledLegacy        — fails if PmSpoof proxy install
- *                                     fails OR the legacy null-out
- *                                     path regresses.
- *   6. signatureNulledModern        — fails if S62's bypass-based
- *                                     mSignatures/mPastSigningCertificates
- *                                     null-out regresses (the modern-
- *                                     signature regression guard).
+ *   1.  roBuildTagsRelease            — property GOT hook regressed OR
+ *                                       device is test-keys-signed.
+ *   2.  buildTagsStaticRelease        — Build.TAGS contains "test-keys"
+ *                                       OR is not "release-keys".
+ *   3.  roSecureIsOne                 — ro.secure != "1" (spoof lost or
+ *                                       device genuinely insecure).
+ *   4.  buildTagsPropertyMatchesStatic — surfaces diverge (future port
+ *                                       to a test-keys device).
+ *   5.  signatureNulledLegacy         — legacy signatures survive null-out.
+ *   6.  signatureNulledModern         — modern mSignatures /
+ *                                       mPastSigningCertificates survive.
+ *   7.  roBootVerifiedBootStateGreen  — "orange"/"yellow"/"red" leaks
+ *                                       through, OR spoof entry removed
+ *                                       on a device whose real state is
+ *                                       non-green.
+ *   8.  roBootFlashLockedOne          — "0" leaks (bootloader unlocked
+ *                                       signal).
+ *   9.  roBootVeritymodeEnforcing     — "disabled"/"logging" leaks.
+ *  10.  roBootWarrantyBitZero         — "1" leaks (tamper recorded).
+ *  11.  roWarrantyBitZero             — vendor-side companion leaks.
  *
- * ─── Test isolation ──────────────────────────────────────────────
+ * Every assertion reads the value through SystemProperties.get — the
+ * real GOT-hooked path. "installFileHooks() returned 0" is never asserted
+ * as evidence of anything (S59 meta-lesson).
+ *
+ * ─── Test isolation ────────────────────────────────────────────────
  *
  * @Before calls NativeTestBridge.installFileHooks() — the property GOT
  * hook lives on libandroid_runtime.so and is torn down by any earlier
- * test's NativeTestBridge.uninstallAll() (ConditionalHookTest and
- * AdbDetectTest precede this class alphabetically and both call it in
- * @After). Idempotent — returns 0 whether hooks are already present or
- * need to be re-installed. Same pattern as AdbDetectTest,
- * DebuggerDetectTest, EmulatorDetectTest.
+ * test's NativeTestBridge.uninstallAll(). Idempotent.
  */
 @RunWith(AndroidJUnit4::class)
 class BuildPropTest {
@@ -127,6 +118,8 @@ class BuildPropTest {
         val rc = NativeTestBridge.installFileHooks()
         Log.d(TAG, "installFileHooks() = $rc (0 = OK)")
     }
+
+    // ─── Feature 5.13 — test-keys surface ─────────────────────────────
 
     @Test
     fun roBuildTagsRelease() {
@@ -226,5 +219,81 @@ class BuildPropTest {
                     "bypass route regresses OR a future ROM adds a Signature[] " +
                     "field that survives null-out.",
             apkCerts == null || apkCerts.isEmpty())
+    }
+
+    // ─── Feature 5.6 — bootloader-integrity tell set ──────────────────
+    //
+    // These five assert the property surface returns the clean-device
+    // value. Each is falsifiable by exactly two independent failures:
+    //   (a) the kPropSpoofs entry is removed AND the device's real value
+    //       is the tampered value, or
+    //   (b) the property GOT hook on libandroid_runtime.so regresses.
+    // On THIS device the real values are clean, so (a) is currently
+    // inoperative — meaning these are regression guards today and become
+    // load-bearing if the device state ever changes. That is the honest
+    // posture (S61 meta-lesson: the functional goal may already be
+    // achieved by the process's real state).
+
+    @Test
+    fun roBootVerifiedBootStateGreen() {
+        val v = sysProp("ro.boot.verifiedbootstate")
+        Log.d(TAG, "SystemProperties[ro.boot.verifiedbootstate] = '$v'")
+        assertEquals(
+            "ro.boot.verifiedbootstate must be 'green' — 'orange' (unlocked " +
+                    "bootloader) or 'yellow' (custom key) are the primary " +
+                    "integrity tells. Fails if (a) the S70 kPropSpoofs entry " +
+                    "is removed AND the device reports a non-green state, or " +
+                    "(b) the property GOT hook on libandroid_runtime.so " +
+                    "regresses.",
+            "green", v)
+    }
+
+    @Test
+    fun roBootFlashLockedOne() {
+        val v = sysProp("ro.boot.flash.locked")
+        Log.d(TAG, "SystemProperties[ro.boot.flash.locked] = '$v'")
+        assertEquals(
+            "ro.boot.flash.locked must be '1' — '0' means flashing is " +
+                    "permitted, i.e. the bootloader is unlocked. Fails if the " +
+                    "S70 kPropSpoofs entry is removed AND the device reports " +
+                    "'0', or if the property GOT hook regresses.",
+            "1", v)
+    }
+
+    @Test
+    fun roBootVeritymodeEnforcing() {
+        val v = sysProp("ro.boot.veritymode")
+        Log.d(TAG, "SystemProperties[ro.boot.veritymode] = '$v'")
+        assertEquals(
+            "ro.boot.veritymode must be 'enforcing' — 'disabled' or " +
+                    "'logging' indicates dm-verity has been turned off. Fails " +
+                    "if the S70 kPropSpoofs entry is removed AND the device " +
+                    "reports a non-enforcing mode, or if the property GOT " +
+                    "hook regresses.",
+            "enforcing", v)
+    }
+
+    @Test
+    fun roBootWarrantyBitZero() {
+        val v = sysProp("ro.boot.warranty_bit")
+        Log.d(TAG, "SystemProperties[ro.boot.warranty_bit] = '$v'")
+        assertEquals(
+            "ro.boot.warranty_bit must be '0' — '1' means the bootloader " +
+                    "has recorded a tamper event (warranty voided). Fails if " +
+                    "the S70 kPropSpoofs entry is removed AND the device " +
+                    "reports '1', or if the property GOT hook regresses.",
+            "0", v)
+    }
+
+    @Test
+    fun roWarrantyBitZero() {
+        val v = sysProp("ro.warranty_bit")
+        Log.d(TAG, "SystemProperties[ro.warranty_bit] = '$v'")
+        assertEquals(
+            "ro.warranty_bit must be '0' — the vendor-side companion to " +
+                    "ro.boot.warranty_bit; both are read. Fails if the S70 " +
+                    "kPropSpoofs entry is removed AND the device reports " +
+                    "'1', or if the property GOT hook regresses.",
+            "0", v)
     }
 }
