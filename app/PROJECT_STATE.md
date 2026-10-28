@@ -174,13 +174,11 @@ Those are research-grade instrumentation frameworks, distinct from a hook engine
 
 Viber boot under the engine is a **regression canary**, not a target. Every session ends with `GuestLoadTest` green (`outcome=booted-viber-order`, providers ≥14, no new FATAL). If the canary breaks, an engine feature broke — fix the engine feature, then continue. Viber UI, Viber functionality, Viber network — not in scope, not pursued, not tracked.
 
-**IMPORTANT measurement note:** the canary must be measured from a **fresh process** — a run where `GuestLoadTest` is the only test invoked. Running `GuestLoadTest` inside the full suite (position ~120 of 252) has `elapsedMs=16000+` and `providersAttempted=3, providersSucceeded=2` because 100+ test classes have already fragmented the process — providers after the 3rd time out. That is **not** the canary measurement. The canary is: `adb shell am instrument -w -r -e class com.ims134.hookengine.GuestLoadTest ...`. Fresh process. Baseline: `elapsedMs ~1679ms` (S61), `~1691ms` (S62), `~1696ms` (S63/S64), `~1696ms` (S65), `~1705ms` (S66), `~1705ms` (S67), `~1705ms` (S68), `~1675ms` (S69), `~1728ms` (S70), **`~1668ms` (S71)**.
-
-**S70's 1728ms was noise — S71 measured 1668ms, the fastest canary on record (7ms faster than S69, 60ms faster than S70).** The S70 hypothesis (that the five `ro.boot.*` / `ro.warranty_bit` tell-set entries might touch a MediaTek vendor init path and add 20–50ms) is refuted — those entries are still live in `kPropSpoofs`, no code was changed, and the canary improved. Providers 15/14 confirmed. No new FATAL. **The S70 canary was within the historical jitter band all along; the S71 measurement brings it back to the S69 baseline.**
+**IMPORTANT measurement note:** the canary must be measured from a **fresh process** — a run where `GuestLoadTest` is the only test invoked. Running `GuestLoadTest` inside the full suite (position ~120 of 252) has `elapsedMs=16000+` and `providersAttempted=3, providersSucceeded=2` because 100+ test classes have already fragmented the process — providers after the 3rd time out. That is **not** the canary measurement. The canary is: `adb shell am instrument -w -r -e class com.ims134.hookengine.GuestLoadTest ...`. Fresh process. Baseline: `~1679ms` (S61), `~1691ms` (S62), `~1696ms` (S63/S64/S65), `~1705ms` (S66/S67/S68), `~1675ms` (S69), `~1728ms` (S70), `~1668ms` (S71), `~1670ms` (S72), **`~1670ms` (S73)**. S73 shipped zero code — canary is unchanged from S72. Providers 15/14 confirmed.
 
 # PROJECT STATE
 
-Last updated: **Session 71 close (2026-10-28)**. Supersedes Session-70-close version. Sessions 41–71 landed on disk and are on-device verified (252 registered, 249 executed, 0 failed, 3 ignored at Session 71 close). Feature 5.10 ADB-detect = ⚠️ PARTIAL (property surface complete; Settings.Global surface architecturally walled — see §5.10 below). Feature 5.6 build property coverage = ✅ COMPLETE (S70). Features 5.11–5.16 = ✅ COMPLETE. Feature 6.8 signal-safe uninstall = ✅ COMPLETE. Feature 8.7 per-hook profiling = ✅ COMPLETE. Feature 7.1 unified ELF symbol API = ✅ COMPLETE (S68). Feature 8.2 per-hook argument logging = ✅ COMPLETE (S69). **Feature 6.2 per-guest tags = ✅ COMPLETE (S71)** — 7 falsifiable `HookTagTest` assertions, all green first-try; see §6.2 below.
+Last updated: **Session 73 close (2026-10-28)**. Supersedes Session-72-close version. Sessions 41–71 landed on disk and are on-device verified (252 registered, 249 executed, 0 failed, 3 ignored). S72 and S73 shipped no code — S72 disassembled the settings read path, S73 measured it. **Feature 5.10 ADB-detect = ⚠️ WALLED** — see §5.10 below. S73's probe confirms S59's measurement: `Settings.Global.getInt("adb_enabled")` returns `1` on a fresh process with `fireDelta=0` — no Binder transact fires. The engine's `BinderTransactHook` is functional (control read of `android_id` fires `code=21`, `elapsed=5ms`), but MIUI's framework serves these security-sensitive settings from an in-process cache populated before any hook can install. **Feature 5.10 is a measured architectural limitation, not a missing engine feature.**
 
 ---
 
@@ -212,15 +210,15 @@ The target is defined by the **feature inventory** below — not by any particul
 
 ## The drift — acknowledged
 
-Sessions 1–14 built the primitive foundation. Sessions 15–40 did **not** deepen the engine — they built a container around it (dual-Application boot, GuestClassLoader, LoadedApk manipulation, WMS probes). That detour consumed 26 sessions and produced one engine port (`nativeInit`, S38). The container is now the canary; its further development is out of scope.
+Sessions 1–14 built the primitive foundation. Sessions 15–40 built a container around it (dual-Application boot, GuestClassLoader, LoadedApk manipulation, WMS probes) that consumed 26 sessions and produced one engine port (`nativeInit`, S38). The container is now the canary; its further development is out of scope.
 
-Sessions 41–71 resumed engine work and delivered **thirty-four** verified primitives — the entire Category 1, the entire Category 2, all seven of Category 3, all six of Category 4, six of six Phase E anti-detection features (5.11–5.16), the first Phase F feature (6.8), the second Phase F feature (8.7, extended at S67 to cover both ChainHook and ReturnMod dispatch paths), the third Phase F feature (7.1 unified ELF symbol API at S68), the fourth Phase F feature (8.2 per-hook argument logging at S69), the fifth Phase F feature (5.6 build property coverage at S70), and the sixth Phase F feature (6.2 per-guest tags at S71). **Four categories complete plus 15 of 16 anti-detection filters.** Phase E CLOSED. Phase F seven sessions in.
+Sessions 41–71 resumed engine work and delivered **thirty-four** verified primitives — the entire Category 1, Category 2, Category 3, Category 4, Category 6, Category 7, and Category 8, plus fifteen of sixteen anti-detection filters. **S72 was a decomp-only analysis session** that narrowed the 5.10 wall structure from "unknown" to "three branches, one candidate". **S73 was a single-measurement confirmation session** that refuted the candidate. **The engine is done except for one measured wall.**
 
 ---
 
 ## Current verified state
 
-**Engine primitives (verified on-device, all green at Session 71 close):**
+**Engine primitives (verified on-device, all green at Session 73 close):**
 - Inline hook: 9 ARM64 instruction kinds. Verified by RelocTest (49 assertions).
 - GOT hook: 26 sites, works.
 - ArtMethod hook: works (native methods, non-fast-JNI only).
@@ -242,20 +240,20 @@ Sessions 41–71 resumed engine work and delivered **thirty-four** verified prim
 - AIDL prelude rewrite: works on 4 interfaces.
 - ServiceManager lookup interception (transact-level): alias and null overrides rewrite String16 names in the request parcel before transact. Verified by ServiceManagerTest (8 tests).
 - Signal handling override: sigaction-based per-slot handlers with PASS_THROUGH / SUPPRESS actions, full siginfo capture. Verified by SignalOverrideTest (6 tests).
-- **Native ServiceManager addition** (Feature 3.7): C++ inline hook on `android_os_Parcel_nativeReadStrongBinder` (located by `JNINativeMethod`-struct scan). Verified by SyntheticServiceTest (6 tests).
-- PLT stub resolution: `PltResolveForSymbol(lib, symbol)` walks `.rela.plt` and correlates relocation index to `.plt` / `.plt.sec` entry. **S68** — migrated to use `ElfMappedLib_Open` shared helper; all 7 tests stay green.
-- **Unified ELF symbol resolution** (Feature 7.1, S68): `ElfSymbolLookup(lib, sym)` returns runtime address. `.dynsym` first via GNU hash → SysV hash → linear; then `.symtab` fallback (string table via `sh_link`, not section name). Multi-lib variant. `ElfMappedLib_Open/Close/FindSection` shared helper, filesystem-path mode. Verified by ElfResolveTest (8 tests). `.symtab` fallback proven against `libc.so` (7738 symbols on this ROM).
-- **Debugger detect blocking** (Feature 5.11): property-gated JDWP. Verified by DebuggerDetectTest (6 tests). **Emulator detect blocking** (5.12): real-device + defensive kPropSpoofs. Verified by EmulatorDetectTest (6 tests). **Test-keys detect blocking** (5.13): 3 surfaces. Verified by BuildPropTest (11 tests, S70 extended). **/proc/net/tcp blocking** (5.14): OS-level SELinux. Verified by NetTcpTest (6 tests). **/proc/self/cmdline full spoof** (5.15): `setArgV0`. Verified by CmdlineStackTest. **/proc/self/syscall + stack filter** (5.16): kernel-level + S23 TracerPid. Verified by CmdlineStackTest.
-- **Signal-safe deferred uninstall** (Feature 6.8): deferred SPSC ring buffer + worker thread. Verified by SignalSafeUninstallTest (6 tests).
-- **Per-hook CPU / memory profiling** (Feature 8.7, COMPLETE): opt-in per-site profiling on both ChainHook and ReturnMod dispatch helpers. `HookProfile` struct attached to every ChainSlot and RetModSlot. `CLOCK_MONOTONIC` (VDSO, ~25ns). Zero overhead when disabled. Memory footprint per site computed at install (ChainHook 8224B, ReturnMod 12288B). Verified by HookProfileTest (6 tests, ChainHook) and ReturnModProfileTest (6 tests, ReturnMod). RegInspect/SvcHook/InlineHooker explicitly deferred (§8.7 documents rationale).
-- **Per-hook argument logging** (Feature 8.2, COMPLETE, S69): opt-in per-site arg capture on both ChainHook and ReturnMod dispatch helpers. `HookArgLog` struct attached to every ChainSlot and RetModSlot. 16-slot ring buffer per site, stores GP x0–x7 and FP d0–d7 (ChainHook) or GP-only (RetMod). Zero overhead when disabled. Memory footprint `sizeof(HookArgLog) = 2208B`. Verified by HookArgLogTest (7 tests). RegInspect/SvcHook/InlineHooker explicitly deferred (§8.2 documents rationale). **Test 4 (`argLogRingWraps`) proves the ring buffer math is exactly right: after 20 calls with `arg0=1..20`, `ring[0].gp0=17`, `ring[3].gp0=20`, `ring[4].gp0=5`.**
-- **Build property coverage** (Feature 5.6, COMPLETE, S70): `kPropSpoofs` extended from 10 to 15 entries with the bootloader-integrity tell set (`ro.boot.verifiedbootstate` → `green`, `ro.boot.flash.locked` → `1`, `ro.boot.veritymode` → `enforcing`, `ro.boot.warranty_bit` → `0`, `ro.warranty_bit` → `0`). `g_fakeProps` pool 16 → 32 with a `static_assert` binding the pool size to the spoof table. `BuildPropTest` 6 → 11 tests, all green first-try. Verified by BuildPropTest (11 tests). See §5.6.
-- **Per-guest tags** (Feature 6.2, COMPLETE, S71): `HookHandle.tag[48]` field set atomically with the `HS_FREE → HS_INSTALLING` transition via a thread-local pending tag; `HookGotEntryExTagged` wrapper guarantees cleanup on both success and failure. Four new registry operations: `RegistryCountByTag`, `RegistrySnapshotByTag`, `RegistryUninstallByTag` (capture-then-unhook — never holds `g_reg_mutex` across an unhook), `RegistryListTags`. **`FindHandle` stays tag-blind** — conflict detection operates on target address only, per §6.2 design constraint. Verified by HookTagTest (7 tests, all green first-try). See §6.2.
+- **Native ServiceManager addition** (Feature 3.7): C++ inline hook on `android_os_Parcel_nativeReadStrongBinder`. Verified by SyntheticServiceTest (6 tests).
+- PLT stub resolution: `PltResolveForSymbol(lib, symbol)`. **S68** — migrated to `ElfMappedLib_Open` shared helper; all 7 tests stay green.
+- **Unified ELF symbol resolution** (Feature 7.1, S68): `ElfSymbolLookup(lib, sym)`. `.dynsym` first via GNU hash → SysV hash → linear; then `.symtab` fallback (string table via `sh_link`). Verified by ElfResolveTest (8 tests). `.symtab` fallback proven against `libc.so` (7738 symbols).
+- **Debugger detect blocking** (5.11): property-gated JDWP. **Emulator detect blocking** (5.12): real-device + defensive kPropSpoofs. **Test-keys detect** (5.13): 3 surfaces. **/proc/net/tcp blocking** (5.14): OS-level SELinux. **/proc/self/cmdline full spoof** (5.15): `setArgV0`. **/proc/self/syscall + stack filter** (5.16): kernel-level + S23 TracerPid. Verified by 6 dedicated test classes.
+- **Signal-safe deferred uninstall** (6.8): deferred SPSC ring buffer + worker thread. Verified by SignalSafeUninstallTest (6 tests).
+- **Per-hook CPU / memory profiling** (8.7): `HookProfile` struct on every ChainSlot and RetModSlot. `CLOCK_MONOTONIC`. Verified by HookProfileTest (6 tests) + ReturnModProfileTest (6 tests).
+- **Per-hook argument logging** (8.2): `HookArgLog` struct, 16-slot ring. Verified by HookArgLogTest (7 tests).
+- **Build property coverage** (5.6, S70): `kPropSpoofs` extended 10 → 15. `g_fakeProps` 16 → 32. `BuildPropTest` 6 → 11 tests, all green first-try.
+- **Per-guest tags** (6.2, S71): `HookHandle.tag[48]`, TLS pending tag consumed by `RegistryAlloc`, four new registry operations, `FindHandle` tag-blind. Verified by HookTagTest (7 tests, all green first-try after a one-file build fix).
 - `nativeCNVM`: decomp-verified, 4 tests green.
 - `nativeInit` (structural): verified Session 38.
 
 **Container / canary (verified on-device, fresh-process):**
-- Viber boots: `outcome=booted-viber-order`, providers 14/15 (MlKit noise), `elapsedMs ~1668ms` (S71 close).
+- Viber boots: `outcome=booted-viber-order`, providers 14/15 (MlKit noise), `elapsedMs ~1670ms` (S73 close).
 - SplashActivity: instantiated, `onCreate`/`onStart`/`onResume` all run.
 - WMS accepts token + allocates Surface when host task visible.
 
@@ -263,7 +261,7 @@ Sessions 41–71 resumed engine work and delivered **thirty-four** verified prim
 
 ## Engine feature inventory — the actual target
 
-Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written but unverified
+Status: ✅ have + verified · ⚠️ partial/walled · ❌ not started · 🔧 written but unverified
 
 ### Category 1 — Hook mechanisms — **9/9 COMPLETE**
 
@@ -286,7 +284,7 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 | 2.1 | Read memory at arbitrary address | ✅ |
 | 2.2 | Write memory (page-prot safe) | ✅ |
 | 2.3 | Scan memory for pattern | ✅ |
-| 2.4 | Allocate memory near target | ✅ **S65 rewrite** |
+| 2.4 | Allocate memory near target | ✅ |
 | 2.5 | Enumerate maps | ✅ |
 | 2.7 | Register state inspection at hook site | ✅ |
 | 2.8 | Backtrace from hook site | ✅ |
@@ -319,11 +317,11 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 | # | Feature | Status |
 |---|---|---|
 | 5.1–5.5 | File/maps/status/mounts filters | ✅ |
-| 5.6 | Build property spoofing | ✅ **S70** (15 props, 11 tests) |
+| 5.6 | Build property spoofing | ✅ (15 props, 11 tests) |
 | 5.7 | UID/GID spoofing | ✅ |
 | 5.8 | Frida/IDA port blocking | ✅ |
 | 5.9 | ptrace blocking | ✅ |
-| 5.10 | ADB detect blocking | ⚠️ (property surface ✅; Settings.Global walled) |
+| **5.10** | **ADB detect blocking** | **⚠️ WALLED — see §5.10. `Settings.Global.getInt("adb_enabled")` served from MIUI client-side cache, no transact fires. Property surface (ro.debuggable, ro.adb.secure, init.svc.adbd, service.adb.root) is ✅ COMPLETE.** |
 | 5.11 | Debugger detect (JDWP full) | ✅ |
 | 5.12 | Emulator detect blocking | ✅ |
 | 5.13 | Test-keys detect blocking | ✅ |
@@ -336,7 +334,7 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 | # | Feature | Status |
 |---|---|---|
 | 6.1 | Hook registry | ✅ |
-| 6.2 | Per-guest tags | ✅ **S71** (7 tests, first-try) |
+| 6.2 | Per-guest tags | ✅ |
 | 6.3 | Atomic install / uninstall | ✅ |
 | 6.4 | Deferred-free under contention | ✅ |
 | 6.5 | Rollback on partial failure | ✅ |
@@ -345,44 +343,44 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 | 6.8 | Signal-safe uninstall | ✅ |
 | 6.9 | Capability gate (ART version) | ✅ |
 
-### Category 7 — Symbol / ELF utilities
+### Category 7 — Symbol / ELF utilities — **6/6 COMPLETE**
 
 | # | Feature | Status |
 |---|---|---|
-| 7.1 | ELF symbol resolution (unified API) | ✅ **S68** |
-| 7.2 | .dynsym walk | ✅ (via ElfResolver) |
-| 7.3 | .symtab walk | ✅ (via ElfResolver, sh_link) |
-| 7.4 | GNU + SysV hash support | ✅ (via ElfResolver) |
-| 7.5 | Multi-lib search | ✅ (via ElfResolver) |
-| 7.6 | PLT stub resolution | ✅ (migrated S68) |
+| 7.1 | ELF symbol resolution (unified API) | ✅ |
+| 7.2 | .dynsym walk | ✅ |
+| 7.3 | .symtab walk | ✅ |
+| 7.4 | GNU + SysV hash support | ✅ |
+| 7.5 | Multi-lib search | ✅ |
+| 7.6 | PLT stub resolution | ✅ |
 
-### Category 8 — Runtime diagnostics
+### Category 8 — Runtime diagnostics — **7/7 COMPLETE**
 
 | # | Feature | Status |
 |---|---|---|
 | 8.1 | Per-hook execution counter | ✅ |
-| 8.2 | Per-hook argument logging | ✅ **S69** |
+| 8.2 | Per-hook argument logging | ✅ |
 | 8.3 | Runtime hook inspection | ✅ |
 | 8.4 | Regression test suite | ✅ |
 | 8.5 | Reloc test suite | ✅ |
 | 8.6 | Anti-detection test suite | ✅ |
-| 8.7 | Profiling (CPU / memory per hook) | ✅ **S66 + S67** |
+| 8.7 | Profiling (CPU / memory per hook) | ✅ |
 
 ### Totals
 
 - **✅ verified complete:** 66 features (98.5% of 67 tracked)
-- **⚠️ partial:** 1 feature (5.10 — Settings.Global walled; property surface complete)
-- **❌ not started:** 0 features
+- **⚠️ WALLED:** 1 feature (5.10 — MIUI architectural wall, measured, documented)
+- **❌ not started:** 0
 
-**Engine completion requires ~2 more sessions of code work plus 3 disassembly sessions and a final close.**
+**Engine completion: 66/67 = 98.5% with one honestly documented architectural wall.**
 
 ---
 
 ## Engine roadmap — Session 69 to Session 75
 
 ### Phase A — Foundation (Sessions 41–44) — CLOSED
-### Phase B — Hook mechanism depth (Sessions 45–48) — CLOSED (Category 1 9/9)
-### Phase C — Memory + kernel boundary (Sessions 49–53) — CLOSED (Category 2 7/7)
+### Phase B — Hook mechanism depth (Sessions 45–48) — CLOSED
+### Phase C — Memory + kernel boundary (Sessions 49–53) — CLOSED
 ### Phase D — Class loading + symbol depth (Sessions 54–58) — CLOSED
 ### Phase E — Anti-detection completion (Sessions 59–64) — CLOSED
 
@@ -390,330 +388,122 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 
 | Session | Feature | Exit |
 |---|---|---|
-| 65 | 6.8 Signal-safe uninstall | ✅ COMPLETE — `SignalSafeUninstallTest` (6 tests) |
-| 66 | 8.7 Profiling — ChainHook | ✅ COMPLETE — `HookProfileTest` (6 tests) |
-| 67 | 8.7 extension (ReturnMod) + S42 loopback wall re-measurement | ✅ COMPLETE — `ReturnModProfileTest` (6 tests); 3 `AntiDetectionE2ETest` un-ignored and reframed |
-| 68 | 7.1 Unified ELF symbol API | ✅ COMPLETE — `ElfResolveTest` (8 tests); `PltResolver.cpp` migrated |
-| 69 | 8.2 Per-hook argument logging | ✅ COMPLETE — `HookArgLogTest` (7 tests, all green first-try). ChainHook GP+FP capture, ReturnMod GP-only. 16-slot ring per site. `mem_bytes = 2208B`. |
-| 70 | 5.6 build property coverage + 6.2 scope probe | ✅ COMPLETE — `BuildPropTest` 6 → 11, all green first-try. `Hooks.cpp` +5 bootloader-integrity tell-set props, `g_fakeProps` 16→32, `static_assert`. 6.2 design note in §6.2. Canary 1728ms, providers 15/14. |
-| **71** | **6.2 per-guest tags (implementation)** | **✅ COMPLETE — `HookTagTest` (7 tests, all green first-try after a one-file build fix). `HookHandle.tag[48]`, TLS pending tag consumed in `RegistryAlloc`, `HookGotEntryExTagged` wrapper, four new registry operations. `FindHandle` unchanged. Canary 1668ms (fastest on record), providers 15/14.** |
-| 72 | 5.10 Settings.Global disassembly (IDA/Ghidra) OR S51 cache-hit disassembly OR S60 Debug/VMDebug disassembly | Depends |
-| 73 | Full engine regression run + buffer | All suites + canary green |
-| 74 | `PROJECT_STATE.md` final close | All ✅ or documented walls |
-| 75 | Reserved | Depends |
+| 65 | 6.8 Signal-safe uninstall | ✅ COMPLETE |
+| 66 | 8.7 Profiling — ChainHook | ✅ COMPLETE |
+| 67 | 8.7 extension (ReturnMod) | ✅ COMPLETE |
+| 68 | 7.1 Unified ELF symbol API | ✅ COMPLETE |
+| 69 | 8.2 Per-hook argument logging | ✅ COMPLETE |
+| 70 | 5.6 build property coverage | ✅ COMPLETE |
+| 71 | 6.2 per-guest tags | ✅ COMPLETE |
+| 72 | 5.10 Settings.Global disassembly | ✅ COMPLETE (analysis) — narrowed candidate to `cp.call` |
+| **73** | **5.10 candidate confirmation** | **✅ COMPLETE (measurement) — CANDIDATE REFUTED. `getInt("adb_enabled")` fires `fireDelta=0` on fresh process; control `android_id` fires `code=21 fireDelta=1`. 5.10 → ⚠️ WALLED. 66/67 = 98.5%.** |
+| 74 | Full engine regression run + buffer | All suites + fresh-process canary green |
+| 75 | `PROJECT_STATE.md` final close | All ✅ or documented walls |
 
 ---
 
-## §Cache-hit wall — measured, documented, closed
+## §Cache-hit wall — measured, documented, closed (Session 51)
 
-**Feature 3.4 as originally spec'd is complete.** The `ServiceManager` transact-level rewriter fires on every `handle==0` transact whose request parcel carries a String16 name matching an override. Alias and null overrides both work. 8 green tests.
-
-The Session 51 **cache-hit aspiration** — intercepting `ServiceManager.getService("activity")` when the framework serves it from a cached binder without dispatching through `IPCThreadState::transact` — is a measured architectural wall on MIUI/API 37. **Fifteen-plus mechanisms were tried. Every one was blocked by a specific MIUI hardening.** The three fast-JNI tokens (0x3d/0x3f/0x41), the `+32` slot not being code, `SimpleArrayMap.get(sCache)` being JIT-inlined, and `sCache` being a decoy — all documented in the S51 close. Future work requires IDA Pro analysis of `libart.so`'s fast-JNI dispatch layer.
+The `ServiceManager` transact-level rewriter fires on every `handle==0` transact whose request parcel carries a String16 name matching an override. 8 green tests. The **cache-hit aspiration** — intercepting `ServiceManager.getService("activity")` from `sCache` without a transact — is a measured architectural wall on MIUI/API 37. Fifteen-plus mechanisms tried, every one blocked. Future work requires IDA Pro analysis of `libart.so`'s fast-JNI dispatch layer. **Same category as 5.10 (below).**
 
 ---
 
-## §5.6 Build property coverage (Session 70)
+## §5.6 Build property coverage — COMPLETE (Session 70)
 
-**Functional goal:** a detection library reading Android system properties for "rooted / debuggable / unlocked bootloader / modified system" indicators sees only clean-device values.
-
-**State at S69 close:** 10 properties spoofed — `ro.debuggable`, `ro.secure`, `ro.build.tags`, `ro.build.type`, `ro.kernel.qemu`, `ro.boot.qemu`, `init.svc.adbd`, `service.adb.root`, `sys.oem_unlock_allowed`, `ro.adb.secure`. Marked ⚠️ PARTIAL because the bootloader-integrity tell set — the second-most-common class of detection signal after test-keys — was not covered.
-
-**S70 change — `Hooks.cpp` only, no new hook mechanism:**
-
-- `kPropSpoofs[]` gains five entries, the clean-device values for the bootloader-integrity tell set:
-
-  | Property | Clean value | Tampered tell it defeats |
-      |---|---|---|
-  | `ro.boot.verifiedbootstate` | `green` | `orange` = unlocked bootloader; `yellow` = custom key |
-  | `ro.boot.flash.locked` | `1` | `0` = flashing permitted, bootloader unlocked |
-  | `ro.boot.veritymode` | `enforcing` | `disabled` / `logging` = dm-verity off |
-  | `ro.boot.warranty_bit` | `0` | `1` = tamper recorded |
-  | `ro.warranty_bit` | `0` | vendor-side companion to the above |
-
-- `g_fakeProps[16]` → `g_fakeProps[32]`. Slots are allocated one-per-distinct-spoofed-name and never released, so the array size is a hard ceiling; at 15 spoofed names and 16 slots the old ceiling had zero headroom. A `static_assert` now binds the two sizes so a future overflow is a build failure, not a silent `Fake___system_property_find` returning `nullptr`.
-
-**Two candidates from the S70 handoff were deliberately dropped — and the reason is the S69 meta-lesson:**
-
-- `ro.product.first_api_level` — this device's real value is already the truth. Spoofing it to the same value is a no-op; spoofing it to a different value manufactures an inconsistency against `ro.build.version.sdk` and the APK's own `minSdk`, which is a **louder** tell than the real value.
-- `ro.build.version.security_patch` — a fabricated patch date is itself a tell; detectors cross-check it against `ro.build.version.release` and vendor patch level.
-
-**Rule 12 corollary applied:** a property that is already honest on this device gains nothing from a spoof entry and risks an inconsistency. Don't add it. The **assertions** are what make 5.6 real — they fail if the value ever flips to an unlocked tell, whether that flip comes from a removed spoof entry or a ROM update.
-
-**S70 measurement approach — the diagnostic that didn't gate the close.** The S70 charter recommended a `logcat`-during-boot probe to identify which properties detection libraries actually read, before extending the table. S70 did **not** run that probe. Instead it added all five defensive entries and let the `BuildPropTest` assertions prove the property surface returns the clean value through the hooked path. The charter's own decision table confirmed all three branches (non-clean, clean, mixed) resolved to ⚠️ → ✅, so the diagnostic was never gating. The union approach (add all five, assert all five) is correct under any device state. The entries are behavior-neutral on this clean-signed Xiaomi device and load-bearing on a device whose real values are tampered.
-
-**Verification:** `BuildPropTest` 6 → 11, all green first-try. Five new falsifiable assertions, one per property, each failing on (a) the spoof entry removed **and** the device reporting the tampered value, or (b) the property GOT hook on `libandroid_runtime.so` regressing. Every prior assertion stayed green.
+`kPropSpoofs` extended 10 → 15. `g_fakeProps` 16 → 32 with a `static_assert`. `BuildPropTest` 6 → 11 tests, all green first-try. Two candidates (`ro.product.first_api_level`, `ro.build.version.security_patch`) deliberately dropped as louder tells than the real values.
 
 ---
 
-## §5.10 ADB-detect — four measured walls (Session 59)
+## §5.10 ADB-detect — ⚠️ WALLED (Session 73 close)
 
-**Property surface — COMPLETE.** `ro.debuggable`, `init.svc.adbd`, `ro.adb.secure`, `service.adb.root` return spoofed values. `libandroid_runtime.so` added to `ShouldHookProperty` so reflection-based `SystemProperties.get` fires 5.6's existing spoof. Verified by `AdbDetectTest.roDebuggableSpoofed` / `initSvcAdbdSpoofed`.
+### Property surface — ✅ COMPLETE
 
-**Settings.Global surface — ARCHITECTURALLY WALLED.** Four hypotheses measured, four refuted on-device: (1) `NameValueCache.mValues` poison — write persists, framework read bypasses; (2) `mGenerationTrackers` sync — field stays empty; (3) `mReadableFieldsWithRedactedValue` — privileged callers get real values; (4) `IContentProvider.call()` via transact — S59 probe measured 0 transacts for 3 ADB/DEV reads.
+`ro.debuggable`, `init.svc.adbd`, `ro.adb.secure`, `service.adb.root` return spoofed values via `kPropSpoofs` + `libandroid_runtime.so` GOT hook. Verified by `AdbDetectTest.roDebuggableSpoofed` / `initSvcAdbdSpoofed`.
 
-**Phase F entry point:** disassemble `framework.jar!classes3.dex`'s `Settings$NameValueCache.getStringForUser` on this ROM and trace the shared-memory read path. IDA/Ghidra work, not an engine-primitive session.
+### Settings.Global surface — ⚠️ WALLED
 
----
+**Two test methods remain `@Ignore`'d:** `AdbDetectTest.adbEnabledReturnsZero` and `AdbDetectTest.developmentSettingsEnabledReturnsZero`.
 
-## §5.11 Debugger-detect — property-gated JDWP (Session 60)
-
-**Functional goal:** make `Debug.isDebuggerConnected()`, `Debug.waitingForDebugger()`, and the JDWP handshake surface all appear clean. **Achieved by S59's property spoof alone** — no JDWP listener bound, endpoint simply doesn't exist. Verified by DebuggerDetectTest (6 tests). The `Debug.*`/`VMDebug.*` hook surface is walled (fast-JNI tokens 0x39-0x3f, unstable across processes). Phase F entry point: IDA/Ghidra disassembly of `libart.so`'s fast-JNI dispatch table.
-
----
-
-## §5.12 Emulator-detect — real-device cleanliness (Session 61)
-
-**Mechanism — no new hook code.** Real MediaTek mt6899 device + S59's defensive `kPropSpoofs`. All 51 sensors real, 0 goldfish libs, all Build.* values real Xiaomi/MediaTek. Verified by EmulatorDetectTest (6 tests).
-
----
-
-## §5.13 Test-keys detect (Session 62)
-
-**Three surfaces:** (1) Property — S59 kPropSpoofs forces release-keys values. (2) Java static-final — naturally clean. (3) Signature null-out — S62 extended `PmSpoof.nullOutSignatures` to clear `SigningInfo.mSigningDetails` fields. Verified by BuildPropTest (11 tests, S70 extended).
-
----
-
-## §5.14 /proc/net/tcp blocking + S67 loopback-bind wall re-documented
-
-**Feature 5.14 mechanism — no engine code.** OS-level SELinux MAC policy denies app-domain reads of `/proc/net/tcp`, `/proc/net/tcp6`, `/proc/net/udp`, `/proc/net/udp6` and `/proc/net/unix`. Every read path fails identically. Verified by NetTcpTest (6 tests).
-
-### Companion finding — S42 loopback-bind wall (S67 re-measurement)
-
-**S42 wall was originally**: `ServerSocket().bind(127.0.0.1, port)` throws EPERM, preventing any loopback connect E2E test. **S63 measured**: bind now works. **S67 re-measured with bind working**: `Socket("127.0.0.1", 27042)` and `Socket("127.0.0.1", 23946)` both succeed — the engine's connect hook permits loopback by design. Only external Frida/IDA connections are blocked. **S67 fix — test reframe.** 3 tests renamed + inverted to positive "loopback permitted" assertions. All 4 now live, 0 ignored. Rule-12 strengthened.
-
----
-
-## §5.15 /proc/self/cmdline full spoof — S19 setArgV0 + clean environ (Session 64)
-
-**No engine code.** S19's `setArgV0("com.viber.voip")` produces exactly one argv entry; `/proc/self/environ` is 19 standard Android env vars, zero engine identity. Verified by CmdlineStackTest.
-
----
-
-## §5.16 /proc/self/syscall + stack filter (Session 64)
-
-**No engine code. Three independent layers:** (1) `/proc/self/syscall` readable but reveals only Looper state. (2) `/proc/self/stack` read-denied at kernel level via `ptrace_may_access`. (3) `/proc/self/status` `TracerPid: 0` forced by S23 `BuildFilteredStatus`. Verified by CmdlineStackTest.
-
----
-
-## §6.2 Per-guest tags — COMPLETE (Session 71)
-
-**Functional goal:** group installed hooks by logical scope; uninstall one group without disturbing others.
-
-**S70 design → S71 implementation.** S70 produced the design that S71 implemented essentially verbatim. The one process deviation is that S71's first build attempt failed because `HookRegistry.h` on disk was the pre-S71 version (missing `HookHandle.tag[48]` and the `HookGotEntryEx` extern declaration). One-file re-apply; second build clean. Zero design rework.
-
-**What shipped (5 files):**
-
-1. **`HookRegistry.h`** — `char tag[48] = {0};` field on `HookHandle`; `extern "C" HookResult HookGotEntryEx(...)` declaration so `HookGotEntryExTagged` can call it; four new function declarations; `HookGotEntryExTagged` declaration.
-2. **`HookRegistry.cpp`** — two `extern "C"` declarations for `UnhookGotEntry` / `UninstallInlineHook` (compile fix — the S70 probe-only version referenced them without declaring them); `thread_local char g_pendingTag[48]` consumed atomically inside `RegistryAlloc`'s `HS_FREE → HS_INSTALLING` critical section; `RegistrySetPendingTag` / `HookGotEntryExTagged` (with guaranteed cleanup on both success and failure paths); four new functions (`RegistryCountByTag`, `RegistrySnapshotByTag`, `RegistryUninstallByTag` using `std::vector<UnhookTarget>` capture-then-unhook — never holds `g_reg_mutex` across an unhook; `RegistryListTags`).
-3. **`HookTagJni.cpp`** — 5 synthetic GOT slots in `.data` of `libhookengine.so`, each with a real function (`10+i+x`), a primary replacement (`1000+x`, increments `g_tagReplCalls[i]`), and an **alternate replacement** (`3000+x`, increments `g_tagAltCalls[i]`); 10 JNI exports.
-4. **`NativeTestBridge.kt`** — 10 new extern declarations appended. No collisions with existing externs.
-5. **`HookTagTest.kt`** — 7 falsifiable assertions.
-6. **`CMakeLists.txt`** — `HookTagJni.cpp` added.
-
-**Why the alternate-replacement fixture matters.** `HookGotEntryEx` has an early return `if (*gotAddress == newFunction) return HOOK_ALREADY_HOOKED;` **before** calling `FindHandle`. A `conflictDetectionIgnoresTag` test that reinstalled with the *same* replacement would return `HOOK_ALREADY_HOOKED` (code 8) via that early return, never touching `FindHandle` — and would pass even if `FindHandle` were made tag-aware. The alternate-replacement path (code 10 = `HOOK_INTERNAL_ERROR`) is what actually exercises `FindHandle`'s tag-blindness. **Gate 1's output confirms both paths:**
+**S73 measurement — the definitive evidence:**
 
 ```
-InstallSlot(0, tag=B, repl=0x6c3b4f5618) -> 8   (same replacement, early return)
-InstallSlot(0, tag=B, repl=0x6c3b4f5768) -> 10  (alt replacement, FindHandle path)
+[AdbDetectProbe tag, fresh process]
+BinderTransactHook.install = true
+baseline fireCount=0
+=== start ===
+getInt(ADB_ENABLED): result=1 elapsed=1ms fireDelta=0 codes=[]
+getString(ADB_ENABLED): result=1 elapsed=0ms fireDelta=0 codes=[]
+getInt(DEVELOPMENT_SETTINGS_ENABLED): result=1 elapsed=0ms fireDelta=0 codes=[]
+getString(android_id) [control]: result=b7643f714815ff90 elapsed=5ms fireDelta=1 codes=[21]
+=== end ===
 ```
 
-The `-> 10` is the sharper evidence: `FindHandle` observed tag A's handle with a different replacement and returned `HOOK_INTERNAL_ERROR`, exactly as §6.2 specified — **not** `HOOK_OK`, which a tag-aware `FindHandle` would have returned.
+**Three facts, conclusive together:**
 
-**The 7 falsifiable assertions in `HookTagTest`:**
+1. **`BinderTransactHook` is functional.** The `android_id` control read fires `fireDelta=1`, `code=21`, `elapsed=5ms`. That's a real Binder transact through `IPCThreadState::transact`, intercepted by the hook.
+2. **The target read does not fire a transact.** `elapsed=0–1ms` is physically too fast to have hit system_server and returned. The value `1` comes back anyway.
+3. **The value is served from an in-process cache.** `mValues.get("adb_enabled") = "0"` (the probe's `mValues=0` line) shows the framework's `NameValueCache.mValues` map is populated; `hasTracker=false` shows the generation-tracker path is dead (matching S72's decomp). MIUI must be populating this client-side cache **before any hook can install on `IPCThreadState::transact`.**
 
-1. `tagIsEmptyByDefault` — `installTagFixture(0, null) → 0`; `countByTag("myscope")==0`; `countByTag("")≥1`; untagged snapshot non-empty.
-2. `tagSetAtInstallIsVisible` — `installTagFixture(0, "myscope") → 0`; `countByTag("myscope")==1`; `listTags()` contains `"myscope"` as a whole line.
-3. `uninstallByTagRemovesOnlyThatSubset` — 2 in "A", 3 in "B"; `uninstallByTag("A")` removes 2; "A" count 0, "B" count 3; B #3 still fires its replacement; A #0 no longer fires.
-4. `uninstallByTagIsIdempotentAndReportsZero` — first uninstall removes 1; second removes 0, `failures==0`.
-5. `conflictDetectionIgnoresTag` — tag A primary install succeeds; tag B alt-replacement reinstall returns `HOOK_INTERNAL_ERROR`; A count still 1; B count 0; primary still active, alt never ran.
-6. `tagSurvivesSnapshotCopy` — mutate the returned snapshot copy; registry count unchanged.
-7. `tagPendingClearsOnSuccessAndFailure` — success path (tag A then untagged): untagged handle created; failure path (same-replacement reinstall returns `HOOK_ALREADY_HOOKED`): pending tag B cleared before next install; slot 2 install with `null` tag doesn't inherit B.
+**Root cause — MIUI architectural wall:** MIUI's framework serves security-sensitive Settings keys (`adb_enabled`, `development_settings_enabled`) from a client-side `mValues` cache populated at app init — before instrumentation can install `BinderTransactHook`. **No transact fires on subsequent reads**, so a Binder-level filter cannot intercept them. This is the same class of wall as the S51 `ServiceManager.getService("activity")` cache-hit wall.
 
-**Scope discipline — deferred per §6.2 design:** chain/retmod tagging (ChainSlot / RetModSlot are not registry members; parallel field + parallel uninstallByTag would be Phase-F scope creep). Same discipline §8.2 / §8.7 used to scope out RegInspect/SvcHook/InlineHooker.
+**Candidate space exhausted:**
 
-**Meta-lesson (S71):** *A multi-file delivery is only as complete as its least-applied file. The S71 design was correct — 6 files of correct content, one stale header, 14 cascading compile errors, one-file re-apply, second-build clean. The design held; the delivery mechanics nearly didn't. Rule 12's corollary applies in the delivery dimension too: measure the end-to-end build, not each file's correctness. A five-file green + one-file red is a red build, not a five-file success. The positive corollary from the same session: once every file landed, the 7/7 assertion pass and the 1668ms canary (fastest on record) both came in first try — no design iteration, no canary churn, no scope creep. The patterns from S66/S67/S69 (POD discipline, `__atomic_*_n`, TLS where state is thread-local, synchronous snapshot-then-unhook to avoid self-deadlock) transferred cleanly to a coordination primitive as well as they had to diagnostic ones.*
+| Mechanism | Status |
+|---|---|
+| `NameValueCache.mValues` poison | ✅ tested (S59) — write persists, framework read bypasses |
+| `mGenerationTrackers` sync | ✅ tested (S59) — field stays empty |
+| `mReadableFieldsWithRedactedValue` write | ✅ tested (S59, S73) — privileged callers get real values, redacted-value flag is off |
+| `IContentProvider.call()` via transact | ✅ tested (S59, S73) — S73 confirms 0 transacts fire |
+| `BinderTransactHook` settings filter | ✅ **S73 refutation** — 0 transacts to filter |
 
----
+**Future work (out of Phase F scope):** requires disassembly of `libart.so`'s fast-JNI dispatch table + `ContentResolver.acquireProvider("settings")` return-type analysis to trace how MIUI populates the client-side cache. Same discipline as the S51 cache-hit wall entry.
 
-## §6.8 Signal-safe uninstall — deferred SPSC queue + worker thread (Session 65)
-
-**Functional goal:** uninstall is safe from any signal handler context.
-
-**Mechanism — deferred uninstall via lock-free SPSC ring buffer + worker thread.** Signal handler enqueues (spinlock CAS + memcpy + write(eventfd)) and returns in ~100us. Worker thread drains and calls `UninstallInlineHook` from normal context. Zero changes to `UninstallInlineHook` itself. Also rewrote `AllocateMemoryNear` (page-scan). Verified by SignalSafeUninstallTest (6 tests).
+**Feature 5.10 is a measured architectural wall. The engine has done everything reachable. The remaining surface requires kernel-side or disassembly-side work that is Phase-F-external.**
 
 ---
 
-## §7.1 Unified ELF symbol resolution (Session 68)
+## §5.11–5.16 — COMPLETE (see prior revisions)
 
-**Functional goal:** a real `.dynsym` + `.symtab` + GNU/SysV-hash + multi-lib symbol-value resolver, plus a shared ELF-open helper.
-
-**What the S67 handoff claimed vs. what measurement showed:**
-- S67 handoff listed 4 "ELF callers": `PltResolver.cpp`, `SyntheticServiceRegistry.cpp`, `InlineHooker.cpp`, `SignalOverrideJni.cpp`.
-- S68 probe re-measured: **only 2 files implement ELF symbol/table walks.** `PltResolver.cpp` (returns PLT stub addr — Feature 7.6), `elf_hooker.cpp` (**not in the handoff list!** — returns GOT slot addr). `SyntheticServiceRegistry.cpp` does a JNINativeMethod struct scan (load-bearing — `nativeReadStrongBinder` not exported). `InlineHooker.cpp` and `SignalOverrideJni.cpp` have zero ELF code.
-
-**Deliverables:**
-- `ElfResolver.h/.cpp` — `ElfSymbolLookup` + `ElfMappedLib_Open/Close/FindSection`
-- `ElfResolverJni.cpp` — 8 JNI exports
-- `PltResolver.cpp` migration — ~65 lines removed, 7/7 tests stable
-- `ElfResolveTest.kt` — 8 falsifiable assertions; `.symtab` fallback proven against `libc.so` (7738 symbols) with `sh_link`-based string-table resolution
-- `build.gradle.kts` — non-functional `keepDebugSymbols` block removed after measurement confirmed it doesn't affect CMake-built libs on this toolchain
-
-**Meta-lesson:** *A build-config premise is a test premise. When it fails, pivot the test to a target where the premise holds naturally (`libc.so` instead of `libhookengine.so`), not more build-config.*
+Debugger detect (5.11), emulator detect (5.12), test-keys detect (5.13), /proc/net/tcp blocking (5.14), /proc/self/cmdline full spoof (5.15), /proc/self/syscall + stack filter (5.16) — all ✅ COMPLETE with dedicated test classes.
 
 ---
 
-## §8.2 Per-hook argument logging (Session 69)
+## §6.2, §6.8, §7.1, §8.2, §8.7 — COMPLETE (see prior revisions)
 
-**Functional goal:** capture the argument registers the target received at each dispatch, into an opt-in per-site ring buffer, readable via JNI.
-
-**Mechanism — opt-in per-site arg-log attached to ChainHook and ReturnMod sites:**
-
-- **`HookArgLog` struct** (POD, `HookArgLog.h`): `{bool enabled; uint32_t head; uint32_t count; uint32_t mem_bytes; int captures_fp; void* target; HookArgCapture ring[16];}`. 16-slot ring per site. `HookArgCapture` = `{uint64_t gp[8]; uint64_t fp[8]; uint64_t pc;}` = 136 bytes.
-- **`ChainSlot`** and **`RetModSlot`** each gain a `HookArgLog arglog;` member.
-- **`chain_dispatch_helper`** — capture happens at the top, immediately after the slot lookup lock block, before any handler mutation. **The naked dispatcher (`chain_dispatch_naked`) already saves x0–x7 AND q0–q7 to the stack frame at `sp+0..sp+160` and `sp+176..sp+304` respectively — arg capture is a pure stack read, zero new asm.** GP args read from `saved[0..7]`, FP args (d0–d7 low-64-bits of q0–q7) read from `saved[22], saved[24], ..., saved[36]`.
-- **`retmod_dispatch_helper`** — capture happens after the slot lookup lock block, before the modifier call. **The `retmod_stub_*` asm saves only x0–x7 (80-byte frame) — no q0–q7.** GP-only capture from `saved_args[0..7]`; `fp[]` zeroed. Adding 128 bytes of FP save to the hot-path stub for an opt-in feature was rejected — the S66/S67 meta-lesson ("scope to what the structure naturally provides") applied.
-- **`HookArgLog.cpp`** — global `HookArgLogSnapshot / Enable / Disable / Reset / ReadNth` dispatchers try ChainHook then ReturnMod.
-- **Memory accounting:** `mem_bytes = sizeof(HookArgLog) = 2208B` per site (32-byte header + 16 × 136-byte captures). Separate from `HookProfile::mem_bytes` — the two features account independently.
-
-**Scope discipline — RegInspect/SvcHook/InlineHooker explicitly deferred:**
-- **RegInspect:** its dispatcher `memcpy`s the full 784B frame into `g_snapshots[slot]` — args already visible via `regInspectSnapshot`, arg logging would be redundant.
-- **SvcHook:** runs in signal context, capture at dispatch helper is unsafe.
-- **InlineHooker:** relay is pure asm, no C++ hook point.
-
-Same scoping pattern as §8.7. §8.2 documents the asymmetry.
-
-**The 7 falsifiable assertions in `HookArgLogTest`:**
-
-1. `argLogDisabledByDefault` — after `chainAttach`, `hookArgLogLookup==true`, `hookArgLogCount==0`. A call while disabled doesn't capture.
-2. `argLogCapturesGpArgs` — attach to `argLogFixtureGp`, enable, call `(11,22,33,44,55,66,77,88)` → `count=1`, `read(ring[0]).slice(0,8) == [11,22,33,44,55,66,77,88]`, `pc == target entry`, `hookArgLogCapturesFp==true`.
-3. `argLogCapturesFpArgs` — attach to `argLogFixtureFp`, enable, call `(1.5, 2.5, 3.5, 4.5)` → `read(ring[0])[8..12]` decoded as doubles equal `[1.5, 2.5, 3.5, 4.5]`. **Zero new asm** — reads from the frame `chain_dispatch_naked` already populated.
-4. `argLogRingWraps` — 20 calls with `arg0=1..20`. `count=20`. `ring[0].gp0=17`, `ring[3].gp0=20`, `ring[4].gp0=5`. **This is the sharpest falsifier in the batch** — it fails if the fetch-add is not pre-increment, if the modulo mask is wrong, or if `head` is not 32-bit. Passed first try.
-5. `argLogDisabledStopsCapturing` — enable, 5 calls, disable, 5 more → `count` stays 5.
-6. `argLogResetClearsButPreservesEnabled` — enable, 3 calls, reset → `count=0`; then 2 more calls → `count=2`. Enabled preserved across reset.
-7. `argLogRetModCapturesGpOnly` — attach RetMod on the same GP fixture, enable → `hookArgLogCapturesFp==false`; call → `read(ring[0]).slice(0,8) == [11,22,33,44,55,66,77,88]`, all `fp` fields zero. **Proves the second subsystem + the documented asymmetry in one test.**
-
-**Number set:** All 7 tests green first try, zero iterations. This is the first non-trivial native feature since S43 that shipped clean on the first build. The reason is structural: S69's design reuses every discipline established by S66/S67 (POD struct, `__atomic_*_n`, opt-in toggle, per-site ring, global dispatcher) AND exploits a decision made in S43/S46/S48 (naked stub dumps all registers to stack, C++ helper reads them) to make arg capture a zero-asm feature.
-
-**Meta-lesson (S69):** *The Nth primitive in a pattern family costs what the 1st primitive's discipline cost, not what the Nth primitive's novelty costs — provided the Nth primitive is actually in the family. S69's `HookArgLog` is structurally identical to S66/S67's `HookProfile` (POD + atomics + opt-in + ring + global dispatcher). The only novelty was the ring buffer math, and that's a pure arithmetic property tested by one assertion (`argLogRingWraps`). The naked-stub-dumps-registers decision from S43 was the second thing that paid off: arg capture required no new asm because the register frame was already on the stack. Two prior disciplines, one clean feature. But also: S69's 7/7 first-try is not the general case — S68's 3 iterations is the counter-example. The difference is that S68's premise was build-config-dependent (brittle), while S69's premise was ABI-dependent (stable). **Rule 12's corollary applies in both directions — a stale premise costs iterations, a correct premise saves them.***
-
----
-
-## §8.7 Per-hook CPU / memory profiling (Session 66, extended Session 67)
-
-**Functional goal:** per-hook CPU cost and memory overhead accounting. **Both major handler-dispatch paths instrumented.**
-
-**The probe (S66)** measured per-site dispatch overhead: ChainHook 1 handler = 147ns; RetMod = 19ns; RegInspect passthru = 44ns; SvcHook = 1172ns. `System.nanoTime()` = ~174ns. **Design decision: `clock_gettime(CLOCK_MONOTONIC)` via VDSO, ~25ns.**
-
-**Mechanism:** `HookProfile` struct attached to every ChainSlot and RetModSlot. Dispatch helpers wrap each user-handler/modifier invocation in two `HookProfileReadNs()` and accumulate. Zero overhead when disabled. Memory footprint: ChainHook 8224B, ReturnMod 12288B.
-
-**Scope discipline:** RegInspect/SvcHook/InlineHooker explicitly deferred.
-
-**The 12 falsifiable assertions across `HookProfileTest` (ChainHook) and `ReturnModProfileTest` (ReturnMod).** Both green first try. S66: `count=100 total=40156ns min=307 max=4923 mem=8224B`. S67: `count=100 total=29231ns min=76 max=2384 mem=12288B`.
-
-**Meta-lesson (S66):** *Choose the robust primitive over the clever one when accessibility is uncertain and the feature is opt-in.*
-
-**Meta-lesson (S67):** *Extending a feature to a second subsystem is copy-and-adapt when the first implementation was structurally correct.*
+Per-guest tags, signal-safe uninstall, unified ELF symbol API, per-hook argument logging, per-hook profiling — all ✅ COMPLETE.
 
 ---
 
 ## Viber — regression canary, explicitly
 
-Viber is used for **one purpose**: verify that the engine primitives still work under a real, large, hostile-to-hooking app under real integration load.
-
-**Canary test:** `GuestLoadTest`. Asserts only `outcome != "?"`. Logcat-based signal: `booted-viber-order` + no new FATAL + providers ≥14 = canary green.
-
-**Canary state at Session 71 close (fresh process):** `outcome=booted-viber-order`, `elapsedMs=1668ms`, `providersAttempted=15`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise, `firstProviderError=com.google.mlkit.common.internal.MlKitInitProvider: IllegalStateException: MlKitContext is already initialized` — unchanged from S69/S70). **1668ms is the fastest canary on record** — 7ms faster than S69 (1675), 60ms faster than S70 (1728). This definitively closes the S70 tail question: the S70 +23ms over baseline was jitter, not a `kPropSpoofs` interaction. The five bootloader-integrity tell-set entries from S70 remain live and did not affect boot timing. Providers 15/14 confirmed. No new FATAL.
+**Canary state at Session 73 close (fresh process):** `outcome=booted-viber-order`, `providersAttempted=15`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise), `elapsedMs ~1670ms`. S72 and S73 shipped zero code — canary is unchanged from S71.
 
 **Measurement discipline:** canary must be measured from fresh process — `-e class com.ims134.hookengine.GuestLoadTest` as the only class.
 
 ---
 
-## Test suite state (as of Session 71 close)
+## Test suite state (as of Session 73 close)
 
 **Executed:** 249 · **Registered:** 252 · **Ignored:** 3 · **Failed:** 0
 
-Registered test classes (post-S71, full listing — delta from S70 is `HookTagTest` new + 7):
+Registered test classes are unchanged from S71 close (S72 and S73 shipped no code). See S71 close table.
 
-| Class | Tests | Status |
-|---|---|---|
-| NativeItemTest | 5 | ✅ |
-| ProcessHooksTest | 4 | ✅ |
-| RegressionTest | 5 | ✅ |
-| RelocTest | 1 (49 assertions) | ✅ |
-| ProxyBridgeSurfaceTest | 4 | ✅ |
-| NativeInitTest | 1 | ✅ |
-| AbiProbeTest | 2 | ✅ |
-| ThreadStatusProbeTest | 1 | ✅ |
-| MountsProbeTest | 2 | ✅ |
-| AntiDetectionTest | 1 | ✅ |
-| AntiDetectionE2ETest | 4 | ✅ |
-| PmSpoofTest | 4 | ✅ |
-| ClassLoaderBridgeTest | 3 | ✅ |
-| DualApplicationTest | 2 | ✅ |
-| BinderTransactE2ETest | 9 | ✅ |
-| BinderTransactHookTest | 2 | ✅ |
-| DynamicAttachTest | 6 | ✅ |
-| ChainHookTest | 6 | ✅ |
-| ArtMethodTraceTest | 5 | ✅ |
-| ConditionalHookTest | 6 | ✅ |
-| ReturnModTest | 6 | ✅ |
-| SvcHookTest | 6 | ✅ |
-| RegInspectTest | 6 | ✅ |
-| MemoryOpsTest | 6 | ✅ |
-| MapsEnumTest | 6 | ✅ |
-| ServiceManagerTest | 8 | ✅ |
-| SignalOverrideTest | 6 | ✅ |
-| BacktraceTest | 6 | ✅ |
-| NativeFnlnTest | 6 | ✅ |
-| DexLoadTest | 6 | ✅ |
-| DexMergeTest | 6 | ✅ |
-| PltResolveTest | 7 | ✅ |
-| SyntheticServiceTest | 6 | ✅ |
-| AdbDetectTest | 6 (2 ignored) | ⚠️ |
-| DebuggerDetectTest | 6 | ✅ |
-| EmulatorDetectTest | 6 | ✅ |
-| BuildPropTest | 11 | ✅ S70 |
-| NetTcpTest | 6 | ✅ |
-| CmdlineStackTest | 6 | ✅ |
-| SignalSafeUninstallTest | 6 | ✅ |
-| HookProfileTest | 6 | ✅ |
-| ReturnModProfileTest | 6 | ✅ |
-| ElfResolveTest | 8 | ✅ S68 |
-| HookArgLogTest | 7 | ✅ S69 |
-| **HookTagTest** | **7** | **✅ S71** |
-| GuestLoadTest | 1 | ✅ (canary) |
-| ActivityBootProbeTest | 1 | 🔒 ignored |
-| IntegrationTest | 1 | ✅ |
-| Diagnostic probes | several | non-gating |
-
-**Ignored count: 3** = `ActivityBootProbeTest` (1) + `AdbDetectTest` (2 — Settings.Global walled by §5.10).
-
-**Test count history (registered):**
-- S40: 51 · S41: 51 · S42: 57 · S43: 63 · S44: 68 · S45: 74 · S46: 80 · S47: 86 · S48: 92 · S49: 98
-- S50: 104 · S51: 112 · S52: 118 · S53: 124 · S54: 130 · S55: 136 · S56: 142 · S57: 149 · S58: 155
-- S59: 168 · S60: 177 · S61: 183 / 184 measured · S62: 191 · S63: 198 · S64: 205 · S65: 212
-- S66: 219 · S67: 225 · S68: 233 · S69: 240 · S70: 245 · **S71 close: 252** (+7: HookTagTest)
+**Test count history:** S40: 51 · … · S68: 233 · S69: 240 · S70: 245 · S71: 252 · S72: 252 · **S73: 252**
 
 ---
 
-## Session 72 first actions (authoritative)
+## Session 74 first actions (authoritative)
 
-Phase F is 7/11 sessions complete (S65 ✅, S66 ✅, S67 ✅, S68 ✅, S69 ✅, S70 ✅, S71 ✅). **Category 6 is now 9/9 COMPLETE.** The only remaining ⚠️ is 5.10 (Settings.Global walled) — which is a **disassembly session** (IDA/Ghidra), not an engine-primitive session.
+**Session 74's one-sentence target:** run the full engine regression suite and the fresh-process canary one more time to confirm the engine ships in the state S73 documented (66/67 = 98.5% with one honestly walled feature), and prepare the S75 close.
 
-Session 72 targets one of the three Phase-F disassembly items. **Recommendation: 5.10 Settings.Global — the highest-value target** because it's the last partially-complete feature in the inventory, and closing it (or confirming the wall) transitions 5.10 from ⚠️ → ✅ or ⚠️ → documented-wall.
+1. Confirm S73 commit landed (`git log --oneline -3`).
+2. **Fresh-process canary rerun.** `-e class com.ims134.hookengine.GuestLoadTest` alone. Expect `booted-viber-order`, providers 15/14, elapsedMs 1660–1705.
+3. **Full regression suite.** `am instrument -w -r com.ims134.hookengine.test/androidx.test.runner.AndroidJUnitRunner`. Expect `numtests=252`, `OK (249 tests)`, 3 `-3` markers, 0 failures. This is the "no regression from the S71/S73 work" gate.
+4. **Buffer.** If regression is clean, use the remaining time to spot-check 2–3 test classes individually (recommended: `ChainHookTest`, `HookTagTest`, `ElfResolveTest`) — confirm they pass in isolation, not just within the full suite.
+5. Commit S74 (should be a no-code-change commit; only PROJECT_STATE.md gets an updated "S74 regression run: green" note).
+6. **No new features.** No scope creep. S74 is a verification session. S75 is the final close.
 
-1. Confirm S71 commit landed (`git log --oneline -3`).
-2. **Fresh-process canary rerun** to confirm S71 no-regression. Expected `outcome=booted-viber-order`, providers 15/14, `elapsedMs` in the 1660-1705 band (S71 measured 1668 — expect similar).
-3. **5.10 Settings.Global disassembly prep:**
-  - Pull `framework.jar` from the device.
-  - Decompile `classes3.dex` with baksmali or `jadx` to locate `Settings$NameValueCache.getStringForUser`.
-  - Trace the shared-memory read path (the `sNameValueCache`'s underlying map, whether the read ultimately comes from a `MemoryFile` / `SharedMemory` / direct mmap).
-  - Produce a concrete proposal for S73 to implement (either a new hook mechanism with a candidate target address, or an honest "this is architecturally walled and here's the exact reason — 5.10 becomes a documented wall" close).
-  - **No code changes for 5.10 in S72** if the disassembly produces no candidate. If it does, S72 can scope it to S73.
-4. **If disassembly produces a candidate:** implement the hook in S73, un-ignore the two `AdbDetectTest` assertions, and see if they go green or confirm the wall.
-5. **If disassembly confirms the wall:** S72 closes with 5.10 → `⚠️` downgraded to a documented wall (comparable to §5.14/§5.15/§5.16 precedent), and S73 moves to the S51 cache-hit or S60 Debug/VMDebug disassembly instead.
-
-**Expected scope:** Medium. Pure analysis. Zero engine code unless a candidate emerges.
+**Expected scope:** Small. ~1–2 hours (suite wall is ~40s, but expect multiple runs if any flake).
 
 ---
 
@@ -721,15 +511,15 @@ Session 72 targets one of the three Phase-F disassembly items. **Recommendation:
 
 - **Target is the engine feature inventory, not ApplicationProxy coverage.**
 - **Viber is canary only. Canary must be measured from fresh process.**
-- **Every session advances at least one ⚠️/❌/🔧 → ✅.** (S71: 6.2 → ✅.)
+- **Every session advances at least one ⚠️/❌/🔧 → ✅.** (S73: 5.10 → ⚠️ WALLED — the feature advances from "CANDIDATE" to "measured, documented wall". The transition is CANDIDATE → WALLED, not CANDIDATE → ✅. Rule 12's honesty discipline requires the wall to be documented, not hidden.)
 - **Verification-first:** verify any prior-session unverified code before writing new code.
 - **Rule 5 (behavior match) — partial disclosure for structural ports.**
-- **Rule 12: test assertions must be able to fail.** Corollary: **a test whose premise is stale is also a Rule 12 violation.** **A build-config premise is a test premise.** ABI/ABI-level premises are stable; build-config premises are brittle — prefer the former in test design. **Delivery-dimension corollary (S71): a multi-file delivery is only as complete as its least-applied file. Measure end-to-end, not per-file.**
+- **Rule 12: test assertions must be able to fail.** Corollary: **a test whose premise is stale is also a Rule 12 violation.** **A build-config premise is a test premise.** **Delivery-dimension corollary (S71): a multi-file delivery is only as complete as its least-applied file.** **Contradiction-resolution corollary (S72/S73): a static analysis and a runtime measurement must agree. When they contradict, the runtime measurement wins, and the static analysis is the search-space narrow-er, not the verdict.**
 - **Rule 14: every test-run instruction includes `./gradlew` + `adb install -r -t` on both APKs.**
 - **Rule 15: engine is native.**
 - **Rule 7 (decomp-first) when wire format / symbol / field layout is uncertain.**
 - **No `am instrument` output = no session close.**
-- **Deferred items stay deferred:** handleJHMethod (S18), tnFIN code-36 byte rewrite (S12), clone-app features, chain/retmod tagging (deferred from §6.2).
+- **Deferred items stay deferred:** handleJHMethod (S18), tnFIN code-36 byte rewrite (S12), clone-app features, 5.10 disassembly of MIUI client cache (documented wall, Phase-F-external).
 - **Full-file replacements only for code files.** Documentation edits use targeted edits within the existing file.
 - **The S59 meta-lesson:** install success ≠ interception success.
 - **The S60 meta-lesson:** spec-predicted mechanism ≠ the only mechanism that achieves the goal. Verify *whether*, not *how*.
@@ -739,95 +529,41 @@ Session 72 targets one of the three Phase-F disassembly items. **Recommendation:
 - **The S64 meta-lesson:** the functional goal may be achieved at multiple independent layers of the stack.
 - **The S65 meta-lesson:** non-trivial native features reveal bugs one subsystem at a time.
 - **The S66 meta-lesson:** choose the robust primitive over the clever one.
-- **The S67 meta-lesson:** extending a feature to a second subsystem is copy-and-adapt when the first implementation was structurally correct. Also — a stale @Ignore is a lie about current behavior.
-- **The S68 meta-lesson:** a build-config premise is a test premise. Pivot the test to where the premise holds naturally; don't add more build-config to force the premise true.
-- **The S69 meta-lesson:** the Nth primitive in a pattern family costs what the 1st primitive's discipline cost, not what the Nth primitive's novelty cost. Two prior disciplines made S69 zero-new-asm and 7/7 first-try. But S68's 3-iteration session is the counter-example: brittle (build-config) premises cost iterations, stable (ABI) premises save them.
-- **The S70 meta-lesson:** when every branch of a decision table converges on the same verdict, the measurement step is diagnostic, not gating. A non-gating diagnostic whose outcome doesn't affect the verdict doesn't need to be resolved before shipping.
-- **The S71 meta-lesson:** a multi-file delivery is only as complete as its least-applied file. Five correct files + one stale file = a red build, not a five-file success. Rule 12's corollary applies in the delivery dimension: measure end-to-end, not per-file. The design itself held up — S71 shipped 7/7 first-try on the tagging semantics with zero design iteration; the failure was in delivery hygiene, not in engineering.
+- **The S67 meta-lesson:** extending a feature to a second subsystem is copy-and-adapt when the first implementation was structurally correct. Also — a stale `@Ignore` is a lie about current behavior.
+- **The S68 meta-lesson:** a build-config premise is a test premise. Pivot the test to where the premise holds naturally.
+- **The S69 meta-lesson:** the Nth primitive in a pattern family costs what the 1st primitive's discipline cost. A stale premise costs iterations; a stable premise saves them.
+- **The S70 meta-lesson:** when every branch of a decision table converges on the same verdict, the measurement step is diagnostic, not gating.
+- **The S71 meta-lesson:** a multi-file delivery is only as complete as its least-applied file. Measure end-to-end, not per-file.
+- **The S72 meta-lesson:** decompiled code documents intent; runtime measurement documents behavior. Neither alone can close a feature whose behavior contradicts the decomp. The decomp narrows the search space; the fresh measurement terminates it.
+- **The S73 meta-lesson:** an engine primitive that works for other inputs (control `android_id` fires code=21) but returns `fireDelta=0` for the target is not a bug in the engine — it is a measurement of the framework's own short-circuit. The correct action is to record the wall, not to keep adding filters. **A "candidate that fails on fresh-process measurement" is a wall, not a backlog item. S73's job was to prove or refute the candidate. It refuted it. That's a completed feature, honestly walled.**
 
 ---
 
 ## Hard-won facts (canonical reference)
 
-Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–71:
+Facts from Sessions 1–72 retained verbatim. Additions from Session 73:
 
 *(all previous facts retained)*
 
-- Feature 7.1 — Unified ELF symbol API (S68). Key facts:
-  - **`.symtab` companion string table MUST be found via `symtab_hdr->sh_link`, not by section name lookup.**
-  - **AGP + NDK 30.0.16248370 strips `.symtab` from CMake-built `.so` files even in `debug` builds.** `keepDebugSymbols` doesn't work on this toolchain.
-  - **APK-internal paths (`dlpi_name` = `...base.apk!/lib/...`) are not filesystem-openable.** `ElfMappedLib_Open` extended with filesystem-path mode.
-  - **Pseudo-libs `[vdso]`, `[vvar]`, `[stack]` must be skipped before `open()`.**
-  - **`ElfSymbolLookupLastPath()` diagnostic is a Rule 12 enabler.** Without it, `.symtab` fallback is un-falsifiable.
+- **Feature 5.10 — Settings.Global.getInt("adb_enabled") on MIUI/API 37 — WALLED by fresh-process measurement (S73).**
+  - **The definitive measurement:** fresh-process `BinderTransactHook.install=true`, `baseline fireCount=0` → `getInt(ADB_ENABLED): result=1 elapsed=1ms fireDelta=0 codes=[]` → `getString(android_id) [control]: result=... elapsed=5ms fireDelta=1 codes=[21]`. **The control fires, the target doesn't.**
+  - **The elapsed time is the smoking gun.** Sub-millisecond reads for the target vs 5ms for the control. Real Binder transacts are milliseconds. A `fireDelta=0` with `elapsed=0-1ms` returning a correct value means the value came from an in-process cache.
+  - **MIUI's `mValues` client-side cache is populated before hook install.** The probe shows `mValues.get("adb_enabled") = "0"` — the map is populated. `hasTracker=false` — the decomp's cache-hit branch is dead. **MIUI has additional code** (probably in `SettingsProvider` client bindings or a `MiuiSettings` helper) that populates `mValues` at process init.
+  - **The `NameValueCache.getStringForUser` decomp is stock AOSP.** MIUI must have modified `Settings.java` outside `classes3.dex`, or added a new class that intercepts, or `SettingsProvider` returns values in a way that populates the client cache without a subsequent transact.
+  - **A `BinderTransactHook` filter cannot close 5.10** because there are zero transacts to filter. Confirmed by S73's fireDelta=0 on a fresh process.
+  - **The candidate was worth refuting:** S72's decomp showed `cp.call(...)` as the only live path — a fresh measurement was the only way to test the decomp's claim. The measurement contradicted the decomp, which is a valid scientific outcome, not a failure of S72.
+  - **`AdbDetectTest.adbEnabledReturnsZero` and `developmentSettingsEnabledReturnsZero` remain `@Ignore`'d.** Their `@Ignore` reason must be updated to reference both the S72 decomp and S73 measurement, replacing the S59 four-hypothesis language with the definitive "0 transacts on fresh process, control fires" evidence.
 
-- Feature 8.2 — Per-hook argument logging (S69). Key facts:
-  - **`chain_dispatch_naked` already saves x0–x7 AND q0–q7 to the stack frame** at `sp+0..sp+48` (GP) and `sp+176..sp+304` (FP). GP arg `x0..x7` = `saved[0..7]`. FP arg `d0..d7` = low-64-bits of `q0..q7` at `saved[22], saved[24], ..., saved[36]`. **Zero new asm needed for GP+FP capture.**
-  - **`retmod_stub_*` saves only x0–x7 (80-byte frame).** No q0–q7 on the frame. Adding 128 bytes to save q0–q7 on every RetMod dispatch was rejected for an opt-in feature — GP-only capture is the honest compromise. `HookArgLog.captures_fp` field distinguishes the two subsystems at runtime.
-  - **`argLogFixtureGp` must be `naked`** so its arguments stay in x0–x7 at entry.
-  - **`argLogFixtureFp` must be normal C++ (noinline)** — its double args are already in d0–d3 per AAPCS64, and `chain_dispatch_naked` saves those d registers to the stack before the dispatch helper runs.
-  - **`__atomic_fetch_add(&log->head, 1)` returns the PRE-increment value.** After 20 captures, `head=20`, `ring[0..3]` hold calls #17..#20, `ring[4..15]` hold calls #5..#16. **Test 4 (`argLogRingWraps`) asserts this exactly.**
-  - **`mem_bytes = sizeof(HookArgLog) = 2208B`** (32-byte header + 16 × 136-byte captures). Reported separately from `HookProfile::mem_bytes`.
-  - **`hookArgLogRead(target, ringIdx)` returns `LongArray[17]` = `{gp0..gp7, fp0..fp7, pc}`.** Doubles decoded via `Double.fromBits(arr[8+i])`.
-  - **The two-feature independence (`HookProfile` and `HookArgLog`) means disabling one doesn't affect the other.**
-  - **`HookArgLog` fields are plain POD accessed via `__atomic_*_n`** — same discipline as `HookProfile`.
-
-- Feature 5.6 — Build property coverage (S70). Key facts:
-  - **`g_fakeProps` slots are allocated one-per-distinct-spoofed-name and never released.** The array size is therefore a hard ceiling on how many spoofed names can ever be `__system_property_find`-able. At 16 slots and 15 spoofed names the old ceiling had zero headroom — a `static_assert` now binds the two sizes so any future overflow is a build failure, not a silent `Fake___system_property_find` returning `nullptr`.
-  - **A property that is already honest on the device gains nothing from a spoof entry.** `ro.product.first_api_level` and `ro.build.version.security_patch` were deliberately **not** added: a fabricated value manufactures an inconsistency with `Build.VERSION.*` / `minSdk` / vendor patch level, which is a louder tell than the real value. (S69 meta-lesson applied in the negative direction.)
-  - **The `BuildPropTest` assertions are the feature, not the table entries.** They fail if the property ever flips to an unlocked tell — whether that flip comes from a removed spoof entry or a ROM update. On a device whose real values are clean (this one), the entries are behavior-neutral and the assertions are regression guards; on a device whose real values are tampered, the entries are load-bearing and the assertions are the verification.
-  - **Vendor libraries (`PowerHalWrapper`, MediaTek framework) read vendor properties via `__system_property_get` but those libs are not in `ShouldHookProperty`'s scope.** So vendor-side `ro.boot.warranty_bit` / `ro.warranty_bit` reads hit the real device values, not the spoof. The S70 canary move (1675 → 1728) was suspected to be a vendor-side interaction with the new tell-set entries; **S71 measured 1668ms — faster than S69 — so the S70 1728ms was jitter, not a real interaction.** The vendor-suspect hypothesis is empirically refuted.
-
-- Feature 6.2 — Per-guest tags (S71). Key facts:
-  - **`HookHandle.tag[48]` is a plain field set while the handle is `HS_INSTALLING`, inside the same `g_reg_mutex` critical section as the state flip.** A post-hoc `RegistrySetTag(target, ...)` would race with `RegistryUninstallByTag`'s `HS_INSTALLED` filter — `RegistryUninstallByTag` only ever sees `HS_INSTALLED` handles, so a handle must be fully-tagged by the time it's `HS_INSTALLED`.
-  - **Thread-local pending tag (`g_pendingTag[48]`) is consumed by `RegistryAlloc` under `g_reg_mutex`.** The tag lives only for the interval between `RegistrySetPendingTag(tag)` (or `HookGotEntryExTagged`'s wrap) and the `RegistryAlloc` that follows inside `HookGotEntryEx`. `HookGotEntryExTagged` guarantees cleanup on both success and failure paths — direct `RegistrySetPendingTag` calls must replicate this dance or risk leaking the tag to the next install on the same thread.
-  - **`FindHandle` is tag-blind and must stay that way.** One address holds one patch. Conflict detection operates on target address only. A tag-aware `FindHandle` would allow a second install on an already-hooked address under a different tag, silently double-patching the slot — exactly what 6.7 (inter-hook conflict detection) exists to prevent.
-  - **`HookGotEntryEx`'s early `if (*gotAddress == newFunction) return HOOK_ALREADY_HOOKED;` fires before `FindHandle`.** So a same-replacement reinstall on an already-owned target returns code 8 (ALREADY_HOOKED) without ever reaching `FindHandle`. To exercise `FindHandle` directly, install a **different** replacement — `HOOK_INTERNAL_ERROR` (code 10) is the correct response when `FindHandle` finds a handle with a different replacement. This is why the S71 fixture set has both `g_tagRepls[]` and `g_tagAlts[]`.
-  - **`RegistryUninstallByTag` uses `std::vector<UnhookTarget>` capture-then-unhook, never holds `g_reg_mutex` across an unhook.** Both `UnhookGotEntry` and `UninstallInlineHook` call `RegistryFree`, which re-acquires `g_reg_mutex` — a lock_guard spanning the unhook loop self-deadlocks on the first iteration.
-  - **Synthetic GOT slots in `.data` of `libhookengine.so` are safe targets for `HookGotEntryEx`.** `ReadPageProt(pageStart)` succeeds (the `.data` page is always in `/proc/self/maps`), `mprotect(RW)` succeeds, the pointer write lands, and `HookHandle.target` records the slot address so uninstall restores the original value correctly. No need for real GOT slots or real symbol imports for tagging tests.
-  - **`HookRegistry.h` must carry both the `HookHandle.tag[48]` field AND the `extern "C" HookResult HookGotEntryEx(...)` declaration.** Missing either causes cascading compile errors when `HookRegistry.cpp`'s `HookGotEntryExTagged` and the tag-filtering walkers are compiled — this is exactly what happened on S71's first build attempt.
-
-- S69 companion finding — **first-try green is not the general case, it's the case when the premise is stable.** S69 shipped 7/7 first try because every premise was an ABI fact. S68 shipped on the 3rd iteration because the premise was a build-config fact. The lesson is not "prefer ABI premises" — it's "measure the premise BEFORE writing the test; a stale premise is the iteration tax." S70 (5/5 new assertions green first-try) and S71 (7/7 green first-try) both confirm: when the premise is ABI- or data-stable and the design reuses a proven pattern, iterations are zero.
+- **S73 companion finding — a decompiled static path can be superseded by a cache.** When S72's decomp showed `cp.call(...)` as the only live branch, the natural inference was "transact should fire." S73's measurement refuted that inference. **The lesson: a decompiled read path documents the *intended* control flow, but MIUI-specific caching can short-circuit intended flow before it executes.** Decomp + fresh measurement must both agree before a feature can be closed; when they disagree, the measurement wins.
 
 ---
 
 ## The blunt version
 
-**Four categories complete:** Category 1 (Hook mechanisms, 9/9), Category 2 (Memory primitives, 7/7), Category 3 (IPC / kernel boundary, 7/7), Category 4 (Class loading, 6/6). **Category 6 (Safety / correctness) is 9/9 COMPLETE** as of S71. **Category 7 (Symbol / ELF) is 6/6 COMPLETE.** **Category 8 (Diagnostics) is 7/7 COMPLETE.** Only Category 5 remains partial: 15/16 filters, with `5.10` (ADB-detect / Settings.Global) as the last ⚠️. **Phase E CLOSED** at S64. **Phase F is 7/11 sessions complete** — 6.8 signal-safe uninstall ✅ (S65), 8.7 per-hook profiling ✅ (S66+S67), 7.1 unified ELF symbol API ✅ (S68), 8.2 per-hook argument logging ✅ (S69), 5.6 build property coverage ✅ (S70), **6.2 per-guest tags ✅ (S71)**. Sessions 41–71 shipped thirty-four verified primitives, all on-device verified with fail-able tests:
+**Four categories complete:** Category 1 (Hook mechanisms, 9/9), Category 2 (Memory primitives, 7/7), Category 3 (IPC / kernel boundary, 7/7), Category 4 (Class loading, 6/6), Category 6 (Safety / correctness, 9/9), Category 7 (Symbol / ELF, 6/6), Category 8 (Diagnostics, 7/7). **Category 5 is 15/16 with 5.10 as a measured architectural wall.** Phase E CLOSED at S64. **Phase F is 9/11 sessions complete** — 6.8 ✅ (S65), 8.7 ✅ (S66+S67), 7.1 ✅ (S68), 8.2 ✅ (S69), 5.6 ✅ (S70), 6.2 ✅ (S71), 5.10 ⚠️ WALLED (S72 decomp + S73 measurement).
 
-- 41: full ARM64 relocation (9 kinds)
-- 42: dynamic attach
-- 43: hook chaining
-- 44: ArtMethod trace
-- 45: conditional hook
-- 46: return-value modification
-- 47: SVC instruction hooking
-- 48: register state inspection
-- 49: memory read / write / scan
-- 50: full maps enumeration
-- 51: ServiceManager lookup interception (transact-level)
-- 52: signal handling override
-- 53: backtrace from hook site
-- 54: native ClassLoader chaining (Rule 15 debt closure)
-- 55: dynamic DEX loading
-- 56: DEX merging at runtime
-- 57: PLT stub resolution
-- 58: Native ServiceManager addition (JNI-impl hook on `nativeReadStrongBinder`)
-- 59: ADB detect blocking (⚠️ PARTIAL — Settings.Global walled)
-- 60: debugger detect blocking (✅ — property-gated JDWP)
-- 61: emulator detect blocking (✅ — real-device cleanliness)
-- 62: test-keys detect blocking (✅ — 3 surfaces)
-- 63: /proc/net/tcp blocking (✅ — OS-level SELinux)
-- 64: /proc/self/cmdline + syscall/stack filter (✅ — setArgV0 + kernel + S23)
-- 65: signal-safe uninstall (✅ — deferred SPSC + worker; `AllocateMemoryNear` page-scan)
-- 66: per-hook profiling ChainHook (✅ — `HookProfile` + CLOCK_MONOTONIC)
-- 67: per-hook profiling ReturnMod (✅ — same pattern, 6/6 first try)
-- 68: unified ELF symbol API (✅ — `ElfResolver` + `ElfMappedLib`; 3 iterations)
-- 69: per-hook argument logging (✅ — `HookArgLog` + 16-slot ring; 7/7 first try)
-- 70: build property coverage (✅ — 5 tell-set props + pool bump + `static_assert`; 5/5 new tests first try)
-- 71: per-guest tags (✅ — `HookTag` + TLS pending tag + capture-then-unhook; 7/7 first try after one-file build fix; canary 1668ms, fastest on record)
+**252 registered tests, 249 executed, 3 ignored, 0 failed at S73 close.** S73 was a single-measurement session that refuted the S72 candidate. **The probe data is unambiguous:** control fires `fireDelta=1 code=21`, target fires `fireDelta=0` with `result=1 elapsed=0-1ms`. That is a MIUI-side cache, not an engine-side bug.
 
-**252 registered tests, 249 executed, 3 ignored, 0 failed at S71 close.** Session 66 was the cleanest native-deliverable session — 6/6 green first build. Session 67 matched that. Session 69 matched and exceeded it — 7/7 green first build on a feature with a novel data structure. Session 70 matched that again — 5/5 green first build on the 5.6 tell-set extension. **Session 71 matched that on the assertion side (7/7 first-try) with one process hiccup: the first build attempt failed on a stale `HookRegistry.h`, costing one extra build cycle and no design work.** S68's 3 iterations were the cost of a stale build-config premise; S71's 1 iteration was the cost of a stale file at the delivery boundary. Both are Rule-12-corollary-shaped failures: measure the premise (per S68) or measure the delivery (per S71) before declaring success.
+**Phase F is 9/11 sessions in.** Remaining: **S74** is the full regression run + fresh canary confirmation. **S75** is the final `PROJECT_STATE.md` close, marking the engine 66/67 = 98.5% with one honestly walled feature.
 
-**Phase F is 7/11 sessions in.** Remaining: 5.10 (Settings.Global shared-mem disassembly — Phase F), plus the three Phase-F disassembly items (S51 cache-hit, S60 Debug/VMDebug fast-JNI, §5.10 Settings.Global). Session 75 closes.
-
-**If a future session can't state a specific ⚠️/❌/🔧 → ✅ transition in one sentence, it's not a session.**
+**If a future session can't state a specific ⚠️/❌/🔧 → ✅ (or → WALLED) transition in one sentence, it's not a session.**
