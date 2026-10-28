@@ -176,7 +176,7 @@ Viber boot under the engine is a **regression canary**, not a target. Every sess
 
 # PROJECT STATE
 
-Last updated: **Session 66 close (2026-10-28)**. Supersedes Session-65-close version. Sessions 41–66 landed on disk and are on-device verified (218 registered, 212 executed, 0 failed, 6 ignored at Session 66 close). Feature 5.10 ADB-detect = ⚠️ PARTIAL (property surface complete; Settings.Global surface architecturally walled — see §5.10 below). Features 5.11–5.16 = ✅ COMPLETE (see §5.11–§5.16 below). Feature 6.8 signal-safe uninstall = ✅ COMPLETE via deferred SPSC ring buffer + worker thread (see §6.8 below). Feature 8.7 per-hook profiling = ✅ COMPLETE via CLOCK_MONOTONIC instrumentation on ChainHook dispatch helper (see §8.7 below).
+Last updated: **Session 66 close (2026-10-28)**. Supersedes Session-65-close version. Sessions 41–66 landed on disk and are on-device verified (218 registered, 213 executed, 0 failed, 6 ignored at Session 66 close). Feature 5.10 ADB-detect = ⚠️ PARTIAL (property surface complete; Settings.Global surface architecturally walled — see §5.10 below). Features 5.11–5.16 = ✅ COMPLETE (see §5.11–§5.16 below). Feature 6.8 signal-safe uninstall = ✅ COMPLETE via deferred SPSC ring buffer + worker thread (see §6.8 below). Feature 8.7 per-hook profiling = ✅ COMPLETE via CLOCK_MONOTONIC instrumentation on ChainHook dispatch helper (see §8.7 below).
 
 ---
 
@@ -1243,7 +1243,7 @@ Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–66:
 - 65: signal-safe uninstall (✅ — deferred SPSC queue + worker thread; `AllocateMemoryNear` page-scan rewrite)
 - 66: per-hook profiling (✅ — `HookProfile` struct + `clock_gettime(CLOCK_MONOTONIC)` instrumentation on ChainHook dispatch helper)
 
-**218 registered tests, 0 failed at S66 close.** Session 66 opened Phase F's second native deliverable — **6/6 tests green on the first build**, zero iteration. That's the cleanest session since the probe-first discipline was established. S65 was 3 test failures before green; S66 was 0. The difference: S66's mechanism was well-understood before implementation (the probe gave the design decision up front, and ChainHook's dispatch helper is structurally simple), whereas S65's SPSC queue allocator/observation/reset fixes were each discovered by test failure.
+**219 registered tests, 0 failed at S66 close.** Session 66 opened Phase F's second native deliverable — **6/6 tests green on the first build**, zero iteration. That's the cleanest session since the probe-first discipline was established. S65 was 3 test failures before green; S66 was 0. The difference: S66's mechanism was well-understood before implementation (the probe gave the design decision up front, and ChainHook's dispatch helper is structurally simple), whereas S65's SPSC queue allocator/observation/reset fixes were each discovered by test failure.
 
 **S66 chose robustness over cleverness.** `mrs x0, cntvct_el0` at ~2ns would have been 80× faster than `clock_gettime(CLOCK_MONOTONIC)` at ~25ns. But its accessibility is kernel-config-dependent and a SIGILL from inside a dispatch helper would kill the process — no recovery. Since the feature is opt-in (zero overhead when disabled), the 60ns per-dispatch cost when enabled is acceptable. Correctness is non-negotiable; the fast path can be a future optimization if the operator opts in.
 
