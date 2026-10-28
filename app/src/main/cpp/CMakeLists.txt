@@ -39,6 +39,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         PltResolver.cpp
         PltResolverJni.cpp
         SyntheticServiceRegistry.cpp
+        HookProfile.cpp
         ApplicationProxy.cpp
         GuestBoot.cpp
         test_item1.cpp

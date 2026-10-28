@@ -1915,3 +1915,55 @@ Java_com_ims134_hookengine_NativeTestBridge_signalSafeUninstallStats(
     return arr;
 }
 
+// ─── Feature 8.7 — Per-hook CPU/memory profiling JNI bridges ─────────
+#include "HookProfile.h"
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_hookProfileLookup(
+        JNIEnv* env, jobject, jlong target) {
+    HookProfile p{};
+    if (!HookProfileLookup((void*)(uintptr_t)target, &p)) return JNI_FALSE;
+    // Store the result in a thread-local buffer that hookProfileRead returns.
+    // Simpler: return presence only; reading uses hookProfileRead below.
+    return JNI_TRUE;
+}
+
+// Single-JNI read: returns long[6] = {enabled, call_count, total_ns,
+// min_ns, max_ns, mem_bytes}. Or null if target not found.
+extern "C" JNIEXPORT jlongArray JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_hookProfileRead(
+        JNIEnv* env, jobject, jlong target) {
+    HookProfile p{};
+    if (!HookProfileLookup((void*)(uintptr_t)target, &p)) return nullptr;
+    jlongArray arr = env->NewLongArray(6);
+    if (!arr) return nullptr;
+    jlong vals[6] = {
+            p.enabled ? 1L : 0L,
+            (jlong)p.call_count,
+            (jlong)p.total_ns,
+            (jlong)p.min_ns,
+            (jlong)p.max_ns,
+            (jlong)p.mem_bytes,
+    };
+    env->SetLongArrayRegion(arr, 0, 6, vals);
+    return arr;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_hookProfileEnable(
+        JNIEnv*, jobject, jlong target) {
+    return HookProfileEnable((void*)(uintptr_t)target) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_hookProfileDisable(
+        JNIEnv*, jobject, jlong target) {
+    return HookProfileDisable((void*)(uintptr_t)target) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_ims134_hookengine_NativeTestBridge_hookProfileReset(
+        JNIEnv*, jobject, jlong target) {
+    return HookProfileReset((void*)(uintptr_t)target) ? JNI_TRUE : JNI_FALSE;
+}
+

@@ -1,4 +1,5 @@
 #include "ChainHook.h"
+#include "HookProfile.h"
 #include <sys/mman.h>
 #include <unistd.h>
 #include <android/log.h>
@@ -16,7 +17,7 @@ extern "C" HookResult UninstallInlineHook(void*);
 #define MAX_CHAINS              16
 #define MAX_HANDLERS_PER_CHAIN  8
 #define STUB_SIZE               32
-#define STUB_PAGE_STUBS         32      // 32 slots per 4K page (only 16 used)
+#define STUB_PAGE_STUBS         32
 
 struct ChainSlot {
     bool           active = false;
@@ -26,6 +27,7 @@ struct ChainSlot {
     int            stub_slot = -1;
     ChainHandlerFn   handlers[MAX_HANDLERS_PER_CHAIN]   = {nullptr};
     ChainPredicateFn predicates[MAX_HANDLERS_PER_CHAIN] = {nullptr};
+    HookProfile    profile;   // S66 — per-site profiling
 };
 
 static ChainSlot       g_chains[MAX_CHAINS];
@@ -34,32 +36,6 @@ static uint8_t*        g_stub_page = nullptr;
 static std::once_flag  g_stub_init_flag;
 static bool            g_stub_init_ok = false;
 
-// ─── Dispatcher (naked asm) ─────────────────────────────────────────────
-//
-// Frame layout (320 bytes, 16-byte aligned):
-//   sp+0   : x0, x1
-//   sp+16  : x2, x3
-//   sp+32  : x4, x5
-//   sp+48  : x6, x7
-//   sp+64  : x8, x9   (x9 = chain slot id, our convention)
-//   sp+80  : x19, x20
-//   sp+96  : x21, x22
-//   sp+112 : x23, x24
-//   sp+128 : x25, x26
-//   sp+144 : x27, x28
-//   sp+160 : x29, x30
-//   sp+176 : q0, q1
-//   sp+208 : q2, q3
-//   sp+240 : q4, q5
-//   sp+272 : q6, q7
-//   sp+304 : (8 bytes) trampoline — helper writes here
-//
-// Helper reads target_id from x9 slot (u64 index 9), invokes handlers with
-// pointer to x0..x7 (u64 index 0), writes trampoline to u64 index 38.
-//
-// visibility("hidden") on chain_dispatch_helper is REQUIRED — see header
-// comment in the original Session 43 code. Same pattern as g_adrp_value
-// in test_item1.cpp.
 extern "C" __attribute__((visibility("hidden"))) void chain_dispatch_helper(uint64_t* saved_frame);
 
 extern "C" __attribute__((naked)) void chain_dispatch_naked() {
@@ -104,14 +80,14 @@ extern "C" __attribute__((naked)) void chain_dispatch_naked() {
             );
 }
 
-// ─── Helper (C++) — Feature 1.8 adds per-slot predicate gating ─────────
 extern "C" __attribute__((visibility("hidden"))) void chain_dispatch_helper(uint64_t* saved) {
-    uint64_t slot_id = saved[9];            // x9 slot
-    uint64_t* xregs  = &saved[0];           // x0..x7
-    uint64_t* tramp_slot = &saved[38];      // byte offset 304
+    uint64_t slot_id = saved[9];
+    uint64_t* xregs  = &saved[0];
+    uint64_t* tramp_slot = &saved[38];
 
     ChainHandlerFn   local_handlers[MAX_HANDLERS_PER_CHAIN];
     ChainPredicateFn local_preds[MAX_HANDLERS_PER_CHAIN];
+    HookProfile*     local_profile = nullptr;
     int n = 0;
     void* tramp = nullptr;
     {
@@ -120,6 +96,7 @@ extern "C" __attribute__((visibility("hidden"))) void chain_dispatch_helper(uint
             if (s.active && s.stub_slot == (int)slot_id) {
                 n = s.handler_count;
                 tramp = s.trampoline;
+                local_profile = &s.profile;
                 for (int i = 0; i < n; i++) {
                     local_handlers[i] = s.handlers[i];
                     local_preds[i]    = s.predicates[i];
@@ -128,31 +105,25 @@ extern "C" __attribute__((visibility("hidden"))) void chain_dispatch_helper(uint
             }
         }
     }
-    // Handlers run outside the mutex — prevents re-entrant deadlock if a
-    // handler calls into another chained target.
-    //
-    // Per-slot gating: if a predicate is set, evaluate it. false → skip
-    // handler body and entry-callback. nullptr → unconditional fire
-    // (identical to pre-1.8 behavior). Even when all handlers are
-    // skipped, orig runs via the trampoline and the caller observes the
-    // real return value.
+
+    bool profile_enabled = local_profile
+                           && __atomic_load_n(&local_profile->enabled, __ATOMIC_RELAXED);
+
     for (int i = 0; i < n; i++) {
         if (!local_handlers[i]) continue;
         if (local_preds[i] && !local_preds[i](xregs)) continue;
-        local_handlers[i](xregs);
+        if (profile_enabled) {
+            uint64_t t0 = HookProfileReadNs();
+            local_handlers[i](xregs);
+            uint64_t t1 = HookProfileReadNs();
+            HookProfileAccumulate(local_profile, t1 - t0);
+        } else {
+            local_handlers[i](xregs);
+        }
     }
     *tramp_slot = (uint64_t)tramp;
 }
 
-// ─── Stub page (pre-filled once, never rewritten) ───────────────────────
-//
-// Layout (32 bytes):
-//   +0  : ldr x16, [pc, #0x10]   ; dispatcher
-//   +4  : ldr x9,  [pc, #0x14]   ; target_id = slot index
-//   +8  : br  x16
-//   +12 : nop
-//   +16 : dispatcher (8 bytes)
-//   +24 : target_id  (8 bytes)
 static bool EnsureStubPage() {
     std::call_once(g_stub_init_flag, []() {
         long ps = sysconf(_SC_PAGESIZE);
@@ -162,10 +133,10 @@ static bool EnsureStubPage() {
         g_stub_page = (uint8_t*)p;
         for (int i = 0; i < STUB_PAGE_STUBS; i++) {
             uint32_t* u32 = (uint32_t*)(g_stub_page + i * STUB_SIZE);
-            u32[0] = 0x58000090u;  // ldr x16, [pc, #0x10]
-            u32[1] = 0x580000A9u;  // ldr x9,  [pc, #0x14]
-            u32[2] = 0xD61F0200u;  // br x16
-            u32[3] = 0xD503201Fu;  // nop
+            u32[0] = 0x58000090u;
+            u32[1] = 0x580000A9u;
+            u32[2] = 0xD61F0200u;
+            u32[3] = 0xD503201Fu;
             *(uint64_t*)(u32 + 4) = (uint64_t)&chain_dispatch_naked;
             *(uint64_t*)(u32 + 6) = (uint64_t)i;
         }
@@ -180,7 +151,6 @@ static bool EnsureStubPage() {
     return g_stub_init_ok;
 }
 
-// ─── Target validation (mirrors AttachRuntime) ──────────────────────────
 static bool ChainReadPageProt(uintptr_t page, int* out) {
     FILE* f = fopen("/proc/self/maps", "r");
     if (!f) return false;
@@ -213,7 +183,6 @@ static bool ChainValidateTarget(void* target) {
     return (prot & PROT_EXEC) != 0;
 }
 
-// ─── Public API ─────────────────────────────────────────────────────────
 extern "C" HookResult ChainAttach(void* target, ChainHandlerFn handler, void** outTrampoline) {
     return ChainAttachCond(target, nullptr, handler, outTrampoline);
 }
@@ -225,7 +194,6 @@ extern "C" HookResult ChainAttachCond(void* target, ChainPredicateFn predicate,
 
     std::lock_guard<std::mutex> lk(g_chain_mutex);
 
-    // Existing chain on this target?
     for (auto& s : g_chains) {
         if (s.active && s.target == target) {
             if (s.handler_count >= MAX_HANDLERS_PER_CHAIN) return HOOK_INTERNAL_ERROR;
@@ -239,7 +207,6 @@ extern "C" HookResult ChainAttachCond(void* target, ChainPredicateFn predicate,
         }
     }
 
-    // New chain
     ChainSlot* slot = nullptr;
     int idx = -1;
     for (int i = 0; i < MAX_CHAINS; i++) {
@@ -264,6 +231,12 @@ extern "C" HookResult ChainAttachCond(void* target, ChainPredicateFn predicate,
     slot->predicates[0] = predicate;
     slot->stub_slot = idx;
 
+    // S66: init profile. mem_bytes = stub slot (32) + tramp (4K) + relay (4K).
+    // Both pages are allocated by InstallInlineHookEx; 4K each is the actual
+    // granularity on this device (pageSize=4096).
+    long ps = sysconf(_SC_PAGESIZE);
+    HookProfileInit(&slot->profile, (uint32_t)(STUB_SIZE + 2 * ps));
+
     if (outTrampoline) *outTrampoline = tramp;
     LOGD("ChainAttachCond: %p slot=%d tramp=%p (new chain pred=%p)",
          target, idx, tramp, (void*)predicate);
@@ -283,7 +256,6 @@ extern "C" HookResult ChainDetach(void* target, ChainHandlerFn handler) {
         }
         if (found < 0) return HOOK_NOT_HOOKED;
 
-        // Shift both handlers and predicates together to keep 1:1 pairing.
         for (int i = found; i < s.handler_count - 1; i++) {
             s.handlers[i]   = s.handlers[i + 1];
             s.predicates[i] = s.predicates[i + 1];
@@ -334,4 +306,58 @@ extern "C" void ChainResetAll() {
             s.predicates[i] = nullptr;
         }
     }
+}
+
+// ─── S66 — ChainHook profile dispatch ────────────────────────────────
+// Called by HookProfile.cpp's global dispatchers.
+
+extern "C" bool ChainHook_ProfileLookup(void* target, HookProfile* out) {
+    if (!target || !out) return false;
+    std::lock_guard<std::mutex> lk(g_chain_mutex);
+    for (auto& s : g_chains) {
+        if (!s.active || s.target != target) continue;
+        // Best-effort copy. Torn reads under contention are acceptable for
+        // profiling data.
+        out->enabled    = __atomic_load_n(&s.profile.enabled,    __ATOMIC_RELAXED);
+        out->call_count = __atomic_load_n(&s.profile.call_count, __ATOMIC_RELAXED);
+        out->total_ns   = __atomic_load_n(&s.profile.total_ns,   __ATOMIC_RELAXED);
+        out->min_ns     = __atomic_load_n(&s.profile.min_ns,     __ATOMIC_RELAXED);
+        out->max_ns     = __atomic_load_n(&s.profile.max_ns,     __ATOMIC_RELAXED);
+        out->mem_bytes  = s.profile.mem_bytes;
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool ChainHook_ProfileEnable(void* target) {
+    if (!target) return false;
+    std::lock_guard<std::mutex> lk(g_chain_mutex);
+    for (auto& s : g_chains) {
+        if (!s.active || s.target != target) continue;
+        __atomic_store_n(&s.profile.enabled, true, __ATOMIC_RELEASE);
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool ChainHook_ProfileDisable(void* target) {
+    if (!target) return false;
+    std::lock_guard<std::mutex> lk(g_chain_mutex);
+    for (auto& s : g_chains) {
+        if (!s.active || s.target != target) continue;
+        __atomic_store_n(&s.profile.enabled, false, __ATOMIC_RELEASE);
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool ChainHook_ProfileReset(void* target) {
+    if (!target) return false;
+    std::lock_guard<std::mutex> lk(g_chain_mutex);
+    for (auto& s : g_chains) {
+        if (!s.active || s.target != target) continue;
+        HookProfileClear(&s.profile);
+        return true;
+    }
+    return false;
 }

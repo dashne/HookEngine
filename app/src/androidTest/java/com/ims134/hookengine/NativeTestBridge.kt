@@ -207,4 +207,15 @@ object NativeTestBridge {
     external fun signalSafeUninstallWaitFor(target: Long, timeoutMs: Int): Int
     // Returns {enqueued, completed, failed, dropped} atomically.
     external fun signalSafeUninstallStats(): LongArray
+
+    // ─── Feature 8.7 — Per-hook CPU/memory profiling (S66) ──────────
+    // Returns long[6] = {enabled (0/1), call_count, total_ns, min_ns,
+    // max_ns, mem_bytes}, or null if target not found in any profile-
+    // instrumented subsystem.
+    external fun hookProfileRead(target: Long): LongArray?
+    external fun hookProfileEnable(target: Long): Boolean
+    external fun hookProfileDisable(target: Long): Boolean
+    external fun hookProfileReset(target: Long): Boolean
+    // Simple presence check — returns true if target is profiled.
+    external fun hookProfileLookup(target: Long): Boolean
 }
