@@ -222,11 +222,8 @@ object NativeTestBridge {
     external fun hookArgLogCount(target: Long): Int
     external fun hookArgLogMemBytes(target: Long): Int
     external fun hookArgLogCapturesFp(target: Long): Boolean
-    // Returns LongArray[17] = { gp0..gp7, fp0..fp7, pc }, or null if
-    // target not found or ringIdx out of [0, 16).
     external fun hookArgLogRead(target: Long, ringIdx: Int): LongArray?
 
-    // Fixtures used by HookArgLogTest
     external fun getArgLogFixtureGpAddr(): Long
     external fun callArgLogFixtureGp(a: Int, b: Int, c: Int, d: Int,
                                      e: Int, f: Int, g: Int, h: Int): Int
@@ -234,4 +231,34 @@ object NativeTestBridge {
     external fun callArgLogFixtureFp(a: Double, b: Double, c: Double, d: Double): Double
     external fun getArgLogNoopHandlerAddr(): Long
     external fun getArgLogRetModNoopAddr(): Long
+
+    // ─── Feature 6.2 — Per-guest tags (S71) ─────────────────────────
+    // Fixtures: 5 independent (real fn, primary replacement, alt replacement,
+    // GOT slot, counters) tuples. installTagFixture calls HookGotEntryExTagged
+    // on slot `idx` with g_tagRepls[idx]; installTagFixtureAlt uses
+    // g_tagAlts[idx] (a distinct function pointer) so the second-install
+    // path can be forced past the early `*gotAddress == newFunction` return
+    // and into FindHandle — the case that actually pins §6.2's
+    // "FindHandle must stay tag-blind" constraint.
+    //
+    // Returns are raw HookResult codes (0=HOOK_OK, 8=HOOK_ALREADY_HOOKED,
+    // 10=HOOK_INTERNAL_ERROR, 11=HOOK_TARGET_INVALID, ...). -1 on idx out
+    // of range; -2 on JNI string-conversion failure.
+    external fun installTagFixture(idx: Int, tag: String?): Int
+    external fun installTagFixtureAlt(idx: Int, tag: String?): Int
+    external fun callTagFixture(idx: Int, x: Int): Int
+    external fun getTagReplCalls(idx: Int): Int
+    external fun getTagAltCalls(idx: Int): Int
+    external fun resetTagFixtures()
+
+    external fun registryCountByTag(tag: String?): Int
+    // Returns the target addresses of matching installed handles as a
+    // COPY (mutating it doesn't affect the registry). Empty array if none.
+    external fun registrySnapshotByTag(tag: String?, max: Int): LongArray?
+    // IntArray[2] = [removed_count, failure_count]. failure_count counts
+    // unhook attempts that returned anything other than HOOK_OK or
+    // HOOK_NOT_HOOKED.
+    external fun registryUninstallByTag(tag: String?): IntArray
+    // Newline-separated, deduplicated list of tags of installed handles.
+    external fun registryListTags(): String
 }
