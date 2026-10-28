@@ -2,6 +2,10 @@
 //
 // Hooks android::IPCThreadState::transact. Caller thread does only pure C++.
 // Fresh thread does JNI.
+//
+// Session 59 — added CP diag for IContentProvider.call() transacts, to
+// capture the real request/reply byte layout for Settings.Global.getInt
+// (Feature 5.10, settings-path). Same diagnostic pattern as SM diag[n].
 
 #include <jni.h>
 #include <android/log.h>
@@ -107,6 +111,7 @@ static std::atomic<int> g_inside{0};
 
 static std::atomic<int> g_diag_sm_handle0{0};
 static std::atomic<int> g_diag_code12{0};
+static std::atomic<int> g_diag_cp{0};       // Session 59 — CP diag
 
 static std::mutex             g_codes_mutex;
 static std::vector<int>       g_codes;
@@ -130,13 +135,31 @@ static constexpr int kCodeGetInstalledPackages = 36;
 static void HexDump(const char* label, const uint8_t* buf, size_t size, size_t cap) {
     if (!buf || size == 0) { LOGD("%s: empty", label); return; }
     size_t n = size < cap ? size : cap;
-    char line[160];
+    char line[1024];
     int pos = snprintf(line, sizeof(line), "%s: size=%zu first%zu=", label, size, n);
     for (size_t i = 0; i < n && pos < (int)sizeof(line) - 3; i++) {
         pos += snprintf(line + pos, sizeof(line) - pos, "%02x", buf[i]);
         if ((i & 3) == 3) line[pos++] = ' ';
     }
     LOGD("%s", line);
+}
+
+// UTF-16 byte-search for an iface token string.
+static bool ParcelContainsIfaceToken(const uint8_t* data, size_t size,
+                                     const char16_t* token, size_t tokenLen) {
+    if (!data || size < tokenLen * 2) return false;
+    size_t byteLen = tokenLen * 2;
+    size_t limit = size - byteLen;
+    for (size_t off = 0; off <= limit; off += 2) {
+        if (memcmp(data + off, token, byteLen) == 0) return true;
+    }
+    return false;
+}
+
+static bool ParcelLooksLikeContentProviderCall(const uint8_t* data, size_t size) {
+    static const char16_t kIface[] = u"android.content.IContentProvider";
+    constexpr size_t kIfaceLen = sizeof(kIface)/sizeof(char16_t) - 1;
+    return ParcelContainsIfaceToken(data, size, kIface, kIfaceLen);
 }
 
 static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong replyPtr) {
@@ -298,6 +321,26 @@ extern "C" int32_t Hook_Transact(void* self, int32_t handle, uint32_t code,
         }
     }
 
+    // Session 59 — Feature 5.10 CP diag.
+    // Detect IContentProvider.call() transacts and dump request + reply
+    // hex so we can identify the Bundle reply layout for the settings
+    // Bundle rewriter (iteration B).
+    bool cpDiag = false;
+    if (data && !(flags & 1)) {
+        int idx = g_diag_cp.load();
+        if (idx < 10) {
+            const uint8_t* p = ParcelRewriter_GetData((jlong)data);
+            size_t sz = ParcelRewriter_GetSize((jlong)data);
+            if (p && sz > 0 && ParcelLooksLikeContentProviderCall(p, sz)) {
+                g_diag_cp.fetch_add(1);
+                LOGD("CP diag[%d]: handle=%d code=%u flags=0x%x reqSize=%zu",
+                     idx, (int)handle, code, flags, sz);
+                HexDump("CP diag req", p, sz, 256);
+                cpDiag = true;
+            }
+        }
+    }
+
     if (!_orig_transact) return -1;
 
     // Session 23 — Wall B: rewrite IStorageManager callingPackage BEFORE
@@ -324,6 +367,14 @@ extern "C" int32_t Hook_Transact(void* self, int32_t handle, uint32_t code,
     }
 
     int32_t result = _orig_transact(self, handle, code, data, reply, flags);
+
+    // Session 59 — CP diag reply dump (after _orig, before any early return).
+    if (cpDiag && reply) {
+        const uint8_t* rp = ParcelRewriter_GetData((jlong)reply);
+        size_t rsz = ParcelRewriter_GetSize((jlong)reply);
+        LOGD("CP diag reply: replySize=%zu result=%d", rsz, result);
+        HexDump("CP diag reply", rp, rsz, 256);
+    }
 
     // Feature 3.7 — post-intercept swaps reply flat_binder_object for synthetic
     if (result == 0 && !(flags & 1) && handle == 0 && reply) {

@@ -47,6 +47,9 @@ class DualApplication : Application() {
         catch (t: Throwable) { Log.e(TAG, "ClassLoaderBridge.install failed: $t", t) }
         try { PmSpoof.install(base) }
         catch (t: Throwable) { Log.e(TAG, "PmSpoof.install failed: $t", t) }
+        // Session 59 — Feature 5.10 ADB detect blocking.
+        try { AdbSpoof.install(base) }
+        catch (t: Throwable) { Log.e(TAG, "AdbSpoof.install failed: $t", t) }
         Log.d(TAG, "DualApplication: hooks installed, calling super.attachBaseContext")
         super.attachBaseContext(base)
         tryWireApplicationProxy(base)
@@ -58,6 +61,10 @@ class DualApplication : Application() {
         super.onCreate()
         if (!initialized) { Log.e(TAG, "DualApplication.onCreate: not initialized"); return }
         try { PmSpoof.install(this) } catch (t: Throwable) { Log.e(TAG, "PmSpoof.install (onCreate): $t", t) }
+        // Session 59 — re-poison in case any Settings cache was invalidated
+        // during the guest-boot callbacks between attach and onCreate.
+        try { AdbSpoof.poison() }
+        catch (t: Throwable) { Log.e(TAG, "AdbSpoof.poison (onCreate): $t", t) }
         ParcelRewriter.ourPackageName = packageName
         try { nativeOnCreate() } catch (t: Throwable) { Log.e(TAG, "nativeOnCreate: $t", t) }
         driveApplicationProxyOnCreate()

@@ -177,7 +177,7 @@ Viber boot under the engine is a **regression canary**, not a target. Every sess
 
 # PROJECT STATE
 
-Last updated: **Session 58 close (2026-10-28)**. Supersedes Session-57-close version. Sessions 41–58 landed on disk and are on-device verified (155 tests registered, 0 failed at Session 58 close). **Category 1 (Hook mechanisms) COMPLETE at 9/9.** **Category 2 (Memory primitives) COMPLETE at 7/7.** **Category 3 (IPC / kernel boundary) COMPLETE at 7/7** — 3.7 Native ServiceManager addition landed Session 58 via JNI-impl hook on `android_os_Parcel_nativeReadStrongBinder`. **Category 4 (Class loading) COMPLETE at 6/6.** Feature 3.4 cache-hit remains a measured architectural wall. **Phase D CLOSED.**
+Last updated: **Session 59 close (2026-10-28)**. Supersedes Session-58-close version. Sessions 41–59 landed on disk and are on-device verified (157 registered, 155 executed, 0 failed, 2 ignored at Session 59 close). Feature 5.10 ADB-detect = ⚠️ PARTIAL (property surface complete; Settings.Global surface architecturally walled — see §5.10 below).
 
 ---
 
@@ -312,7 +312,7 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 | 5.7 | UID/GID spoofing | ✅ |
 | 5.8 | Frida/IDA port blocking | ✅ |
 | 5.9 | ptrace blocking | ✅ |
-| 5.10 | ADB detect blocking | ❌ → **S59 target** |
+| 5.10 | ADB detect blocking | ⚠️ **S59** (property surface ✅; Settings.Global walled — see §5.10) |
 | 5.11 | Debugger detect (JDWP full) | ⚠️ |
 | 5.12 | Emulator detect blocking | ❌ |
 | 5.13 | Test-keys detect blocking | ❌ |
@@ -411,6 +411,7 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 
 The Session 51 **cache-hit aspiration** — intercepting `ServiceManager.getService("activity")` when the framework serves it from a cached binder without dispatching through `IPCThreadState::transact` — is a measured architectural wall on MIUI/API 37. **Fifteen-plus mechanisms were tried. Every one was blocked by a specific MIUI hardening. The definitive on-device close:**
 
+
 ### The three fast-JNI tokens
 
 
@@ -439,6 +440,47 @@ Cache-hit interception on MIUI/API 37 requires IDA Pro analysis of `libart.so`'s
 
 ---
 
+## §5.10 ADB-detect — four measured walls (Session 59)
+
+**Property surface — COMPLETE.** `ro.debuggable`, `init.svc.adbd`,
+`ro.adb.secure`, `service.adb.root` return spoofed values.
+`libandroid_runtime.so` added to `ShouldHookProperty` so reflection-based
+`SystemProperties.get` fires 5.6's existing spoof. Verified by
+`AdbDetectTest.roDebuggableSpoofed` / `initSvcAdbdSpoofed`.
+
+**Settings.Global surface — ARCHITECTURALLY WALLED.** Four hypotheses
+measured, four refuted on-device:
+
+| # | Mechanism | Refuted by |
+|---|---|---|
+| 1 | `NameValueCache.mValues` poison | Write persists forever (`pre-write map='0'`), framework read bypasses (`getString` returns `'1'`). |
+| 2 | `mGenerationTrackers` sync | Field exists but stays `ArrayMap size=0`. Not the invalidation scheme here. |
+| 3 | `mReadableFieldsWithRedactedValue` special path | These two keys are the only map entries; redacted "0" is a fallback for unprivileged callers, we're privileged so real value returned. |
+| 4 | `IContentProvider.call()` via transact | S59 probe: 0 transacts fired for 3 ADB/DEV reads (`fireDelta=0`, `codes=[]`, `elapsed=0ms`). Control `Settings.Secure` read fired code 21 with 368-byte Bundle reply. The reads never leave the process. |
+
+**What the CP reply reveals (for Phase F):** MIUI's cache-miss reply is a
+`Bundle` containing `_track_generation` marker + `android.util.MemoryIntArray`
++ `android.os.ParcelFileDescriptor` + `value`. The framework uses
+  **shared-memory generation tracking**, not `mGenerationTrackers` ArrayMap.
+  The `adb_enabled` shared-mem region was populated at process boot, before
+  hook install — no user-space intercept point exists after boot.
+
+**Correct Phase F entry point:** disassemble
+`framework.jar!classes3.dex`'s `Settings$NameValueCache.getStringForUser`
+on this ROM and trace the shared-memory read path. IDA/Ghidra work, not an
+engine-primitive session. The `CP diag` instrumentation in
+`BinderTransactHook.cpp` and the field dump in `AdbSpoof.install()` are
+retained as Phase F entry points.
+
+**Meta-lesson (recurring):** "install success ≠ interception success."
+Same class as S51's `SimpleArrayMap.get()` (installed, never dispatched)
+and S58's `JavaHookInstall` (installed, quick-ABI mismatch). The
+`AdbSpoof.poison()` return value is "code ran," not "framework returns 0."
+The `post-poison getString=... getInt=...` diagnostic line is the ground
+truth.
+
+---
+
 ## Viber — regression canary, explicitly
 
 Viber is used for **one purpose**: verify that the engine primitives still work under a real, large, hostile-to-hooking app under real integration load.
@@ -455,7 +497,7 @@ Viber is used for **one purpose**: verify that the engine primitives still work 
 
 ## Test suite state (as of Session 58 close)
 
-**Executed:** 155 · **Registered:** 155 · **Ignored:** 4 · **Failed:** 0
+**Executed:** 155 · **Registered:** 157 · **Ignored:** 6 · **Failed:** 0
 
 Registered test classes (post-S58):
 
@@ -494,6 +536,7 @@ Registered test classes (post-S58):
 | DexMergeTest | 6 | ✅ S56 |
 | **PltResolveTest** | **7** | **✅ S57** |
 | **SyntheticServiceTest** | **6** | **✅ S58** |
+| **AdbDetectTest** | **6 (2 ignored)** | **⚠️ S59** |
 | GuestLoadTest | 1 | ✅ (canary) |
 | ActivityBootProbeTest | 1 | 🔒 ignored |
 | IntegrationTest | 1 | ✅ |
@@ -504,39 +547,23 @@ Registered test classes (post-S58):
 - S50 close: 104 · S51 close: 112 · S52 close: 118 · S53 close: 124
 - S54 close: 130 · S55 close: 136 · S56 close: 142 (+6 DexMergeTest)
 - S57 close: 149 (+7 PltResolveTest)
-- S58 close: **155** (+6 SyntheticServiceTest)
+- S58 close: 155 (+6 SyntheticServiceTest)
+- S59 close: **157** (+4 AdbDetectTest green, +2 ignored)
 
 ---
 
-## Session 59 first actions (authoritative)
+## Session 60 first actions (authoritative)
 
-1. Confirm Session 58 commit landed (`git log --oneline -3`).
-2. **Fresh-process canary rerun** to confirm S58 no-regression. Expected `outcome=booted-viber-order`, `providersAttempted=15`, `providersSucceeded=14`.
-3. Write Feature 5.10 — ADB detect blocking.
+1. Confirm Session 59 commit landed (`git log --oneline -3`).
+2. **Fresh-process canary rerun** to confirm S59 no-regression. Expected
+   `outcome=booted-viber-order`, `providersAttempted=15`, `providersSucceeded=14`.
+3. Write Feature 5.11 — debugger detect (JDWP handshake, Debug.isDebuggerConnected,
+   waitingForDebugger, full /proc/self/status TracerPid).
 4. Build + install (Rule 14).
-5. `am instrument` `AdbDetectTest`. Expect `OK (6 tests)`.
+5. `am instrument` DebuggerDetectTest. Expect `OK (6 tests)`.
 6. Full suite. Expect `OK (161 tests)`.
-7. Canary from fresh process. Expect `outcome=booted-viber-order`, `providersSucceeded ≥ 14`.
-8. Commit, mark 5.10 → ✅.
-
-### Session 59 planning note
-
-**Feature 5.10 scope:** block detect signals a target uses to determine whether ADB is enabled. Typical surface:
-
-- `Settings.Global.getInt(cr, Settings.Global.ADB_ENABLED, 0)` — via `IContentProvider` or `SettingsProvider` — return `0`
-- `SystemProperties.get("ro.debuggable")` — return `"0"` (already covered by 5.6 prop spoof, but 5.10 may need `ro.adb.secure` and `init.svc.adbd` too)
-- `SystemProperties.get("init.svc.adbd")` — return `"stopped"`
-- `SystemProperties.get("service.adb.root")` — return `""`
-- `Settings.Global.getInt(cr, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0)` — return `0`
-- Direct `adb_enabled` read via `ContentResolver` — intercept at the ContentResolver query or the binder reply
-
-Test strategy (`AdbDetectTest`, 6 assertions):
-1. `Settings.Global.ADB_ENABLED` returns 0
-2. `Settings.Global.DEVELOPMENT_SETTINGS_ENABLED` returns 0
-3. `SystemProperties.get("ro.debuggable")` returns "0"
-4. `SystemProperties.get("init.svc.adbd")` returns "stopped"
-5. Normal settings not broken (e.g. `Settings.Global.AIRPLANE_MODE_ON` passthrough)
-6. No content-provider overreach — an unrelated `Settings.Global` key still returns its real value
+7. Canary from fresh process.
+8. Commit, mark 5.11 → ✅.
 
 ---
 

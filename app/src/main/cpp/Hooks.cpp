@@ -110,6 +110,7 @@ static const PropSpoof kPropSpoofs[] = {
         {"ro.debuggable","0"}, {"ro.secure","1"}, {"ro.build.tags","release-keys"},
         {"ro.build.type","user"}, {"ro.kernel.qemu",""}, {"ro.boot.qemu",""},
         {"init.svc.adbd","stopped"}, {"service.adb.root",""}, {"sys.oem_unlock_allowed","0"},
+        {"ro.adb.secure","1"},   // Session 59 — Feature 5.10
         {nullptr, nullptr}
 };
 
@@ -662,7 +663,6 @@ static std::mutex g_rescanMutex;
 static std::unordered_set<std::string> g_seenLibs;
 static std::atomic<bool> g_rescanPending{false};
 
-// Forward declaration — definition is below.
 static int HookLibraryCallback(struct dl_phdr_info* info, size_t, void* data);
 
 static void ScheduleRescan() {
@@ -704,6 +704,10 @@ static bool ShouldHookProperty(const char* name) {
     if (strstr(name, "libjavacore.so"))   return true;
     if (strstr(name, "libopenjdk.so"))    return true;
     if (strstr(name, "libopenjdkjvm.so")) return true;
+    // Session 59 — Feature 5.10: SystemProperties reflection calls land in
+    // libandroid_runtime.so. Hooking its GOT for __system_property_get
+    // is what makes 5.6's kPropSpoofs actually fire for reflection reads.
+    if (strstr(name, "libandroid_runtime.so")) return true;
     if (strstr(name, "/data/app/"))  return true;
     if (strstr(name, "/data/user/")) return true;
     if (strstr(name, "/data/data/")) return true;
@@ -864,11 +868,6 @@ int InstallHooks() {
     return HOOK_OK;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
-// Test helpers — item 2 (rollback). Walk the registry and unhook everything,
-// so the rollback test can start from a known zero state.
-// Not part of the production API; used only from test_item2.cpp.
-// ─────────────────────────────────────────────────────────────────────────
 extern "C" int UninstallAllHooks() {
     std::lock_guard<std::mutex> rescanLock(g_rescanMutex);
     HookHandle buf[512];
@@ -889,4 +888,3 @@ extern "C" int UninstallAllHooks() {
     LOGD("UninstallAllHooks: %d hooks examined, %d failures", n, failures);
     return failures;
 }
-// ================= END OF FILE =================
