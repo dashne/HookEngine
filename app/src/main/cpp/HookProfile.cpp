@@ -22,7 +22,6 @@ extern "C" void HookProfileAccumulate(HookProfile* p, uint64_t elapsed_ns) {
     if (!p) return;
     __atomic_fetch_add(&p->call_count, 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&p->total_ns,   elapsed_ns, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&p->max_ns,     0, __ATOMIC_RELAXED);   // ensure loaded
 
     // min: CAS loop
     uint64_t prev = __atomic_load_n(&p->min_ns, __ATOMIC_RELAXED);
@@ -53,34 +52,46 @@ extern "C" void HookProfileClear(HookProfile* p) {
 }
 
 // ─── Subsystem dispatch ──────────────────────────────────────────────
-// Each subsystem exports ChainHook_ProfileLookup(target, out). We try
-// them in order. Session 66: ChainHook only. S67 will add ReturnMod.
+// Each subsystem exports a set of <Subsys>_Profile{Lookup,Enable,Disable,
+// Reset}(target) functions. Global dispatchers try them in order.
+// S66: ChainHook. S67: + ReturnMod. RegInspect not applicable (no user
+// handler). SvcHook deferred (signal context). InlineHooker deferred
+// (pure asm relay, no C++ hook point).
 
 extern "C" bool ChainHook_ProfileLookup(void* target, HookProfile* out);
 extern "C" bool ChainHook_ProfileEnable(void* target);
 extern "C" bool ChainHook_ProfileDisable(void* target);
 extern "C" bool ChainHook_ProfileReset(void* target);
 
+extern "C" bool RetMod_ProfileLookup(void* target, HookProfile* out);
+extern "C" bool RetMod_ProfileEnable(void* target);
+extern "C" bool RetMod_ProfileDisable(void* target);
+extern "C" bool RetMod_ProfileReset(void* target);
+
 extern "C" bool HookProfileLookup(void* target, HookProfile* out) {
     if (!target || !out) return false;
     if (ChainHook_ProfileLookup(target, out)) return true;
+    if (RetMod_ProfileLookup(target, out))    return true;
     return false;
 }
 
 extern "C" bool HookProfileEnable(void* target) {
     if (!target) return false;
     if (ChainHook_ProfileEnable(target)) return true;
+    if (RetMod_ProfileEnable(target))    return true;
     return false;
 }
 
 extern "C" bool HookProfileDisable(void* target) {
     if (!target) return false;
     if (ChainHook_ProfileDisable(target)) return true;
+    if (RetMod_ProfileDisable(target))    return true;
     return false;
 }
 
 extern "C" bool HookProfileReset(void* target) {
     if (!target) return false;
     if (ChainHook_ProfileReset(target)) return true;
+    if (RetMod_ProfileReset(target))    return true;
     return false;
 }

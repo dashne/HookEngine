@@ -1,5 +1,6 @@
 #include "ReturnMod.h"
 #include "arm64_reloc.h"
+#include "HookProfile.h"
 #include <sys/mman.h>
 #include <unistd.h>
 #include <android/log.h>
@@ -26,6 +27,7 @@ struct RetModSlot {
     void*            shadow_tramp = nullptr;
     ReturnModifierFn modifier     = nullptr;
     int              stub_slot    = -1;
+    HookProfile      profile;   // S67 — per-site profiling (see §8.7)
 };
 
 static RetModSlot  g_retmods[MAX_RETMODS];
@@ -42,16 +44,34 @@ void* g_retmod_tramps[MAX_RETMODS] = {nullptr};
 // the per-slot modifier under the retmod mutex and returns the value
 // the caller sees. Lock released before invoking modifier so the
 // modifier can re-enter retmod (e.g., on a different target).
+//
+// S67 — when the slot's HookProfile is enabled, wrap the user modifier
+// call in two HookProfileReadNs() (CLOCK_MONOTONIC, VDSO-accelerated,
+// ~25ns per read) and accumulate. Zero overhead when disabled (single
+// atomic bool load per dispatch). Captures both fn and profile pointer
+// under the lock; uses them outside the lock (same discipline as the
+// modifier pointer in S46 and the trampoline pointer in S43).
 extern "C" __attribute__((visibility("hidden")))
 uint64_t retmod_dispatch_helper(uint64_t* saved_args, uint64_t orig_ret, int slot) {
     ReturnModifierFn fn = nullptr;
+    HookProfile*     prof = nullptr;
     {
         std::lock_guard<std::mutex> lk(g_retmod_mutex);
         if (slot >= 0 && slot < MAX_RETMODS && g_retmods[slot].active) {
-            fn = g_retmods[slot].modifier;
+            fn   = g_retmods[slot].modifier;
+            prof = &g_retmods[slot].profile;
         }
     }
     if (!fn) return orig_ret;
+
+    bool enabled = prof && __atomic_load_n(&prof->enabled, __ATOMIC_RELAXED);
+    if (enabled) {
+        uint64_t t0 = HookProfileReadNs();
+        uint64_t rv = fn(saved_args, orig_ret);
+        uint64_t t1 = HookProfileReadNs();
+        HookProfileAccumulate(prof, t1 - t0);
+        return rv;
+    }
     return fn(saved_args, orig_ret);
 }
 
@@ -135,11 +155,9 @@ static void* retmodStubFor(int slot) {
 }
 
 // ─── Shadow trampoline ──────────────────────────────────────────────
-//
 // Same logic as InlineHooker.cpp::BuildTrampoline, but exposed here so
 // retmod can publish its trampoline into g_retmod_tramps[] BEFORE the
-// inline hook is installed. Eliminates the install→populate race window
-// that would exist if we reused InstallInlineHookEx's trampoline.
+// inline hook is installed. Eliminates the install→populate race window.
 static void* BuildRetModShadow(void* target) {
     long ps = sysconf(_SC_PAGESIZE);
     void* tramp = AllocateMemoryNear(target, ps);
@@ -229,6 +247,10 @@ extern "C" HookResult AttachRetMod(void* target, ReturnModifierFn modifier, void
     g_retmods[slot].target          = target;
     g_retmods[slot].shadow_tramp    = shadow;
     g_retmods[slot].stub_slot       = slot;
+    // S67 — init profile. Footprint per RetMod site: our shadow tramp
+    // (4K) + inline hook relay (4K) + inline hook trampoline (4K, unused
+    // by RetMod but still allocated by InstallInlineHookEx). 3 pages.
+    HookProfileInit(&g_retmods[slot].profile, (uint32_t)(3 * ps));
 
     void* unused_tramp = nullptr;
     HookResult r = InstallInlineHookEx(target, stub, &unused_tramp, "retmod");
@@ -288,4 +310,56 @@ extern "C" void RetModResetAll() {
         g_retmod_tramps[i] = nullptr;
         s = RetModSlot{};
     }
+}
+
+// ─── S67 — ReturnMod profile dispatch ───────────────────────────────
+// Called by HookProfile.cpp's global dispatchers.
+
+extern "C" bool RetMod_ProfileLookup(void* target, HookProfile* out) {
+    if (!target || !out) return false;
+    std::lock_guard<std::mutex> lk(g_retmod_mutex);
+    for (auto& s : g_retmods) {
+        if (!s.active || s.target != target) continue;
+        out->enabled    = __atomic_load_n(&s.profile.enabled,    __ATOMIC_RELAXED);
+        out->call_count = __atomic_load_n(&s.profile.call_count, __ATOMIC_RELAXED);
+        out->total_ns   = __atomic_load_n(&s.profile.total_ns,   __ATOMIC_RELAXED);
+        out->min_ns     = __atomic_load_n(&s.profile.min_ns,     __ATOMIC_RELAXED);
+        out->max_ns     = __atomic_load_n(&s.profile.max_ns,     __ATOMIC_RELAXED);
+        out->mem_bytes  = s.profile.mem_bytes;
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool RetMod_ProfileEnable(void* target) {
+    if (!target) return false;
+    std::lock_guard<std::mutex> lk(g_retmod_mutex);
+    for (auto& s : g_retmods) {
+        if (!s.active || s.target != target) continue;
+        __atomic_store_n(&s.profile.enabled, true, __ATOMIC_RELEASE);
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool RetMod_ProfileDisable(void* target) {
+    if (!target) return false;
+    std::lock_guard<std::mutex> lk(g_retmod_mutex);
+    for (auto& s : g_retmods) {
+        if (!s.active || s.target != target) continue;
+        __atomic_store_n(&s.profile.enabled, false, __ATOMIC_RELEASE);
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool RetMod_ProfileReset(void* target) {
+    if (!target) return false;
+    std::lock_guard<std::mutex> lk(g_retmod_mutex);
+    for (auto& s : g_retmods) {
+        if (!s.active || s.target != target) continue;
+        HookProfileClear(&s.profile);
+        return true;
+    }
+    return false;
 }
