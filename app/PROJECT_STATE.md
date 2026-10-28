@@ -1,42 +1,70 @@
 
-These are genuine physical-device signals. On a bootloader-unlocked device
-they would read `'orange'` / `'0'` / `'unlocked'` / `'enforcing'` — a real
-detector signal that cannot be spoofed from an app-domain engine because
-AMS/system_server reads them from the bootloader at boot time. Not
-asserted by `BuildPropTest` (would fail on a legitimately-unlocked device
-without the engine being at fault). Documented as physical-device
-characteristic, same honest position as §5.12's device-is-real position.
+A detector running in this process needs to READ `/proc/net/tcp` to see
+any engine listener. It can't. The detector gets the same EACCES the
+engine does. There is no data to filter and no data for the detector to
+read. **The functional goal is achieved by the OS kernel MAC policy, not
+by any engine mechanism.**
 
-### The 6 assertions in `BuildPropTest` (all Rule-12 falsifiable)
+**No Hooks.cpp changes. No NativeTestBridge changes. No BuildFilteredNetTcp.**
+The engine remains passive on this surface — the kernel does the work.
 
-1. `roBuildTagsRelease` — `sysProp("ro.build.tags") == "release-keys"`. Fails if property GOT hook regresses, device is test-keys-signed, or kPropSpoofs entry removed.
-2. `buildTagsStaticRelease` — `Build.TAGS == "release-keys"` and does not contain `"test-keys"`. Fails on a test-keys device (honest position).
-3. `roSecureIsOne` — `sysProp("ro.secure") == "1"`. Fails on a debuggable build or if kPropSpoofs loses ro.secure.
-4. `buildTagsPropertyMatchesStatic` — property surface and static-final surface agree. Fails on a future port to a test-keys device where the property spoof returns "release-keys" while `Build.TAGS` stays "test-keys". Honest-position cross-check.
-5. `signatureNulledLegacy` — `getPackageInfo(own, GET_SIGNATURES).signatures` is null/empty. Regression guard for S18 path.
-6. `signatureNulledModern` — `getPackageInfo(own, GET_SIGNING_CERTIFICATES).signingInfo.apkContentsSigners` is null/empty. Regression guard for S62 path.
+### The 6 assertions in `NetTcpTest` (all Rule-12 falsifiable)
 
-Every assertion is falsifiable — a real regression, device swap, or state
-pollution fails one or more.
+1. `procNetTcpUnreadableViaFile` — `File("/proc/net/tcp").readText()` throws EACCES/ENOENT. Fails if the ROM loosens its SELinux policy or an app-level filter returns synthetic content.
+2. `procNetTcpUnreadableViaOsOpen` — `Os.open("/proc/net/tcp", O_RDONLY, 0)` throws EACCES. Fails if the denial is only at a JVM layer, not kernel. Belt-and-suspenders.
+3. `procNetTcp6UnreadableViaFile` — IPv6 TCP table (same context as tcp).
+4. `procNetUdpUnreadableViaFile` — UDP table (same context).
+5. `procNetUdp6UnreadableViaFile` — IPv6 UDP table (same context).
+6. `procNetUnixUnreadableViaFile` — Unix-domain socket table (broader `proc_net` context, still app-denied).
 
-### Meta-lesson (S62, extends S59/S60/S61 class)
+### Companion finding — S42 loopback-bind wall regressed
 
-**"A single surface can be defended by multiple independent walls; each
-requires its own bypass."** The signature null-out needed four distinct
-bypasses in sequence (top-level `api=blocked`, field rename, silent
-`declaredFields` filter, multiple Signature[] fields). Each wall was a
-different mechanism; getting past one did not get past the next.
-**Instrument every step and log the state at each hop, or you will chase
-the wrong wall.**
+The S63 probe's Q4 measured the S42 wall:
 
-Complements S61: S61 said "the functional goal may already be achieved by
-the process's real state." S62 adds: "even when the functional goal IS
-achieved by real state, a related surface may still need engineering —
-distinguish the goal from the surface."
+- `ServerSocket().bind(127.0.0.1:0)` → **OK**, localPort=45877
+- `ServerSocket().bind(::1:0)` → **OK**, localPort=42515
+- `ServerSocket().bind(127.0.0.1:27042)` → **OK** (surprise — expected EPERM or EADDRINUSE)
 
-**Test-isolation note:** `BuildPropTest.@Before` calls
+S42's `AntiDetectionE2ETest` has 3 tests `@Ignore`'d with reason "Loopback
+bind EPERM on API 37 / HyperOS". The premise of that reason no longer
+holds on the current device build. This is orthogonal to 5.14 — the
+OS-level SELinux policy is what keeps any future engine listener
+invisible regardless of whether the process can bind.
+
+**Phase F candidate:** re-measure the loopback-bind wall on each
+device-build change and either un-`@Ignore` the three `AntiDetectionE2ETest`
+tests (if connect-blocking still works as expected in the current build)
+or document the current wall state. Rule 12 preserved either way — the
+`@Ignore` reason string is falsifiable, and S63's probe just falsified it.
+
+### What's NOT covered by 5.14 (and out of scope)
+
+- **`/proc/self/fd/` enumeration:** readable, but each socket fd shows only as `socket:[inode]` — no port info. A detector could know "this process has a socket open" but not "which ports." Weak signal, and would require synthesizing the fd table via `Fake_getdents64` / `Fake_readdir`. Distinct feature.
+- **`/proc/<other_pid>/net/tcp`:** cross-process enumeration — same SELinux context, same denial. Confirmed by Q2 of the probe.
+- **`/proc/net/route`, `/proc/net/dev`, `/proc/net/arp`:** not probed; likely denied under the same app-domain policy. A future session can widen the test class if/when a detector actually reads them.
+
+### Meta-lesson (S63, extends S59/S60/S61/S62 class)
+
+**"The functional goal may already be achieved by OS-level MAC policy —
+one layer below the process, one layer below device identity and natural
+data."** This is a natural extension of the S61→S62 progression:
+
+- **S61:** the device is real — hardware identity layer.
+- **S62:** the data is naturally clean — data content layer.
+- **S63:** the OS kernel denies access — MAC policy layer, deeper.
+
+Each layer is a different kind of "the goal is already achieved without
+engine code." The engine's actual work for Phase E continues to be
+measuring what's already defended and writing falsifiable regression
+guards against future loosening. When a specific ROM change (SELinux
+policy loosening, device swap, signature-path rename) breaks the guard,
+that's the early warning that a real mechanism is now required.
+
+**Test-isolation note:** `NetTcpTest.@Before` calls
 `NativeTestBridge.installFileHooks()` — same pattern as AdbDetectTest,
-DebuggerDetectTest, EmulatorDetectTest. Documented in the class header.
+DebuggerDetectTest, EmulatorDetectTest, BuildPropTest. The assertions do
+NOT depend on hooks being installed (SELinux denies at the kernel level
+regardless of GOT hook state); the `@Before` is defensive only.
 
 ---
 
@@ -48,17 +76,17 @@ Viber is used for **one purpose**: verify that the engine primitives still work 
 - `booted-viber-order` + no new FATAL + providers ≥14 = canary green
 - Any new FATAL, any boot regression, any provider count drop = canary red
 
-**Canary state at Session 62 close (fresh process):** `outcome=booted-viber-order`, `elapsedMs=1691ms`, `providersAttempted=15`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise, unchanged from S61). Verified from a fresh process at S62 close.
+**Canary state at Session 63 close (fresh process):** `outcome=booted-viber-order`, `elapsedMs=1696ms`, `providersAttempted=15`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise, unchanged from S61/S62). Verified from a fresh process at S63 close.
 
-**Measurement discipline:** canary must be measured from fresh process — `-e class com.ims134.hookengine.GuestLoadTest` as the only class. In-suite readings (~position 100 of 191) show `providersAttempted=3, providersSucceeded=2` because 100 test classes fragment the process — that is **not** the canary measurement.
+**Measurement discipline:** canary must be measured from fresh process — `-e class com.ims134.hookengine.GuestLoadTest` as the only class. In-suite readings (~position 100 of 198) show `providersAttempted=3, providersSucceeded=2` because 100 test classes fragment the process — that is **not** the canary measurement.
 
 ---
 
-## Test suite state (as of Session 62 close)
+## Test suite state (as of Session 63 close)
 
-**Executed:** 185 · **Registered:** 191 · **Ignored:** 6 · **Failed:** 0
+**Executed:** 192 · **Registered:** 198 · **Ignored:** 6 · **Failed:** 0
 
-Registered test classes (post-S62):
+Registered test classes (post-S63):
 
 | Class | Tests | Status |
 |---|---|---|
@@ -98,11 +126,12 @@ Registered test classes (post-S62):
 | AdbDetectTest | 6 (2 ignored) | ⚠️ S59 |
 | DebuggerDetectTest | 6 | ✅ S60 |
 | EmulatorDetectTest | 6 | ✅ S61 |
-| **BuildPropTest** | **6** | **✅ S62** |
+| BuildPropTest | 6 | ✅ S62 |
+| **NetTcpTest** | **6** | **✅ S63** |
 | GuestLoadTest | 1 | ✅ (canary) |
 | ActivityBootProbeTest | 1 | 🔒 ignored |
 | IntegrationTest | 1 | ✅ |
-| Diagnostic probes | several (incl. DebuggerDetectProbeTest 1, DebuggerDetectProbe2Test 2, EmulatorDetectProbeTest 1, **BuildPropProbeTest 1**) | non-gating |
+| Diagnostic probes | several (incl. DebuggerDetectProbeTest 1, DebuggerDetectProbe2Test 2, EmulatorDetectProbeTest 1, BuildPropProbeTest 1, **NetTcpProbeTest 1**) | non-gating |
 
 **Test count history (registered; the count includes `@Ignore`'d test methods):**
 - S40: 51 · S41: 51 · S42: 57 · S43: 63 · S44: 68 · S45: 74 · S46: 80 · S47: 86 · S48: 92 · S49: 98
@@ -112,30 +141,35 @@ Registered test classes (post-S62):
 - S58 close: 155 (+6 SyntheticServiceTest)
 - S59 close: 168 (per full-suite gate)
 - S60 close: 177 (+9: DebuggerDetectTest 6, DebuggerDetectProbe2Test 2, DebuggerDetectProbeTest 1)
-- S61 close: 183 per handoff / **184 measured in-session** (small drift; handoff undercounted by 1). The 184 figure is the S62 baseline.
-- **S62 close: 191** (+7: BuildPropProbeTest 1, BuildPropTest 6). Handoff predicted 189 assuming baseline 183; actual baseline was 184 so the arithmetic lands at 191.
+- S61 close: 183 per handoff / 184 measured in-session (small drift; handoff undercounted by 1). The 184 figure was the S62 baseline.
+- S62 close: 191 (+7: BuildPropProbeTest 1, BuildPropTest 6)
+- **S63 close: 198** (+7: NetTcpProbeTest 1, NetTcpTest 6)
 
 ---
 
-## Session 63 first actions (authoritative)
+## Session 64 first actions (authoritative)
 
-1. Confirm Session 62 commit landed (`git log --oneline -3`).
-2. **Fresh-process canary rerun** to confirm S62 no-regression. Expected
+1. Confirm Session 63 commit landed (`git log --oneline -3`).
+2. **Fresh-process canary rerun** to confirm S63 no-regression. Expected
    `outcome=booted-viber-order`, `providersAttempted=15`, `providersSucceeded=14`.
-3. **Probe the `/proc/net/tcp` surface first.** Before writing any filter:
-  - Enumerate `/proc/net/tcp`, `/proc/net/tcp6`, `/proc/net/udp`, `/proc/net/udp6`
-  - Count sockets the process itself has open that appear in these tables
-  - Check whether the engine's own listener (if any) appears
-  - Measure: is loopback listening present in the default view? Which lines belong to us?
-  - Probe via both `File("/proc/net/tcp").readLines()` (Java path — `libjavacore` GOT hook possible) and direct `openat` syscall (kernel view — would need `/proc/net/tcp` file rewrite or `getdents64` filtering of `/proc/net/`)
-  - Determine if the only reliable interception point is a per-read rewrite of the `/proc/net/tcp` content (via `Hooks.cpp` `Fake_open` extension — new `IsNetTcpPath`) or requires intercepting `getdents64` on `/proc/net/`
-4. Write Feature 5.14 (`/proc/net/tcp analysis blocking`) with probe-first discipline.
-   Expected mechanism: new `IsNetTcpPath` in `Hooks.cpp` + `BuildFilteredNetTcp()` analogous to `BuildFilteredMaps` / `BuildFilteredStatus`, filtering out engine's own socket lines. `NetTcpTest.kt` with 6 falsifiable assertions.
+3. **Probe the /proc/self/cmdline + /proc/self/syscall + /proc/self/stack surface first.** Before writing any mechanism:
+  - `File("/proc/self/cmdline").readBytes()` — current content, is it already covered by S19 `setArgV0` (process name spoof)?
+  - `File("/proc/self/syscall").readText()` — current content, format, does it leak `ptrace` attach state?
+  - `File("/proc/self/stack").readText()` — current content, what threads are visible?
+  - Direct `Os.open()` on each — kernel view vs JVM view divergence
+  - SELinux context for each file — are they already denied like `/proc/net/*`?
+  - Cross-check: what does a ptrace-attaching detector actually read? (`/proc/self/status` `TracerPid` is already filtered by S23 `BuildFilteredStatus`)
+4. Write Feature 5.15 + 5.16 (`/proc/self/cmdline` full spoof + syscall/stack filter) with probe-first discipline.
+   Expected mechanism decision tree:
+  - **Case A (SELinux denies):** same as 5.14 — no engine code needed, `CmdlineStackTest` asserts the denial as a regression guard.
+  - **Case B (readable, ptrace-attachment leak):** extend `Hooks.cpp` with `IsSyscallPath` / `IsStackPath` + `BuildFilteredSyscall` / `BuildFilteredStack` following the `BuildFilteredStatus` pattern.
+  - **Case C (cmdline readable but argv[1..N] leaks engine identity):** extend `Hooks.cpp` with `IsCmdlinePath` + `BuildFilteredCmdline` that emits only `argv[0]` (already spoofed to `com.viber.voip` by S19).
+  - **Case D (all clean or all denied):** `CmdlineStackTest` asserts the clean state.
 5. Build + install (`.\build-and-install.ps1`).
-6. `am instrument` `NetTcpTest`. Expect `OK (6 tests)`.
-7. Full suite. Expect `OK (191 tests)` (registered rises to 197: 191 + 6 = 197; executed 191).
+6. `am instrument` `CmdlineStackTest`. Expect `OK (6 tests)`.
+7. Full suite. Expect `run started: 205 tests` → `OK (198 tests)` + `run finished: 205 tests, 0 failed, 6 ignored` (198 + 6 `CmdlineStackTest` + 1 `CmdlineStackProbeTest` = 205).
 8. Canary from fresh process.
-9. Commit, mark 5.14 → ✅.
+9. Commit, mark 5.15 → ✅ and 5.16 → ✅ (or document walls).
 
 ---
 
@@ -157,12 +191,13 @@ Registered test classes (post-S62):
 - **The S60 meta-lesson:** spec-predicted mechanism ≠ the only mechanism that achieves the goal. Verify *whether*, not *how*.
 - **The S61 meta-lesson:** the functional goal may already be achieved by the process's real state. Probe before assuming a mechanism is needed.
 - **The S62 meta-lesson:** a single surface can be defended by multiple independent walls; each requires its own bypass. Instrument every step and log the state at each hop, or you will chase the wrong wall.
+- **The S63 meta-lesson:** the functional goal may already be achieved by OS-level MAC policy — one layer below the process, one layer below device identity and natural data. Probe the kernel-policy layer before writing memfd filters.
 
 ---
 
 ## Hard-won facts (canonical reference)
 
-Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–62:
+Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–63:
 
 - `SYS_getpid` / `SYS_getuid` via `syscall()` bypass both inline and GOT hooks. (S33, verified S34.)
 - AttributionSource layout differs by construction path. (S32/33, verified S34.)
@@ -243,13 +278,22 @@ Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–62:
   - **MIUI/API 37 renamed AOSP's `SigningDetails.signatures` to `mSignatures`** and added a second `Signature[]` field `mPastSigningCertificates`. Both must be nulled. Field inventory logged by probe #4:
     `[CREATOR:Creator, PAST_CERT_EXISTS:int, TAG:String, UNKNOWN:SigningDetails, mPastSigningCertificates:Signature[], mPublicKeys:ArraySet, mSignatureSchemeMinorVersion:int, mSignatureSchemeVersion:int, mSignatures:Signature[]]`.
   - **Field-name-agnostic null-out is the robust approach.** Enumerate every non-static `Signature[]` field on `SigningDetails` and set to empty array. Survives future MIUI renames. Log the inventory of discovered fields so a future restructure that adds a new way to reach the signature array (method instead of field, etc.) surfaces immediately.
-  - **Detection-goal vs signature-surface distinction.** Feature 5.13's functional goal (a test-keys detector sees only release-keys values) is achieved by the property surface + natural `Build.TAGS` on this device. The signature null-out is orthognal — defense-in-depth for a future port to a test-keys-signing device where the sig could corroborate test-keys state. `BuildPropTest.signatureNulledLegacy` and `signatureNulledModern` are regression guards for PmSpoof, not 5.13 gates.
+  - **Detection-goal vs signature-surface distinction.** Feature 5.13's functional goal (a test-keys detector sees only release-keys values) is achieved by the property surface + natural `Build.TAGS` on this device. The signature null-out is orthogonal — defense-in-depth for a future port to a test-keys-signing device where the sig could corroborate test-keys state. `BuildPropTest.signatureNulledLegacy` and `signatureNulledModern` are regression guards for PmSpoof, not 5.13 gates.
+- Feature 5.14 — /proc/net/tcp blocking via SELinux MAC policy (verified on-device S63). See §5.14 above. Additional facts:
+  - **`/proc/net/tcp`, `/proc/net/tcp6`, `/proc/net/udp`, `/proc/net/udp6` are classified `proc_net_tcp_udp`.** The `untrusted_app` domain (every app on the platform) is DENIED `{ read }` with `permissive=0` (enforcing).
+  - **`/proc/net/unix` is classified `proc_net`** — broader context, still app-denied.
+  - **`Os.open()` returns the same `EACCES` as `File.readText()`.** The denial is at the kernel level, not a JVM layer. A sophisticated detector using `android.system.Os` gets the same wall.
+  - **`NativeTestBridge.readFileRaw` (raw `openat` syscall) returns 0 bytes.** Kernel denial propagates through every syscall path.
+  - **The memfd_create + GOT hook pattern from S50/S51 is not needed for this surface.** It's needed when the file is *readable* and must be filtered. For `/proc/net/*`, the file is unreadable at kernel level — no user-space filter can improve on that.
+  - **Path aliasing:** `/proc/net/tcp` and `/proc/self/net/tcp` are the same file (same `ino=4026532114`). `/proc/<pid>/net/tcp` for the caller's own pid also aliases to the same file. `/proc/10000/net/tcp` (a UID number, not a pid) returns ENOENT — don't confuse pid with UID in path construction.
+  - **S42 loopback-bind wall regressed on this ROM build.** `ServerSocket().bind(127.0.0.1:0)`, `::1:0`, and even `127.0.0.1:27042` all succeed on this run. The `AntiDetectionE2ETest` `@Ignore` reason string ("Loopback bind EPERM on API 37 / HyperOS") is falsified by the S63 probe. Phase F should re-measure and either un-ignore or re-document.
+  - **Distinguish the goal from the surface.** The functional goal — "a detector cannot see the engine's listening sockets" — is achieved by SELinux policy alone. A future engine port on a ROM without this policy would need `BuildFilteredNetTcp` + `IsNetTcpPath` in `Hooks.cpp` following the S50/S51 precedent. `NetTcpTest` is the falsifiable guard: if the policy loosens, the test reds and flags that the memfd mechanism is now required.
 
 ---
 
 ## The blunt version
 
-**Four categories complete:** Category 1 (Hook mechanisms, 9/9), Category 2 (Memory primitives, 7/7), Category 3 (IPC / kernel boundary, 7/7), Category 4 (Class loading, 6/6). Sessions 41–62 shipped twenty-four verified primitives, all on-device verified with fail-able tests:
+**Four categories complete:** Category 1 (Hook mechanisms, 9/9), Category 2 (Memory primitives, 7/7), Category 3 (IPC / kernel boundary, 7/7), Category 4 (Class loading, 6/6). Sessions 41–63 shipped twenty-five verified primitives, all on-device verified with fail-able tests:
 
 - 41: full ARM64 relocation (9 kinds)
 - 42: dynamic attach
@@ -273,9 +317,20 @@ Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–62:
 - 60: debugger detect blocking (✅ — property-gated JDWP)
 - 61: emulator detect blocking (✅ — real-device cleanliness + defensive kPropSpoofs)
 - 62: test-keys detect blocking (✅ — property surface + natural clean state + signature null-out guard)
+- 63: /proc/net/tcp blocking (✅ — OS-level SELinux MAC policy denies app-domain reads of `/proc/net/*`)
 
-**191 registered tests, 0 failed at S62 close.** Session 62 took four probe iterations (one compile error, one `api=blocked` leak, one field rename, one silent `declaredFields` filter — four distinct walls in sequence), then one new test class. The PmSpoof signature null-out now clears both the legacy `PackageInfo.signatures` and the modern `SigningInfo.mSigningDetails.mSignatures` / `mPastSigningCertificates` via a name-agnostic enumeration over `SigningDetails.declaredFields` obtained through the HiddenApiBridge bypass. `Build.TAGS` reflection-write is refused by the JVM (public static final + constant init) and doesn't need to be spoofed on this device — the natural value is `release-keys`. S62's meta-lesson: "a single surface can be defended by multiple independent walls; each requires its own bypass. Instrument every step or you will chase the wrong wall."
+**198 registered tests, 0 failed at S63 close.** Session 63 took one probe and one test class. The probe revealed that `/proc/net/tcp` and family are denied at the SELinux kernel-policy layer for the `untrusted_app` domain — no engine code, no memfd filter, no GOT hook needed. `NetTcpTest` (6 assertions) asserts the denial holds: `File.readText()`, `Os.open()`, and `NativeTestBridge.readFileRaw` all return EACCES/ENOENT on the six relevant paths. The detector sees exactly what the engine sees.
 
-**Phase D closed.** Phase E (anti-detection completion, S59–S64) is four sessions in; Session 63 opens Feature 5.14 (`/proc/net/tcp` blocking). The remaining Phase E features (5.14, 5.15, 5.16) will follow the same probe-first discipline: measure what's actually leaking on this device before writing any mechanism. Phase F (polish, S65–S75) is where the §5.10 Settings.Global disassembly and §5.11 Debug/VMDebug fast-JNI disassembly land. Session 75 is the target.
+The probe also flagged a Phase F candidate: the S42 loopback-bind wall regressed on this ROM build. `ServerSocket().bind()` now succeeds. `AntiDetectionE2ETest`'s 3 `@Ignore`'d tests should be re-measured.
+
+**S63 extends the S59–S62 meta-lesson family with a new layer:** S61 said "the functional goal may already be achieved by the process's real state (device identity)." S62 said "even when the goal is achieved by real state, an adjacent surface may need engineering." S63 says: **"the functional goal may already be achieved by OS-level MAC policy — one layer below the process, one layer below device identity and natural data."** Three distinct layers of "already achieved without engine code":
+
+1. **Hardware identity (S61):** the device is a real Xiaomi mt6899; every physical signal is naturally clean.
+2. **Data content (S62):** the release-signed Build.* values and real Xiaomi signature are naturally clean.
+3. **Kernel MAC policy (S63):** the kernel denies app-domain access entirely; there's no data to read.
+
+The engine's actual work for Phase E continues to be **measuring which layer is doing the work and writing falsifiable guards against future loosening.** Each new Session in Phase E has followed the same probe-first discipline and closed with far less code than the spec anticipated. The remaining Phase E work (5.15, 5.16) will follow the same pattern.
+
+**Phase D closed.** Phase E (anti-detection completion, S59–S64) is five sessions in; Session 64 opens Features 5.15 + 5.16 (`/proc/self/cmdline` full spoof + syscall/stack filter). Phase F (polish, S65–S75) is where the §5.10 Settings.Global disassembly, §5.11 Debug/VMDebug fast-JNI disassembly, and the loopback-bind wall re-measurement land. Session 75 is the target.
 
 **If a future session can't state a specific ⚠️/❌/🔧 → ✅ transition in one sentence, it's not a session.**
