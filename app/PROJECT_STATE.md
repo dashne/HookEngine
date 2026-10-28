@@ -172,11 +172,11 @@ Those are research-grade instrumentation frameworks, distinct from a hook engine
 
 Viber boot under the engine is a **regression canary**, not a target. Every session ends with `GuestLoadTest` green (`outcome=booted-viber-order`, providers ≥14, no new FATAL). If the canary breaks, an engine feature broke — fix the engine feature, then continue. Viber UI, Viber functionality, Viber network — not in scope, not pursued, not tracked.
 
-**IMPORTANT measurement note:** the canary must be measured from a **fresh process** — a run where `GuestLoadTest` is the only test invoked. Running `GuestLoadTest` inside the full suite (position ~107 of 225) has `elapsedMs=16000+` and `providersAttempted=3, providersSucceeded=2` because 100 test classes have already fragmented the process — providers after the 3rd time out. That is **not** the canary measurement. The canary is: `adb shell am instrument -w -r -e class com.ims134.hookengine.GuestLoadTest ...`. Fresh process. Baseline: `elapsedMs ~1679ms` (S61), `~1691ms` (S62), `~1696ms` (S63/S64), `~1696ms` (S65), `~1705ms` (S66). S67 changes (`ReturnMod.cpp` instrumentation + `AntiDetectionE2ETest` reframe + `HookProfile.cpp` dispatcher extension) don't touch boot-path code. No RetMod or ChainHook is created at boot. Expected `~1705ms`, providers 15/14.
+**IMPORTANT measurement note:** the canary must be measured from a **fresh process** — a run where `GuestLoadTest` is the only test invoked. Running `GuestLoadTest` inside the full suite (position ~107 of 225) has `elapsedMs=16000+` and `providersAttempted=3, providersSucceeded=2` because 100 test classes have already fragmented the process — providers after the 3rd time out. That is **not** the canary measurement. The canary is: `adb shell am instrument -w -r -e class com.ims134.hookengine.GuestLoadTest ...`. Fresh process. Baseline: `elapsedMs ~1679ms` (S61), `~1691ms` (S62), `~1696ms` (S63/S64), `~1696ms` (S65), `~1705ms` (S66), `~1705ms` (S67). S68 changes (`ElfResolver.cpp/.h` + `ElfResolverJni.cpp` + `PltResolver.cpp` migration + `ElfResolveTest.kt` + `build.gradle.kts` cleanup) don't touch boot-path code — the ELF resolver is not invoked during boot, and the `PltResolver.cpp` migration preserves visible behavior (7/7 tests unchanged). Expected `~1705ms`, providers 15/14.
 
 # PROJECT STATE
 
-Last updated: **Session 67 close (2026-10-28)**. Supersedes Session-66-close version. Sessions 41–67 landed on disk and are on-device verified (225 registered, 222 executed, 0 failed, 3 ignored at Session 67 close). Feature 5.10 ADB-detect = ⚠️ PARTIAL (property surface complete; Settings.Global surface architecturally walled — see §5.10 below). Features 5.11–5.16 = ✅ COMPLETE. Feature 6.8 signal-safe uninstall = ✅ COMPLETE. Feature 8.7 per-hook profiling = ✅ COMPLETE via CLOCK_MONOTONIC instrumentation on **both** ChainHook and ReturnMod dispatch helpers (S66 + S67).
+Last updated: **Session 68 close (2026-10-28)**. Supersedes Session-67-close version. Sessions 41–68 landed on disk and are on-device verified (233 registered, 230 executed, 0 failed, 3 ignored at Session 68 close). Feature 5.10 ADB-detect = ⚠️ PARTIAL (property surface complete; Settings.Global surface architecturally walled — see §5.10 below). Features 5.11–5.16 = ✅ COMPLETE. Feature 6.8 signal-safe uninstall = ✅ COMPLETE. Feature 8.7 per-hook profiling = ✅ COMPLETE via CLOCK_MONOTONIC instrumentation on **both** ChainHook and ReturnMod dispatch helpers (S66 + S67). Feature 7.1 unified ELF symbol API = ✅ COMPLETE (S68).
 
 ---
 
@@ -210,13 +210,13 @@ The target is defined by the **feature inventory** below — not by any particul
 
 Sessions 1–14 built the primitive foundation. Sessions 15–40 did **not** deepen the engine — they built a container around it (dual-Application boot, GuestClassLoader, LoadedApk manipulation, WMS probes). That detour consumed 26 sessions and produced one engine port (`nativeInit`, S38). The container is now the canary; its further development is out of scope.
 
-Sessions 41–67 resumed engine work and delivered **thirty** verified primitives — the entire Category 1, the entire Category 2, all seven of Category 3, all of Category 4, five of six Phase E anti-detection features (5.11–5.16), the first Phase F feature (6.8), and the second Phase F feature (8.7, extended at S67 to cover both ChainHook and ReturnMod dispatch paths). **Four categories complete plus 14 of 16 anti-detection filters.** Phase E CLOSED. Phase F three sessions in.
+Sessions 41–68 resumed engine work and delivered **thirty-one** verified primitives — the entire Category 1, the entire Category 2, all seven of Category 3, all six of Category 4, five of six Phase E anti-detection features (5.11–5.16), the first Phase F feature (6.8), the second Phase F feature (8.7, extended at S67 to cover both ChainHook and ReturnMod dispatch paths), and the third Phase F feature (7.1 unified ELF symbol API at S68). **Four categories complete plus 14 of 16 anti-detection filters.** Phase E CLOSED. Phase F four sessions in.
 
 ---
 
 ## Current verified state
 
-**Engine primitives (verified on-device, all green at Session 67 close):**
+**Engine primitives (verified on-device, all green at Session 68 close):**
 - Inline hook: 9 ARM64 instruction kinds. Verified by RelocTest (49 assertions).
 - GOT hook: 26 sites, works.
 - ArtMethod hook: works (native methods, non-fast-JNI only).
@@ -239,7 +239,8 @@ Sessions 41–67 resumed engine work and delivered **thirty** verified primitive
 - ServiceManager lookup interception (transact-level): alias and null overrides rewrite String16 names in the request parcel before transact. Verified by ServiceManagerTest (8 tests).
 - Signal handling override: sigaction-based per-slot handlers with PASS_THROUGH / SUPPRESS actions, full siginfo capture. Verified by SignalOverrideTest (6 tests).
 - **Native ServiceManager addition** (Feature 3.7): register a synthetic binder under any name so `ServiceManager.getService(name)` returns it. Mechanism: 3.4 alias rewrite makes the driver return a valid BinderProxy in the reply; a C++ inline hook on `android_os_Parcel_nativeReadStrongBinder` (located by `JNINativeMethod`-struct scan in `libandroid_runtime.so`) returns the original Kotlin Binder when `g_isSynthetic` is set. Same-process caller sees the original instance. Verified by SyntheticServiceTest (6 tests).
-- PLT stub resolution: `PltResolveForSymbol(lib, symbol)` walks `.rela.plt` and correlates relocation index to `.plt` (or BTI `.plt.sec`) entry; validates the first instruction is `adrp` or `bti c`. Verified by PltResolveTest (7 tests, including a callable check).
+- PLT stub resolution: `PltResolveForSymbol(lib, symbol)` walks `.rela.plt` and correlates relocation index to `.plt` (or BTI `.plt.sec`) entry; validates the first instruction is `adrp` or `bti c`. Verified by PltResolveTest (7 tests, including a callable check). **S68** — migrated to use `ElfMappedLib_Open` shared helper; all 7 tests stay green.
+- **Unified ELF symbol resolution** (Feature 7.1, S68): `ElfSymbolLookup(lib, sym)` returns the runtime address of any symbol in any loaded library. `.dynsym` first via GNU hash (`.gnu.hash`) → SysV hash (`.hash`) → linear fallback; then `.symtab` fallback (string table resolved via `sh_link`, per ELF spec, not by name). Multi-library variant. `ElfMappedLib_Open/Close/FindSection` — shared on-disk ELF mmap+parse helper, used by `PltResolver.cpp`. Filesystem-path mode pairs with the loaded lib's runtime bias by basename match — used to inspect APK-embedded `.so` files, other APKs' `.so` files, or downloaded ELFs. Verified by ElfResolveTest (8 tests). `.symtab` fallback proven against `libc.so` (7738 symbols on this ROM), dynamic discovery of `.symtab`-only symbol, `lastPath()==3` assertion. The `sh_link`-based string-table resolution fix is a hard-won fact (§7.1, hard-won facts list).
 - **Debugger detect blocking** (Feature 5.11): property-gated JDWP. S59's `kPropSpoofs` carries `ro.debuggable="0"` and `ro.adb.secure="1"`; the AMS never binds a JDWP listener on port 8700; `Debug.isDebuggerConnected()` and `Debug.waitingForDebugger()` return `false` without any further hook. The `Debug.*`/`VMDebug.*` ArtMethod hook surface is architecturally walled (fast-JNI tokens 0x39-0x3f, unstable across processes) — documented in §5.11 as Phase F disassembly work. Verified by DebuggerDetectTest (6 tests).
 - **Emulator detect blocking** (Feature 5.12): real-device + defensive kPropSpoofs. On this physical MediaTek mt6899 device, every surface a standard anti-emulator library reads is naturally clean. S59's `kPropSpoofs` defensively forces `ro.kernel.qemu=""` and `ro.boot.qemu=""`. Verified by EmulatorDetectTest (6 tests).
 - **Test-keys detect blocking** (Feature 5.13): property surface + Java static-final surface (naturally clean on this release-signed device) + signature null-out regression guard (S62 extended `PmSpoof.nullOutSignatures`). Verified by BuildPropTest (6 tests).
@@ -346,12 +347,12 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 
 | # | Feature | Status |
 |---|---|---|
-| 7.1 | ELF symbol resolution (unified API) | ⚠️ (scattered ad-hoc implementations) |
-| 7.2 | .dynsym walk | ✅ |
-| 7.3 | .symtab walk | ✅ |
-| 7.4 | GNU + SysV hash support | ✅ |
-| 7.5 | Multi-lib search | ✅ |
-| 7.6 | PLT stub resolution | ✅ **S57** |
+| 7.1 | ELF symbol resolution (unified API) | ✅ **S68** (ElfResolver — see §7.1) |
+| 7.2 | .dynsym walk | ✅ **S68** (via ElfResolver) |
+| 7.3 | .symtab walk | ✅ **S68** (via ElfResolver, sh_link string-table resolution) |
+| 7.4 | GNU + SysV hash support | ✅ **S68** (via ElfResolver) |
+| 7.5 | Multi-lib search | ✅ **S68** (via ElfResolver) |
+| 7.6 | PLT stub resolution | ✅ **S57** (migrated to ElfMappedLib in S68) |
 
 ### Category 8 — Runtime diagnostics
 
@@ -367,15 +368,15 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 
 ### Totals
 
-- **✅ verified complete:** 62 features (~93% of 67 tracked)
-- **⚠️ partial:** 4 features (5.6, 5.10, 7.1, 8.2)
+- **✅ verified complete:** 63 features (~94% of 67 tracked)
+- **⚠️ partial:** 3 features (5.6, 5.10, 8.2)
 - **❌ not started:** 1 feature (6.2)
 
-**Engine completion requires ~8 more sessions.**
+**Engine completion requires ~7 more sessions.**
 
 ---
 
-## Engine roadmap — Session 67 to Session 75
+## Engine roadmap — Session 68 to Session 75
 
 ### Phase A — Foundation (Sessions 41–44) — CLOSED
 ### Phase B — Hook mechanism depth (Sessions 45–48) — CLOSED (Category 1 9/9)
@@ -389,10 +390,13 @@ Status: ✅ have + verified · ⚠️ partial · ❌ not started · 🔧 written
 |---|---|---|
 | 65 | 6.8 Signal-safe uninstall | ✅ COMPLETE — `SignalSafeUninstallTest` (6 tests). Deferred SPSC queue + worker thread. `AllocateMemoryNear` page-scan rewrite. |
 | 66 | 8.7 Profiling — ChainHook | ✅ COMPLETE — `HookProfileTest` (6 tests). HookProfile struct + CLOCK_MONOTONIC instrumentation on ChainHook dispatch helper. |
-| **67** | **8.7 extension (ReturnMod) + S42 loopback-bind wall re-measurement** | **✅ COMPLETE — `ReturnModProfileTest` (6 tests, all green first try). §8.7 extended. S42 wall re-documented with loopback-permitted discovery; 3 `AntiDetectionE2ETest` tests un-ignored and reframed (4/4 green).** |
-| 68–72 | Address ⚠️ partials: 5.6, 5.10, 7.1, 8.2. Includes §5.10 Settings.Global disassembly, 7.1 unified ELF API, 8.2 per-hook argument logging | Depends |
-| 73 | (buffer) | Depends |
-| 74 | Full engine regression run + `PROJECT_STATE.md` final close | All suites + canary green |
+| 67 | 8.7 extension (ReturnMod) + S42 loopback-bind wall re-measurement | ✅ COMPLETE — `ReturnModProfileTest` (6 tests, all green first try). §8.7 extended. S42 wall re-documented with loopback-permitted discovery; 3 `AntiDetectionE2ETest` tests un-ignored and reframed (4/4 green). |
+| **68** | **7.1 Unified ELF symbol API** | **✅ COMPLETE — `ElfResolveTest` (8 tests, all green after 3 iterations of the `.symtab`-fallback test). `ElfResolver.cpp/.h` + `ElfResolverJni.cpp` shipped. `PltResolver.cpp` migrated (65 lines removed, 7/7 `PltResolveTest` green). `.symtab` fallback test pivoted from `libhookengine.so` (stripped by AGP even in debug) to `libc.so` (7738 symbols on this ROM).** |
+| 69 | 8.2 per-hook argument logging + optional `Hooks.cpp` dlsym migration | Depends |
+| 70–71 | 5.6 build property coverage, 5.10 §Settings.Global disassembly, 6.2 per-guest tags | Depends |
+| 72 | (buffer) | Depends |
+| 73 | Full engine regression run | All suites + canary green |
+| 74 | `PROJECT_STATE.md` final close | All ✅ or documented walls |
 | 75 | Reserved | Depends |
 
 ---
@@ -486,6 +490,36 @@ Verified by SignalSafeUninstallTest (6 tests). Signal handler stack usage < 256 
 
 ---
 
+## §7.1 Unified ELF symbol resolution (Session 68)
+
+**Functional goal:** a real `.dynsym` + `.symtab` + GNU/SysV-hash + multi-lib symbol-value resolver, plus a shared ELF-open helper for section-level callers like `PltResolver.cpp` (Feature 7.6).
+
+**What the S67 handoff claimed vs. what measurement showed:**
+- S67 handoff listed 4 "ELF callers" to migrate: `PltResolver.cpp`, `SyntheticServiceRegistry.cpp`, `InlineHooker.cpp`, `SignalOverrideJni.cpp`.
+- S68 probe re-measured: **only 2 files implement ELF symbol/table walks.** `PltResolver.cpp` (returns PLT stub addr — Feature 7.6, structurally different from 7.1), `elf_hooker.cpp` (**not in the handoff list!** — returns GOT slot addr, also structurally different). `SyntheticServiceRegistry.cpp` does a JNINativeMethod struct scan (NOT symbol lookup — 3.7, load-bearing because `nativeReadStrongBinder` is not exported). `InlineHooker.cpp` and `SignalOverrideJni.cpp` have **zero** ELF code (caller-supplied address or `sigaction(2)` resolved at load).
+
+**Features 7.2–7.5 were satisfied implicitly by `dlsym`'s internals**, not by explicit engine code — the 7.1 ⚠️ was the correct marker for this gap. S68 closed it by shipping the explicit API.
+
+**Deliverables:**
+
+- **`ElfResolver.h/.cpp`** — `ElfSymbolLookup(lib_substr, symbol)` → runtime address. `.dynsym` first: GNU hash (`.gnu.hash`) → SysV hash (`.hash`) → linear fallback. Then `.symtab` (string table resolved via `symtab_hdr->sh_link`, per ELF spec — **not** by hard-coded section name; hard-won fact). Multi-lib variant. **`ElfMappedLib_Open/Close/FindSection`** — shared on-disk ELF mmap+parse helper. Filesystem-path mode: when given an absolute path that stats successfully, uses it directly; pairs the on-disk file with the loaded lib's runtime bias by basename match (so an extracted copy of `libhookengine.so` pairs with the loaded `libhookengine.so`). APK-internal paths (`...apk!/lib/...`) rejected with explicit error message.
+- **`ElfResolverJni.cpp`** — 8 JNI exports: `elfSymbolLookup`, `elfSymbolLookupMulti`, `elfSymbolLookupLastPath`, `elfMapOpen`, `elfMapClose`, `elfMapSectionCount`, `elfSectionPresent`, `elfSymtabCount`, `elfSymtabNthName`.
+- **`PltResolver.cpp` migration** — ~65 lines of duplicated `open`+`fstat`+`mmap`+`ehdr`-validate+`shdr`-walk block replaced with `ElfMappedLib_Open` / `ElfMappedLib_Close`. All 7 `PltResolveTest` assertions stay green across all 3 iterations of S68.
+- **`ElfResolveTest.kt`** — 8 falsifiable assertions: exported symbol in libc (`malloc`), missing symbol, missing lib, multi-lib (`malloc`), GNU-hash branch fires (`lastPath()==0`), `.symtab` fallback fires (`lastPath()==3`), map open/close roundtrip, repeated lookups stable (100x).
+- **`build.gradle.kts`** — one non-functional `packaging { jniLibs { keepDebugSymbols } }` block added then removed (see meta-lesson below).
+
+**`.symtab` fallback test — 3 iterations to green:**
+
+1. Iteration 1: extracted `libhookengine.so` to `cacheDir`, `ElfSymbolLookup(destPath, "ElfResolver_SymtabOnlyMarker")` returned 0. Root cause: APK-internal paths (`dlpi_name` = `...base.apk!/lib/arm64-v8a/libhookengine.so`) rejected with `open() ENOENT`. Fix: `ElfMappedLib_Open` extended with filesystem-path mode + marker changed to `const char[]` for better `.symtab` retention under `--gc-sections`.
+
+2. Iteration 2: path-mode extracted successfully, still returned 0. Root cause: string-table lookup used `FindSection(".strtab")` — spec-incorrect. Fix: `lookup_symtab` uses `symtab_hdr->sh_link` to find the companion string table. **This fix was correct and stayed** — proven in `linker64` log (`11816 symbols walked, .strtab size 355963`). Test still failed for a different reason: `.symtab` absent from the extracted copy.
+
+3. Iteration 3: **root cause isolated.** AGP's packaging step runs `llvm-strip` on every `.so` even in debug builds; `keepDebugSymbols += "**/libhookengine.so"` was tried and does **not** work on CMake-built libs with this toolchain (AGP + NDK 30.0.16248370). Pivoted the test to `libc.so`, which ships **with** `.symtab` on Android (7738 symbols on this ROM — proven by the same log). Test now dynamically enumerates `.symtab` symbols via new `elfSymtabNthName` JNI, tries lookups until one resolves via `lastPath()==3`, asserts on that. **8/8 green.** Removed the non-functional `keepDebugSymbols` from `build.gradle.kts` so future readers aren't misled.
+
+**Meta-lesson — the S67 "stale premise is a Rule 12 violation" applied to build config.** A build-config premise ("debug builds retain .symtab") is a test premise. When it fails, the honest response is **not** to add more build-config to force the premise true — it's to pivot the test to a target where the premise holds naturally. The `.symtab` walker is verified against `libc.so`'s real 7738-symbol table rather than against a marker we tried to force through the toolchain. This made the test *stronger*, not weaker: it now proves the fallback path against the environment's actual ELF layout, not against a synthetic constructor that could be wrong in ways the toolchain wouldn't expose.
+
+---
+
 ## §8.7 Per-hook CPU / memory profiling (Session 66, extended Session 67)
 
 **Functional goal:** per-hook CPU cost and memory overhead accounting. **Both major handler-dispatch paths instrumented.**
@@ -549,17 +583,17 @@ Viber is used for **one purpose**: verify that the engine primitives still work 
 
 **Canary test:** `GuestLoadTest`. Asserts only `outcome != "?"`. Logcat-based signal: `booted-viber-order` + no new FATAL + providers ≥14 = canary green.
 
-**Canary state at Session 67 close (fresh process):** expected identical to S66 — `outcome=booted-viber-order`, `elapsedMs ~1705ms`, `providersAttempted=15`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise). S67's changes (`ReturnMod.cpp` + `AntiDetectionE2ETest.kt` + `HookProfile.cpp`) don't touch boot-path code.
+**Canary state at Session 68 close (fresh process):** expected identical to S67 — `outcome=booted-viber-order`, `elapsedMs ~1705ms`, `providersAttempted=15`, `providersSucceeded=14`, `providersFailed=1` (MlKit noise). S68's changes (`ElfResolver.cpp/.h`, `ElfResolverJni.cpp`, `PltResolver.cpp` migration, `ElfResolveTest.kt`, `build.gradle.kts` cleanup) don't touch boot-path code — the ELF resolver is not invoked at boot, and `PltResolver.cpp` behavior is unchanged (7/7 tests stable across 3 iterations).
 
 **Measurement discipline:** canary must be measured from fresh process — `-e class com.ims134.hookengine.GuestLoadTest` as the only class.
 
 ---
 
-## Test suite state (as of Session 67 close)
+## Test suite state (as of Session 68 close)
 
-**Executed:** 222 · **Registered:** 225 · **Ignored:** 3 · **Failed:** 0
+**Executed:** 230 · **Registered:** 233 · **Ignored:** 3 · **Failed:** 0
 
-Registered test classes (post-S67, full listing — deltas from S66 are `ReturnModProfileTest` new + 6, `AntiDetectionE2ETest` 3 tests un-ignored):
+Registered test classes (post-S68, full listing — delta from S67 is `ElfResolveTest` new + 8):
 
 | Class | Tests | Status |
 |---|---|---|
@@ -573,7 +607,7 @@ Registered test classes (post-S67, full listing — deltas from S66 are `ReturnM
 | ThreadStatusProbeTest | 1 | ✅ |
 | MountsProbeTest | 2 | ✅ |
 | AntiDetectionTest | 1 | ✅ |
-| AntiDetectionE2ETest | 4 (0 ignored — S67) | ✅ **S67 reframed** |
+| AntiDetectionE2ETest | 4 | ✅ (S67 reframed) |
 | PmSpoofTest | 4 | ✅ |
 | ClassLoaderBridgeTest | 3 | ✅ |
 | DualApplicationTest | 2 | ✅ |
@@ -594,7 +628,7 @@ Registered test classes (post-S67, full listing — deltas from S66 are `ReturnM
 | NativeFnlnTest | 6 | ✅ S54 |
 | DexLoadTest | 6 | ✅ S55 |
 | DexMergeTest | 6 | ✅ S56 |
-| PltResolveTest | 7 | ✅ S57 |
+| PltResolveTest | 7 | ✅ S57 (migrated S68) |
 | SyntheticServiceTest | 6 | ✅ S58 |
 | AdbDetectTest | 6 (2 ignored) | ⚠️ S59 |
 | DebuggerDetectTest | 6 | ✅ S60 |
@@ -604,41 +638,44 @@ Registered test classes (post-S67, full listing — deltas from S66 are `ReturnM
 | CmdlineStackTest | 6 | ✅ S64 |
 | SignalSafeUninstallTest | 6 | ✅ S65 |
 | HookProfileTest | 6 | ✅ S66 |
-| **ReturnModProfileTest** | **6** | **✅ S67** |
+| ReturnModProfileTest | 6 | ✅ S67 |
+| **ElfResolveTest** | **8** | **✅ S68** |
 | GuestLoadTest | 1 | ✅ (canary) |
 | ActivityBootProbeTest | 1 | 🔒 ignored |
 | IntegrationTest | 1 | ✅ |
-| Diagnostic probes | several (incl. HookProfileProbeTest 1, SignalSafeUninstallProbeTest 1) | non-gating |
+| Diagnostic probes | several | non-gating |
 
-**Ignored count: 3** = `ActivityBootProbeTest` (1) + `AdbDetectTest` (2 — the two Settings.Global tests walled by §5.10). S67 removed the 3 `AntiDetectionE2ETest` @Ignore's.
+**Ignored count: 3** = `ActivityBootProbeTest` (1) + `AdbDetectTest` (2 — the two Settings.Global tests walled by §5.10).
 
 **Test count history (registered):**
 - S40: 51 · S41: 51 · S42: 57 · S43: 63 · S44: 68 · S45: 74 · S46: 80 · S47: 86 · S48: 92 · S49: 98
 - S50: 104 · S51: 112 · S52: 118 · S53: 124
 - S54: 130 · S55: 136 · S56: 142 · S57: 149 · S58: 155 · S59: 168
 - S60: 177 · S61: 183 / 184 measured · S62: 191 · S63: 198 · S64: 205 · S65: 212
-- S66: 219 · **S67 close: 225** (+6: ReturnModProfileTest)
+- S66: 219 · S67: 225 · **S68 close: 233** (+8: ElfResolveTest)
 
 ---
 
-## Session 68 first actions (authoritative)
+## Session 69 first actions (authoritative)
 
-Phase F is 3/11 sessions complete (S65 ✅, S66 ✅, S67 ✅). Session 68 targets the ⚠️ partials. Remaining: 5.6, 5.10, 7.1, 8.2.
+Phase F is 4/11 sessions complete (S65 ✅, S66 ✅, S67 ✅, S68 ✅). Session 69 targets the remaining ⚠️s. Remaining: 5.6, 5.10, 8.2, and the ❌ 6.2.
 
-**Recommendation: 7.1 unified ELF API** — the most tractable partial. Current state is scattered ad-hoc implementations: `PltResolver.cpp` mmaps ELF; `InlineHooker.cpp` has inline symbol scan; `SyntheticServiceRegistry.cpp` has JNINativeMethod-struct scan; `SignalOverrideJni.cpp` has signal-function lookup. Unifying them into a single `ElfSymbolLookup(lib_substr, symbol)` API removes duplication and gives Category 7 a real ✅.
+**Recommendation: 8.2 per-hook argument logging** — the last ⚠️ that's fully code-shaped. Same pattern as 8.7 (dispatch-helper instrumentation), but logging args instead of timing. Expected: 6 new tests, medium scope, likely 6/6 green first try given the S66/S67 precedent.
 
-1. Confirm Session 67 commit landed (`git log --oneline -3`).
-2. **Fresh-process canary rerun** to confirm S67 no-regression. Expected `outcome=booted-viber-order`, `providersAttempted=15`, `providersSucceeded=14`, `elapsedMs ~1705`.
-3. **Probe the ELF resolution surface** — enumerate every existing ELF walker in the codebase, measure each one's behavior on this ROM (which libraries, which symbol-table variant, what fallbacks). Write `ElfResolveProbeTest.kt` if the surface isn't obvious from code inspection.
-4. **Design the unified API:** `ElfSymbolLookup(const char* lib_substr, const char* symbol)` — mmaps on-disk ELF, walks `.dynsym` first, falls back to `.symtab` if needed. Handles GNU hash + SysV hash. Multi-library search variant. Same return semantics as existing scattered implementations so callers can be migrated 1:1.
-5. **Migrate callers one at a time.** Each migration is a targeted edit + retest of the caller's existing test class (PltResolveTest, SyntheticServiceTest, SignalOverrideTest). No new test class — the existing tests prove the migration didn't break anything.
-6. **Add `ElfResolveTest.kt` (6 assertions)** — direct unit tests on the unified API for edge cases not covered by caller tests: missing lib, missing symbol, `.symtab`-only fallback path.
-7. Build + install + Gate 1 (`ElfResolveTest` + the three migrated caller test classes).
-8. Full suite gate.
+Optional warm-up (30 min): migrate `Hooks.cpp`'s `dlsym(RTLD_DEFAULT, "dlopen")` to `ElfSymbolLookup("libc.so", "dlopen")` — closes 7.1's companion, gains `.symtab` fallback for free.
+
+1. Confirm Session 68 commit landed (`git log --oneline -3`).
+2. **Fresh-process canary rerun** to confirm S68 no-regression. Expected `outcome=booted-viber-order`, `providersAttempted=15`, `providersSucceeded=14`, `elapsedMs ~1705`.
+3. **Optional warm-up** — `Hooks.cpp` `Fake_dlopen` / `Fake_android_dlopen_ext` migration to `ElfSymbolLookup`. 30-min targeted edit. RegressionTest stays green.
+4. **Design 8.2** — dispatch-helper instrumentation for argument capture. Look at S66/S67's `HookProfile` pattern as template. Args to capture: GP x0–x7 (8 words) and FP v0–v7 (128 bytes) at dispatch entry, per handler. Opt-in flag on slot. Memory: `HookArgLog` struct on ChainSlot and RetModSlot. JNI reads with `argLogRead(target, &long[16])`.
+5. **Implement** — `HookArgLog.cpp/.h`, extend `chain_dispatch_helper` and `retmod_dispatch_helper`.
+6. **New `HookArgLogTest.kt`** — 6 assertions: disabled-by-default, arg0 matches first arg, args1-7 match subsequent, FP args match, disabled stops recording, mem_bytes accounting.
+7. Build + install + Gate 1 (`HookArgLogTest` + `ChainHookTest` + `ReturnModTest`).
+8. Full suite gate (expect 233 + 6 = 239 registered).
 9. Canary gate.
-10. Commit, mark 7.1 → ✅.
+10. Commit, mark 8.2 → ✅.
 
-**Expected scope:** Medium. ~150-200 lines of new C++ (`ElfResolver.cpp/.h` + JNI bridge), ~50 lines of migration per caller, ~150 lines of test. Not as deep as S65's signal-safe work; not as shallow as S66/S67's copy-pattern work. Real consolidation.
+**Expected scope:** Medium. ~120 lines new C++ + ~60 lines dispatch-helper edit + ~150 lines test. Not as deep as S65; comparable to S66/S67's copy-pattern work plus argument-layout reasoning.
 
 ---
 
@@ -649,7 +686,7 @@ Phase F is 3/11 sessions complete (S65 ✅, S66 ✅, S67 ✅). Session 68 target
 - **Every session advances at least one ⚠️/❌/🔧 → ✅.**
 - **Verification-first:** verify any prior-session unverified code before writing new code.
 - **Rule 5 (behavior match) — partial disclosure for structural ports.**
-- **Rule 12: test assertions must be able to fail.** A test that cannot fail is as broken as one that cannot pass. Corollary: **a test whose premise is stale is also a Rule 12 violation** — the assertion can never fail because it asserts behavior that doesn't exist.
+- **Rule 12: test assertions must be able to fail.** A test that cannot fail is as broken as one that cannot pass. Corollary: **a test whose premise is stale is also a Rule 12 violation** — the assertion can never fail because it asserts behavior that doesn't exist. **A build-config premise is a test premise** — if it fails, pivot the test to a target where the premise holds naturally, do not add more build-config to force the premise true.
 - **Rule 14: every test-run instruction includes `./gradlew` + `adb install -r -t` on both APKs.**
 - **Rule 15: engine is native.**
 - **Rule 7 (decomp-first) when wire format / symbol / field layout is uncertain.**
@@ -665,12 +702,13 @@ Phase F is 3/11 sessions complete (S65 ✅, S66 ✅, S67 ✅). Session 68 target
 - **The S65 meta-lesson:** non-trivial native features reveal bugs one subsystem at a time.
 - **The S66 meta-lesson:** choose the robust primitive over the clever one when accessibility is uncertain and the feature is opt-in.
 - **The S67 meta-lesson:** extending a feature to a second subsystem is copy-and-adapt when the first implementation was structurally correct. The first subsystem's discipline determines the cost of the second. But also — **a stale @Ignore is a lie about current behavior; re-measure before re-enabling, because the original test premise may also be wrong, not just the setup.**
+- **The S68 meta-lesson:** a build-config premise ("debug builds retain .symtab") is a test premise. When it fails, the honest response is not to add more build-config to force the premise true — it's to pivot the test to a target where the premise holds naturally. `keepDebugSymbols` doesn't work on CMake-built libs with this toolchain; `libc.so` on this ROM does have `.symtab` (7738 symbols). Moving the test to a target where the premise holds makes it *stronger*, not weaker — it verifies the fallback against a real environment, not a synthetic constructor.
 
 ---
 
 ## Hard-won facts (canonical reference)
 
-Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–67:
+Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–68:
 
 - `SYS_getpid` / `SYS_getuid` via `syscall()` bypass both inline and GOT hooks. (S33, verified S34.)
 - AttributionSource layout differs by construction path. (S32/33, verified S34.)
@@ -703,24 +741,31 @@ Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–67:
 - Feature 5.15/5.16 — /proc/self/cmdline + syscall/stack (S64). `setArgV0` produces exactly 1 argv entry. `/proc/self/stack` denied by `ptrace_may_access` (not SELinux — no AVC line). Path aliasing `/proc/self/<file>` works.
 - Feature 6.8 — Signal-safe deferred uninstall (S65). See §6.8. Key facts: two mutex acquisitions + nanosleep(100ms) in `UninstallInlineHook` — all bypassed by deferred worker. SPSC ring with spinlock CAS producer is sufficient. `eventfd(EFD_NONBLOCK | EFD_CLOEXEC)` wakeup, `write(fd, &u64_one, 8)` sig-safe. `AllocateMemoryNear` fixed-offset scan fails when targets within ~4KB — page-scan fix. `SignalSafeUninstallWaitFor` must wait for BOTH registry-clear AND stats-settled. Arm resets counters. `SIGRTMIN+20` for tests. Stack usage <256B, runtime ~100us.
 - Feature 8.7 — Per-hook profiling (S66+S67). See §8.7. Key facts:
-  - **`__atomic_load_n` on a `bool*` field works with `__ATOMIC_RELAXED` on this clang** — no cast needed.
-  - **`min_ns` init to `UINT64_MAX`** and reset restores `UINT64_MAX`. Reset assertion checks `min == -1L` (signed jlong).
-  - **CAS loop for min/max required** — `__atomic_fetch_add` doesn't work for min/max.
-  - **Opt-in toggle re-read per dispatch** — not cached at slot init. ~1ns when disabled.
-  - **`mem_bytes` computation:** ChainHook 8224B (32 stub + 4K tramp + 4K relay); ReturnMod 12288B (4K shadow + 4K inline relay + 4K inline tramp — the inline tramp is unused by RetMod but allocated by `InstallInlineHookEx`; honest accounting includes it).
-  - **Per-site profile, not per-handler** — 2 handlers on one ChainSlot share one profile. `call_count` = total handler invocations.
-  - **`System.nanoTime()` ~174ns pure** — too expensive. `clock_gettime(CLOCK_MONOTONIC)` via VDSO ~25ns — acceptable. `mrs x0, cntvct_el0` (~2ns) not used due to accessibility uncertainty.
-  - **`CLOCK_MONOTONIC` not `_RAW`** — `_RAW` goes through syscall on some kernels (no VDSO).
-  - **`HookProfile` struct must be POD** — plain `uint64_t`, no `std::atomic<>`, so it stays trivially copyable.
-  - **`retmod_dispatch_helper` captures both `fn` and `prof` under the lock, uses them outside** — same discipline as S46's modifier pointer and S43's trampoline pointer.
-
+    - **`__atomic_load_n` on a `bool*` field works with `__ATOMIC_RELAXED` on this clang** — no cast needed.
+    - **`min_ns` init to `UINT64_MAX`** and reset restores `UINT64_MAX`. Reset assertion checks `min == -1L` (signed jlong).
+    - **CAS loop for min/max required** — `__atomic_fetch_add` doesn't work for min/max.
+    - **Opt-in toggle re-read per dispatch** — not cached at slot init. ~1ns when disabled.
+    - **`mem_bytes` computation:** ChainHook 8224B (32 stub + 4K tramp + 4K relay); ReturnMod 12288B (4K shadow + 4K inline relay + 4K inline tramp — the inline tramp is unused by RetMod but allocated by `InstallInlineHookEx`; honest accounting includes it).
+    - **Per-site profile, not per-handler** — 2 handlers on one ChainSlot share one profile. `call_count` = total handler invocations.
+    - **`System.nanoTime()` ~174ns pure** — too expensive. `clock_gettime(CLOCK_MONOTONIC)` via VDSO ~25ns — acceptable. `mrs x0, cntvct_el0` (~2ns) not used due to accessibility uncertainty.
+    - **`CLOCK_MONOTONIC` not `_RAW`** — `_RAW` goes through syscall on some kernels (no VDSO).
+    - **`HookProfile` struct must be POD** — plain `uint64_t`, no `std::atomic<>`, so it stays trivially copyable.
+    - **`retmod_dispatch_helper` captures both `fn` and `prof` under the lock, uses them outside** — same discipline as S46's modifier pointer and S43's trampoline pointer.
 - **S67 companion finding — connect hook permits loopback by design.** `Socket("127.0.0.1", 27042)` and `Socket("127.0.0.1", 23946)` both succeed. The engine's `connect` hook blocks only external (non-loopback) Frida/IDA connections; loopback is permitted to preserve in-app local IPC. This is consistent with `AntiDetectionTest.allAntiDetectionTestsPass` (which asserts the decision function blocks the ports, not that any specific connect call fails). E2E external-port-blocking requires a controllable non-loopback address — Phase F infrastructure. Current `AntiDetectionE2ETest` tests prove loopback is permitted (positive assertions).
+- Feature 7.1 — Unified ELF symbol API (S68). See §7.1. Key facts:
+    - **`.symtab` companion string table MUST be found via `symtab_hdr->sh_link`, not by section name lookup.** The ELF spec says so; the name is not authoritative. Using `FindSection(".strtab")` will silently fail on toolchain variants where the string table section is renamed or merged. `sh_link` is stable across all toolchains. This fix was required to make `.symtab` walk actually work.
+    - **AGP + NDK 30.0.16248370 strips `.symtab` from CMake-built `.so` files even in `debug` builds.** `packaging { jniLibs { keepDebugSymbols += "**/libhookengine.so" } }` was tried and does **not** work on this toolchain — the strip step overrides it. Removed from `build.gradle.kts` as non-functional. Consequence: `.symtab`-based tests must use a target where `.symtab` survives; `libc.so` on this ROM ships with `.symtab` (7738 symbols on-device).
+    - **APK-internal paths (`dlpi_name` = `...base.apk!/lib/...`) are not filesystem-openable.** `open()` returns `ENOENT` because the path is a zip-internal identifier. `ElfMappedLib_Open` extended with filesystem-path mode: given an absolute path that stats successfully, uses it directly; pairs with the loaded lib's runtime bias by basename match (extracted `libhookengine.so` → loaded `libhookengine.so` bias). Rejected with explicit error message otherwise.
+    - **Pseudo-libs `[vdso]`, `[vvar]`, `[stack]` must be skipped before `open()`.** `dlpi_name` starts with `[` for these — the check is `dlpi_name[0] == '['`. Same check applied in the multi-lib iteration callback.
+    - **`ElfSymbolLookupLastPath()` diagnostic is a genuine Rule 12 enabler.** Without it, a test can only assert "addr != 0" — which is also true for a symbol found via `.dynsym` even if `.symtab` is broken. The path assertion (`== 0` for GNU-hash, `== 3` for `.symtab` fallback) makes each branch independently falsifiable.
+    - **`ElfMappedLib_Open` filesystem-path mode is general infrastructure, not just test scaffolding.** Any future feature that needs to inspect an on-disk ELF (a downloaded `.so`, a second APK's libs, a diagnostic dump) uses the same path. Not in the original 7.1 spec — fell out of the `.symtab` test requirement naturally.
+    - **The `S67 4-ELF-caller premise` was 50% stale.** Only 2 files implement real ELF symbol-table walks; both return structurally different things (GOT slot vs PLT stub) from what 7.1 needs (symbol value). `elf_hooker.cpp`'s `GetGotAddress` is a reloc-slot walk; `PltResolver.cpp` is a reloc-to-PLT-stub walk. Migrating them "to 7.1" would be cosmetic. `PltResolver.cpp` was migrated to `ElfMappedLib_Open` for the mmap+parse sharing (~65 lines removed, 7/7 tests stable), and `elf_hooker.cpp` was intentionally not migrated (documented in §7.1).
 
 ---
 
 ## The blunt version
 
-**Four categories complete:** Category 1 (Hook mechanisms, 9/9), Category 2 (Memory primitives, 7/7), Category 3 (IPC / kernel boundary, 7/7), Category 4 (Class loading, 6/6). **Phase E CLOSED** at S64 — 5.11–5.16 all ✅, only 5.10 remains ⚠️ PARTIAL. **Phase F is 3/11 sessions complete** — 6.8 signal-safe uninstall ✅ (S65), 8.7 per-hook profiling ✅ (S66 ChainHook + S67 ReturnMod). Sessions 41–67 shipped thirty verified primitives, all on-device verified with fail-able tests:
+**Four categories complete:** Category 1 (Hook mechanisms, 9/9), Category 2 (Memory primitives, 7/7), Category 3 (IPC / kernel boundary, 7/7), Category 4 (Class loading, 6/6). **Phase E CLOSED** at S64 — 5.11–5.16 all ✅, only 5.10 remains ⚠️ PARTIAL. **Phase F is 4/11 sessions complete** — 6.8 signal-safe uninstall ✅ (S65), 8.7 per-hook profiling ✅ (S66 ChainHook + S67 ReturnMod), 7.1 unified ELF symbol API ✅ (S68). Sessions 41–68 shipped thirty-one verified primitives, all on-device verified with fail-able tests:
 
 - 41: full ARM64 relocation (9 kinds)
 - 42: dynamic attach
@@ -749,13 +794,10 @@ Facts from Sessions 1–40 retained verbatim. Additions from Sessions 33–67:
 - 65: signal-safe uninstall (✅ — deferred SPSC + worker; `AllocateMemoryNear` page-scan)
 - 66: per-hook profiling ChainHook (✅ — `HookProfile` + CLOCK_MONOTONIC)
 - 67: per-hook profiling ReturnMod (✅ — same pattern, 6/6 first try); S42 wall re-documented with loopback-permitted discovery; 3 AntiDetectionE2ETest un-ignored and reframed
+- 68: unified ELF symbol API (✅ — `ElfResolver` + `ElfMappedLib` shared helper; `PltResolver.cpp` migrated; 8/8 `ElfResolveTest` after 3 iterations of the `.symtab`-fallback test)
 
-**225 registered tests, 222 executed, 3 ignored, 0 failed at S67 close.** Session 66 was the cleanest native-deliverable session yet — 6/6 green first build. Session 67 matched that: `ReturnModProfileTest` 6/6 green first build, no iteration. The pattern-transfer from ChainHook to ReturnMod was trivial because S66's discipline (6 falsifiable structural assertions, not wall-clock thresholds) was correct.
+**233 registered tests, 230 executed, 3 ignored, 0 failed at S68 close.** Session 66 was the cleanest native-deliverable session yet — 6/6 green first build. Session 67 matched that. Session 68 was not the cleanest — three iterations of the `.symtab`-fallback test — but every iteration taught a real fact that is now in the hard-won facts list, and the final test is stronger than any of the earlier proposed versions. **The S68 journey — 3 iterations, 4 measured walls (APK-internal path, `sh_link` spec-correctness, AGP strip, `keepDebugSymbols` false lead) — is exactly what "Rule 12: assertions must be able to fail" looks like when the premise is a build config.**
 
-**S67 also paid down Rule-12 debt.** The S15 `@Ignore` on 3 `AntiDetectionE2ETest` tests was technically valid (visible skip) but the assertions were premised on "hook blocks loopback" — false by S67 measurement. Renamed and inverted to positive "loopback permitted" assertions. All 4 tests now live, 0 ignored. Result: `run finished: 4 tests, 0 failed, 0 ignored`.
-
-**The discovery:** the engine's `connect` hook deliberately permits loopback destinations. Blocking loopback would break in-app local IPC; only external Frida/IDA connections are blocked. This is consistent with the decision-function test (`AntiDetectionTest.allAntiDetectionTestsPass`) — but the E2E tests had been asserting the opposite. **Test framing must match measured reality. A test that asserts X when the code does Y is not a test, it's a lie.**
-
-**Phase F is 3/11 sessions in.** Remaining: 5.6 (build property coverage), 5.10 (Settings.Global shared-mem disassembly — Phase F), 7.1 (unified ELF API — S68 target), 8.2 (per-hook argument logging). Plus the three Phase F disassembly items (S51 cache-hit, S60 Debug/VMDebug fast-JNI, §5.10 Settings.Global). Session 75 closes.
+**Phase F is 4/11 sessions in.** Remaining: 5.6 (build property coverage), 5.10 (Settings.Global shared-mem disassembly — Phase F), 8.2 (per-hook argument logging — S69 target), 6.2 (per-guest tags). Plus the three Phase F disassembly items (S51 cache-hit, S60 Debug/VMDebug fast-JNI, §5.10 Settings.Global). Session 75 closes.
 
 **If a future session can't state a specific ⚠️/❌/🔧 → ✅ transition in one sentence, it's not a session.**

@@ -32,6 +32,14 @@ android {
         }
     }
 
+    // S68 note: the `packaging { jniLibs { keepDebugSymbols += "**/..." } }`
+    // block was tried here to prevent AGP from stripping .symtab from
+    // libhookengine.so. On this toolchain (AGP + NDK 30.0.16248370) it
+    // does not affect CMake-built libraries — .symtab is removed during
+    // the APK packaging step regardless. Removed here so it doesn't
+    // mislead future readers. Feature 7.1's .symtab-fallback test uses
+    // libc.so (which ships with .symtab on this device) instead.
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
         targetCompatibility = JavaVersion.VERSION_11

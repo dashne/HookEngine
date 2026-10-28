@@ -183,39 +183,35 @@ object NativeTestBridge {
     external fun pltResolve(libName: String, symbolName: String): Long
     external fun pltCallOpen(pltAddr: Long, path: String, flags: Int): Int
 
-    // Feature 3.7 — Native ServiceManager addition.
-    // Binder bytes are built in C++ via Parcel.writeStrongBinder + native
-    // buffer read. Parcel.marshall() refuses parcels containing binders,
-    // so the byte-array API from the first attempt is gone.
+    // Feature 3.7
     external fun syntheticAdd(name: String, binder: Any): Int
     external fun syntheticRemove(name: String): Int
     external fun syntheticCount(): Int
     external fun syntheticClearAll()
 
-    // ─── Feature 6.8 — Signal-safe deferred uninstall (S65) ──────────
-    // Arm() spawns the deferred worker thread and creates the eventfd.
-    // MUST be called from normal thread context before any signal-handler
-    // enqueue can succeed. Idempotent — second call returns 0.
+    // Feature 6.8
     external fun signalSafeUninstallArm(): Int
     external fun signalSafeUninstallDisarm(): Int
-    // Async-signal-safe enqueue. Called from within a signal handler.
-    // Returns 0 on enqueue, -1 on queue full, -2 on null target, -3 if
-    // not armed. Never blocks and never allocates.
     external fun signalSafeUninstallFromHandler(target: Long): Int
-    // Polls FindHandle(target) until null or timeout (normal context).
-    // Returns 0 if hook was uninstalled within timeout, -1 on timeout.
     external fun signalSafeUninstallWaitFor(target: Long, timeoutMs: Int): Int
-    // Returns {enqueued, completed, failed, dropped} atomically.
     external fun signalSafeUninstallStats(): LongArray
 
-    // ─── Feature 8.7 — Per-hook CPU/memory profiling (S66) ──────────
-    // Returns long[6] = {enabled (0/1), call_count, total_ns, min_ns,
-    // max_ns, mem_bytes}, or null if target not found in any profile-
-    // instrumented subsystem.
+    // Feature 8.7
     external fun hookProfileRead(target: Long): LongArray?
     external fun hookProfileEnable(target: Long): Boolean
     external fun hookProfileDisable(target: Long): Boolean
     external fun hookProfileReset(target: Long): Boolean
-    // Simple presence check — returns true if target is profiled.
     external fun hookProfileLookup(target: Long): Boolean
+
+    // ─── Feature 7.1 — unified ELF symbol resolution (S68) ─────────
+    external fun elfSymbolLookup(libSubstr: String, symbol: String): Long
+    external fun elfSymbolLookupMulti(symbol: String): Long
+    external fun elfSymbolLookupLastPath(): Int
+    external fun elfMapOpen(libSubstr: String): Long
+    external fun elfMapClose(handle: Long)
+    external fun elfMapSectionCount(handle: Long): Int
+    external fun elfSectionPresent(handle: Long, sectionName: String): Int
+    external fun elfSymtabCount(handle: Long): Int
+    // S68 revision 3 — enumerate .symtab names for the fallback test.
+    external fun elfSymtabNthName(handle: Long, idx: Int): String?
 }
