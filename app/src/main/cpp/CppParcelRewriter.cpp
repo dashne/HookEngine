@@ -812,3 +812,122 @@ extern "C" void ParcelRewriter_IncrAliasHit() {
 extern "C" void ParcelRewriter_IncrNullHit() {
     g_sm_null_hits.fetch_add(1, std::memory_order_relaxed);
 }
+
+extern "C" size_t ParcelRewriter_GetObjectCount(jlong parcelPtr) {
+    if (!parcelPtr) return 0;
+    return *(const size_t*)((const uint8_t*)parcelPtr + 48); // mObjectsSize
+}
+
+// Returns the byte offset (into the Parcel's data buffer) of the Nth
+// object the kernel/driver actually recorded — the authoritative position,
+// not a heuristic guess. mObjects is binder_size_t* (array of offsets).
+extern "C" size_t ParcelRewriter_GetObjectOffset(jlong parcelPtr, size_t index) {
+    if (!parcelPtr) return (size_t)-1;
+    size_t count = ParcelRewriter_GetObjectCount(parcelPtr);
+    if (index >= count) return (size_t)-1;
+    const size_t* objects = *(const size_t* const*)((const uint8_t*)parcelPtr + 40); // mObjects
+    if (!objects) return (size_t)-1;
+    return objects[index];
+}
+
+//-------- Claude ------------
+// ─── Reply-buffer ownership clear (for Feature 3.7's reply swap) ─────
+//
+// A reply Parcel returned from a real binder transaction owns a
+// kernel-mmap'd buffer: its mOwner function pointer (IPCThreadState::
+// freeBuffer) + mOwnerCookie are how that buffer gets released back to
+// the driver when the Parcel is recycled. If SyntheticServiceRegistry
+// swaps mData to a malloc'd buffer without clearing mOwner first, the
+// Parcel later tries to release the malloc'd pointer through the kernel
+// release path, which the driver rejects. ParcelRewriter_ClearOwner
+// finds mOwner by scanning the Parcel struct for a pointer value that
+// falls inside libbinder.so's mapped range, then zeroes it (and its
+// cookie) so the Parcel falls back to a plain free() instead.
+
+struct LibRange { uintptr_t start = 0; uintptr_t end = 0; };
+
+static int OwnerRangeCb(struct dl_phdr_info* info, size_t, void* data) {
+    if (!info->dlpi_name || !strstr(info->dlpi_name, "libbinder.so")) return 0;
+    uintptr_t lo = UINTPTR_MAX, hi = 0;
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        if (info->dlpi_phdr[i].p_type == PT_LOAD) {
+            uintptr_t s = info->dlpi_addr + info->dlpi_phdr[i].p_vaddr;
+            uintptr_t e = s + info->dlpi_phdr[i].p_memsz;
+            if (s < lo) lo = s;
+            if (e > hi) hi = e;
+        }
+    }
+    LibRange* out = (LibRange*)data;
+    out->start = lo;
+    out->end = hi;
+    return 1;
+}
+
+static LibRange GetLibBinderRange() {
+    static LibRange range;
+    static std::atomic<bool> done{false};
+    if (!done.load(std::memory_order_acquire)) {
+        LibRange r;
+        dl_iterate_phdr(OwnerRangeCb, &r);
+        range = r;
+        done.store(true, std::memory_order_release);
+        LOGD("ClearParcelOwner: libbinder.so range=[0x%lx,0x%lx)",
+             (unsigned long)range.start, (unsigned long)range.end);
+    }
+    return range;
+}
+
+static std::atomic<long> g_owner_offset{-1}; // -1=unsearched, 0=not found, >0=offset
+
+extern "C" void ParcelRewriter_DumpOwnerCandidates(jlong parcelPtr) {
+    if (!parcelPtr) return;
+    LibRange range = GetLibBinderRange();
+    const uint8_t* base = (const uint8_t*)parcelPtr;
+    LOGD("ClearParcelOwner: scanning Parcel struct at %p", (const void*)base);
+    for (int off = 0; off <= 160; off += 8) {
+        uintptr_t val = *(const uintptr_t*)(base + off);
+        bool inLibbinder = range.start && val >= range.start && val < range.end;
+        LOGD("ClearParcelOwner:   +%-4d = 0x%016lx%s",
+             off, (unsigned long)val, inLibbinder ? "  <-- inside libbinder.so" : "");
+    }
+}
+
+extern "C" void ParcelRewriter_ClearOwner(jlong parcelPtr) {
+    if (!parcelPtr) return;
+    uint8_t* base = (uint8_t*)parcelPtr;
+
+    long cached = g_owner_offset.load(std::memory_order_acquire);
+    if (cached == -1) {
+        LibRange range = GetLibBinderRange();
+        if (!range.start) {
+            LOGE("ClearParcelOwner: libbinder.so range not found");
+            g_owner_offset.store(0, std::memory_order_release);
+            return;
+        }
+        long found = 0;
+        for (int off = 56; off <= 160; off += 8) {
+            uintptr_t val = *(const uintptr_t*)(base + off);
+            if (val >= range.start && val < range.end) { found = off; break; }
+        }
+        if (found) {
+            LOGD("ClearParcelOwner: discovered likely mOwner at +%ld", found);
+        } else {
+            LOGE("ClearParcelOwner: no libbinder.so pointer found in +56..+160 — "
+                 "mOwner offset unknown. Call ParcelRewriter_DumpOwnerCandidates "
+                 "for a full raw dump.");
+        }
+        g_owner_offset.store(found, std::memory_order_release);
+        cached = found;
+    }
+
+    if (cached <= 0) return;
+
+    uintptr_t* ownerSlot  = (uintptr_t*)(base + cached);
+    uintptr_t* cookieSlot = (uintptr_t*)(base + cached + 8);
+    uintptr_t oldOwner  = *ownerSlot;
+    uintptr_t oldCookie = *cookieSlot;
+    *ownerSlot  = 0;
+    *cookieSlot = 0;
+    LOGD("ClearParcelOwner: cleared mOwner (was 0x%lx) / mOwnerCookie (was 0x%lx) at +%ld",
+         (unsigned long)oldOwner, (unsigned long)oldCookie, cached);
+}

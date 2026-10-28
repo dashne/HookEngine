@@ -23,7 +23,7 @@ object NativeTestBridge {
 
     external fun dumpLastCode36Reply(): ByteArray?
 
-    // Feature 1.5 — dynamic runtime attach
+    // Feature 1.5
     external fun attachRuntime(addr: Long, repl: Long): Int
     external fun detachRuntime(addr: Long): Int
     external fun getFnAttachTargetAddr(): Long
@@ -32,7 +32,7 @@ object NativeTestBridge {
     external fun callFnAttachTarget(x: Int): Int
     external fun readU32At(addr: Long): Long
 
-    // Feature 1.7 — hook chaining
+    // Feature 1.7
     external fun chainAttach(target: Long, handler: Long): Int
     external fun chainDetach(target: Long, handler: Long): Int
     external fun chainCount(): Int
@@ -46,7 +46,7 @@ object NativeTestBridge {
     external fun chainOrderFirst(): Int
     external fun chainReset()
 
-    // Feature 1.8 — conditional hook
+    // Feature 1.8
     external fun chainAttachCond(target: Long, predicate: Long, handler: Long): Int
     external fun getChainPredAcceptAllAddr(): Long
     external fun getChainPredRejectAllAddr(): Long
@@ -55,7 +55,7 @@ object NativeTestBridge {
     external fun chainPredCalls(): Int
     external fun chainPredLastX0(): Int
 
-    // Feature 1.9 — return-value modification
+    // Feature 1.9
     external fun attachRetMod(target: Long, modifier: Long): Int
     external fun detachRetMod(target: Long): Int
     external fun retModCount(): Int
@@ -67,27 +67,23 @@ object NativeTestBridge {
     external fun getRetModClamp100Addr(): Long
     external fun getRetModForceDeadAddr(): Long
 
-    // Feature 1.6 — SVC instruction hooking
+    // Feature 1.6
     external fun getSvcGetpidTargetAddr(): Long
     external fun getSvcGetpidSvcAddr(): Long
     external fun getSvcGetppidTargetAddr(): Long
     external fun getSvcGetppidSvcAddr(): Long
     external fun getSvcCloseInvalidTargetAddr(): Long
     external fun getSvcCloseInvalidSvcAddr(): Long
-
     external fun getSvcHandlerForce7aceAddr(): Long
     external fun getSvcHandlerAdd1000Addr(): Long
     external fun getSvcHandlerIdentityAddr(): Long
-
     external fun callSvcGetpid(): Int
     external fun callSvcGetppid(): Int
     external fun callSvcCloseInvalid(fd: Int): Int
-
     external fun svcHookAttach(svcAddr: Long, expectedNr: Int, handler: Long): Int
     external fun svcHookDetach(svcAddr: Long): Int
     external fun svcHookCount(): Int
     external fun svcHookScanLib(lib: String): Int
-
     external fun svcFires(): Long
     external fun svcLastNr(): Long
     external fun svcLastOrig(): Long
@@ -95,7 +91,7 @@ object NativeTestBridge {
     external fun svcLastArg1(): Long
     external fun svcResetCounters()
 
-    // Feature 2.7 — register state inspection
+    // Feature 2.7
     external fun getRegInspectGpTargetAddr(): Long
     external fun getRegInspectFpTargetAddr(): Long
     external fun callRegInspectGp(a: Int, b: Int): Int
@@ -105,7 +101,7 @@ object NativeTestBridge {
     external fun regInspectCount(): Int
     external fun regInspectSnapshot(target: Long): LongArray?
 
-    // Feature 2.1 / 2.2 / 2.3 — memory read / write / scan
+    // Feature 2.1 / 2.2 / 2.3
     external fun getMemTestBufAddr(): Long
     external fun getMemTestRoPageAddr(): Long
     external fun memTestResetRoPage()
@@ -116,14 +112,14 @@ object NativeTestBridge {
                          pattern: ByteArray, mask: ByteArray?,
                          maxOut: Int): LongArray?
 
-    // Feature 2.5 — full maps enumeration
+    // Feature 2.5
     external fun memEnumMapsAllCount(): Int
     external fun memEnumMapsFiltered(prot_mask: Int, maxEntries: Int): LongArray?
     external fun memEnumMapsPathContains(substr: String): Int
     external fun memEnumMapsDebugDump(): String
     external fun memFindRegionContaining(addr: Long): LongArray?
 
-    // Feature 2.8 — backtrace from hook site
+    // Feature 2.8
     external fun btRunChain(): Int
     external fun btTrigger(): Int
     external fun btFrameCount(): Int
@@ -134,7 +130,7 @@ object NativeTestBridge {
     external fun btFixtureCAddr(): Long
     external fun btFilterOutLib(libSubstr: String): Int
 
-    // Feature 3.4 — ServiceManager override tables
+    // Feature 3.4
     external fun smSetNullOverride(name: String): Boolean
     external fun smSetAliasOverride(from: String, to: String): Boolean
     external fun smClearOverrides()
@@ -146,13 +142,13 @@ object NativeTestBridge {
     external fun uninstallSvcMgrJniHook()
     external fun svcMgrJniCount(): Int
 
-    // Feature 3.4 Path A — BpServiceManager probe
+    // Feature 3.4 Path A
     external fun bpSmProbe(): Int
     external fun bpSmInstall(): Int
     external fun bpSmUninstall()
     external fun bpSmCount(): Int
 
-    // Feature 1.4 — ArtMethod entry/exit trace
+    // Feature 1.4
     external fun traceAttach0(method: java.lang.reflect.Method): Int
     external fun traceAttach1(method: java.lang.reflect.Method): Int
     external fun traceAttach2(method: java.lang.reflect.Method): Int
@@ -163,11 +159,10 @@ object NativeTestBridge {
     external fun traceExitCount(): Int
     external fun traceLastRet(): Int
     external fun traceResetCounters()
-
     external fun traceTargetS0(warmup: String): Int
     external fun traceTargetS1(warmup: String, x: Int): Int
 
-    // Feature 3.6 — Signal handling override
+    // Feature 3.6
     external fun sigovrInstall(signo: Int, handlerId: Int, userCtx: Long): Int
     external fun sigovrUninstall(signo: Int): Int
     external fun sigovrCount(): Int
@@ -184,7 +179,16 @@ object NativeTestBridge {
     external fun sigovrRawSigactionCount(): Int
     external fun sigovrCurrentHandlerKind(signo: Int): Int
 
-    // Feature 7.6 — PLT stub resolution
+    // Feature 7.6
     external fun pltResolve(libName: String, symbolName: String): Long
     external fun pltCallOpen(pltAddr: Long, path: String, flags: Int): Int
+
+    // Feature 3.7 — Native ServiceManager addition.
+    // Binder bytes are built in C++ via Parcel.writeStrongBinder + native
+    // buffer read. Parcel.marshall() refuses parcels containing binders,
+    // so the byte-array API from the first attempt is gone.
+    external fun syntheticAdd(name: String, binder: Any): Int
+    external fun syntheticRemove(name: String): Int
+    external fun syntheticCount(): Int
+    external fun syntheticClearAll()
 }

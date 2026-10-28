@@ -28,6 +28,10 @@ extern "C" bool ParcelRewriter_TryRewriteCallerIdentity(jlong dataPtr, int code)
 extern "C" void ParcelRewriter_TryRewriteServiceManagerLookup(jlong dataPtr, int code);
 extern "C" void ParcelRewriter_AfterServiceManagerLookup(jlong dataPtr, jlong replyPtr, int code);
 
+// Feature 3.7 — synthetic service registry intercepts
+extern "C" void SyntheticServiceRegistry_PreIntercept(jlong dataPtr, int code);
+extern "C" void SyntheticServiceRegistry_PostIntercept(jlong replyPtr);
+
 extern "C" const uint8_t* ParcelRewriter_GetData(jlong parcelPtr);
 extern "C" size_t         ParcelRewriter_GetSize(jlong parcelPtr);
 extern "C" size_t         ParcelRewriter_GetPos(jlong parcelPtr);
@@ -101,11 +105,9 @@ static std::atomic<int> g_rewrite_count{0};
 static std::atomic<int> g_last_code{0};
 static std::atomic<int> g_inside{0};
 
-// Diagnostic counters for Feature 3.4 debugging.
 static std::atomic<int> g_diag_sm_handle0{0};
 static std::atomic<int> g_diag_code12{0};
 
-// ─── Diagnostic state ───────────────────────────────────────────────
 static std::mutex             g_codes_mutex;
 static std::vector<int>       g_codes;
 static std::atomic<int>       g_rewrite_effective_count{0};
@@ -137,7 +139,6 @@ static void HexDump(const char* label, const uint8_t* buf, size_t size, size_t c
     LOGD("%s", line);
 }
 
-// ─── Fresh-thread rewriter ───────────────────────────────────────────
 static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong replyPtr) {
     if (!env || !dataPtr || !replyPtr || !g_rewriter_class) return;
 
@@ -266,7 +267,6 @@ static void RewriteOnFreshThread(JNIEnv* env, int code, jlong dataPtr, jlong rep
     }
 }
 
-// ─── Hook body ───────────────────────────────────────────────────────
 extern "C" int32_t Hook_Transact(void* self, int32_t handle, uint32_t code,
                                  const void* data, void* reply, uint32_t flags) {
     g_transact_count.fetch_add(1, std::memory_order_relaxed);
@@ -274,9 +274,7 @@ extern "C" int32_t Hook_Transact(void* self, int32_t handle, uint32_t code,
 
     PushCode((int)code);
 
-    // ── Feature 3.4 diagnostic ────────────────────────────────────
-    // Dump first 20 transacts that are either SM (handle==0) or code 1/2.
-    // Tells us the actual parcel byte layout so we can match ReadSmServiceName.
+    // Diagnostic dump — first 20 SM (handle==0) or code 1/2 transacts
     bool want_handle0 = (handle == 0);
     bool want_code12  = (code == 1 || code == 2);
     if (want_handle0 || want_code12) {
@@ -311,6 +309,10 @@ extern "C" int32_t Hook_Transact(void* self, int32_t handle, uint32_t code,
 
     // Feature 3.4 — ServiceManager lookup interception.
     if (!(flags & 1) && data && handle == 0) {
+        // Feature 3.7 — pre-intercept BEFORE alias rewrite, so we can detect
+        // the synthetic name before it gets rewritten to "activity".
+        SyntheticServiceRegistry_PreIntercept((jlong)data, (int)code);
+        // Feature 3.4 — alias rewrite runs second (rewrites synthetic -> activity)
         ParcelRewriter_TryRewriteServiceManagerLookup((jlong)data, (int)code);
     }
 
@@ -323,10 +325,10 @@ extern "C" int32_t Hook_Transact(void* self, int32_t handle, uint32_t code,
 
     int32_t result = _orig_transact(self, handle, code, data, reply, flags);
 
-    // Feature 3.4 — post-transact null override.
-//    if (result == 0 && !(flags & 1) && data && reply && handle == 0) {
-//        ParcelRewriter_AfterServiceManagerLookup((jlong)data, (jlong)reply, (int)code);
-//    }
+    // Feature 3.7 — post-intercept swaps reply flat_binder_object for synthetic
+    if (result == 0 && !(flags & 1) && handle == 0 && reply) {
+        SyntheticServiceRegistry_PostIntercept((jlong)reply);
+    }
 
     if (result != 0 || !matched || !reply) return result;
 
@@ -356,7 +358,6 @@ extern "C" int32_t Hook_Transact(void* self, int32_t handle, uint32_t code,
     return result;
 }
 
-// ─── Install / uninstall ─────────────────────────────────────────────
 static constexpr const char* kTransactSym =
         "_ZN7android14IPCThreadState8transactEijRKNS_6ParcelEPS1_j";
 

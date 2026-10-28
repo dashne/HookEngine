@@ -38,6 +38,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         DexLoader.cpp
         PltResolver.cpp
         PltResolverJni.cpp
+        SyntheticServiceRegistry.cpp
         ApplicationProxy.cpp
         GuestBoot.cpp
         test_item1.cpp
