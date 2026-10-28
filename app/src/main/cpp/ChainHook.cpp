@@ -1,5 +1,6 @@
 #include "ChainHook.h"
 #include "HookProfile.h"
+#include "HookArgLog.h"
 #include <sys/mman.h>
 #include <unistd.h>
 #include <android/log.h>
@@ -28,6 +29,7 @@ struct ChainSlot {
     ChainHandlerFn   handlers[MAX_HANDLERS_PER_CHAIN]   = {nullptr};
     ChainPredicateFn predicates[MAX_HANDLERS_PER_CHAIN] = {nullptr};
     HookProfile    profile;   // S66 — per-site profiling
+    HookArgLog     arglog;    // S69 — per-site argument capture
 };
 
 static ChainSlot       g_chains[MAX_CHAINS];
@@ -88,6 +90,7 @@ extern "C" __attribute__((visibility("hidden"))) void chain_dispatch_helper(uint
     ChainHandlerFn   local_handlers[MAX_HANDLERS_PER_CHAIN];
     ChainPredicateFn local_preds[MAX_HANDLERS_PER_CHAIN];
     HookProfile*     local_profile = nullptr;
+    HookArgLog*      local_arglog  = nullptr;
     int n = 0;
     void* tramp = nullptr;
     {
@@ -97,6 +100,7 @@ extern "C" __attribute__((visibility("hidden"))) void chain_dispatch_helper(uint
                 n = s.handler_count;
                 tramp = s.trampoline;
                 local_profile = &s.profile;
+                local_arglog  = &s.arglog;
                 for (int i = 0; i < n; i++) {
                     local_handlers[i] = s.handlers[i];
                     local_preds[i]    = s.predicates[i];
@@ -104,6 +108,13 @@ extern "C" __attribute__((visibility("hidden"))) void chain_dispatch_helper(uint
                 break;
             }
         }
+    }
+
+    // S69 — capture args once per dispatch, before any handler mutates
+    // the observable frame. Capture is a cheap POD write to the ring;
+    // disabled path is a single relaxed atomic load.
+    if (local_arglog && __atomic_load_n(&local_arglog->enabled, __ATOMIC_RELAXED)) {
+        HookArgLogCaptureFull(local_arglog, saved);
     }
 
     bool profile_enabled = local_profile
@@ -231,11 +242,12 @@ extern "C" HookResult ChainAttachCond(void* target, ChainPredicateFn predicate,
     slot->predicates[0] = predicate;
     slot->stub_slot = idx;
 
-    // S66: init profile. mem_bytes = stub slot (32) + tramp (4K) + relay (4K).
-    // Both pages are allocated by InstallInlineHookEx; 4K each is the actual
-    // granularity on this device (pageSize=4096).
+    // S66 — profile footprint: stub slot + tramp page + relay page.
     long ps = sysconf(_SC_PAGESIZE);
     HookProfileInit(&slot->profile, (uint32_t)(STUB_SIZE + 2 * ps));
+
+    // S69 — arglog init. captures_fp=1 because chain_dispatch_naked saves q0..q7.
+    HookArgLogInit(&slot->arglog, target, 1);
 
     if (outTrampoline) *outTrampoline = tramp;
     LOGD("ChainAttachCond: %p slot=%d tramp=%p (new chain pred=%p)",
@@ -309,15 +321,11 @@ extern "C" void ChainResetAll() {
 }
 
 // ─── S66 — ChainHook profile dispatch ────────────────────────────────
-// Called by HookProfile.cpp's global dispatchers.
-
 extern "C" bool ChainHook_ProfileLookup(void* target, HookProfile* out) {
     if (!target || !out) return false;
     std::lock_guard<std::mutex> lk(g_chain_mutex);
     for (auto& s : g_chains) {
         if (!s.active || s.target != target) continue;
-        // Best-effort copy. Torn reads under contention are acceptable for
-        // profiling data.
         out->enabled    = __atomic_load_n(&s.profile.enabled,    __ATOMIC_RELAXED);
         out->call_count = __atomic_load_n(&s.profile.call_count, __ATOMIC_RELAXED);
         out->total_ns   = __atomic_load_n(&s.profile.total_ns,   __ATOMIC_RELAXED);
@@ -357,6 +365,67 @@ extern "C" bool ChainHook_ProfileReset(void* target) {
     for (auto& s : g_chains) {
         if (!s.active || s.target != target) continue;
         HookProfileClear(&s.profile);
+        return true;
+    }
+    return false;
+}
+
+// ─── S69 — ChainHook arg-log dispatch ────────────────────────────────
+extern "C" bool ChainHook_ArgLogSnapshot(void* target, HookArgLog* out) {
+    if (!target || !out) return false;
+    std::lock_guard<std::mutex> lk(g_chain_mutex);
+    for (auto& s : g_chains) {
+        if (!s.active || s.target != target) continue;
+        out->enabled     = __atomic_load_n(&s.arglog.enabled, __ATOMIC_RELAXED);
+        out->head        = __atomic_load_n(&s.arglog.head,    __ATOMIC_RELAXED);
+        out->count       = __atomic_load_n(&s.arglog.count,   __ATOMIC_RELAXED);
+        out->mem_bytes   = s.arglog.mem_bytes;
+        out->captures_fp = s.arglog.captures_fp;
+        out->target      = s.arglog.target;
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool ChainHook_ArgLogEnable(void* target) {
+    if (!target) return false;
+    std::lock_guard<std::mutex> lk(g_chain_mutex);
+    for (auto& s : g_chains) {
+        if (!s.active || s.target != target) continue;
+        __atomic_store_n(&s.arglog.enabled, true, __ATOMIC_RELEASE);
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool ChainHook_ArgLogDisable(void* target) {
+    if (!target) return false;
+    std::lock_guard<std::mutex> lk(g_chain_mutex);
+    for (auto& s : g_chains) {
+        if (!s.active || s.target != target) continue;
+        __atomic_store_n(&s.arglog.enabled, false, __ATOMIC_RELEASE);
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool ChainHook_ArgLogReset(void* target) {
+    if (!target) return false;
+    std::lock_guard<std::mutex> lk(g_chain_mutex);
+    for (auto& s : g_chains) {
+        if (!s.active || s.target != target) continue;
+        HookArgLogClear(&s.arglog);
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool ChainHook_ArgLogReadNth(void* target, uint32_t ringIdx, HookArgCapture* out) {
+    if (!target || !out || ringIdx >= HOOK_ARGLOG_RING_SIZE) return false;
+    std::lock_guard<std::mutex> lk(g_chain_mutex);
+    for (auto& s : g_chains) {
+        if (!s.active || s.target != target) continue;
+        *out = s.arglog.ring[ringIdx];
         return true;
     }
     return false;

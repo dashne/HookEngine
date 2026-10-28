@@ -1,6 +1,7 @@
 #include "ReturnMod.h"
 #include "arm64_reloc.h"
 #include "HookProfile.h"
+#include "HookArgLog.h"
 #include <sys/mman.h>
 #include <unistd.h>
 #include <android/log.h>
@@ -15,8 +16,6 @@
 extern "C" HookResult InstallInlineHookEx(void*, void*, void**, const char*);
 extern "C" HookResult UninstallInlineHook(void*);
 
-// From InlineHooker.cpp — C++ linkage (not extern "C"), declared with
-// matching signature so the linker resolves the symbol.
 void* AllocateMemoryNear(void* target, size_t size);
 
 #define MAX_RETMODS 16
@@ -27,42 +26,38 @@ struct RetModSlot {
     void*            shadow_tramp = nullptr;
     ReturnModifierFn modifier     = nullptr;
     int              stub_slot    = -1;
-    HookProfile      profile;   // S67 — per-site profiling (see §8.7)
+    HookProfile      profile;   // S67 — per-site profiling
+    HookArgLog       arglog;    // S69 — per-site GP argument capture
 };
 
 static RetModSlot  g_retmods[MAX_RETMODS];
 static std::mutex  g_retmod_mutex;
 
-// Trampoline table read by the naked stubs via adrp+add. Must have
-// hidden visibility — the PIC linker refuses R_AARCH64_ADR_PREL_PG_HI21
-// against a preemptible (default-visibility) symbol. Same constraint as
-// chain_dispatch_helper in ChainHook.cpp.
 extern "C" __attribute__((visibility("hidden")))
 void* g_retmod_tramps[MAX_RETMODS] = {nullptr};
 
-// Called by every stub after the original body returns. Dispatches to
-// the per-slot modifier under the retmod mutex and returns the value
-// the caller sees. Lock released before invoking modifier so the
-// modifier can re-enter retmod (e.g., on a different target).
-//
-// S67 — when the slot's HookProfile is enabled, wrap the user modifier
-// call in two HookProfileReadNs() (CLOCK_MONOTONIC, VDSO-accelerated,
-// ~25ns per read) and accumulate. Zero overhead when disabled (single
-// atomic bool load per dispatch). Captures both fn and profile pointer
-// under the lock; uses them outside the lock (same discipline as the
-// modifier pointer in S46 and the trampoline pointer in S43).
+// S69 — capture is GP-only for RetMod: retmod_stub_* only saves x0..x7
+// (80-byte frame). FP args would require growing the stub frame by 128B
+// on the hot path, which is not worth it for an opt-in feature. ChainHook
+// captures FP because chain_dispatch_naked already saves q0..q7.
 extern "C" __attribute__((visibility("hidden")))
 uint64_t retmod_dispatch_helper(uint64_t* saved_args, uint64_t orig_ret, int slot) {
     ReturnModifierFn fn = nullptr;
     HookProfile*     prof = nullptr;
+    HookArgLog*      arglog = nullptr;
     {
         std::lock_guard<std::mutex> lk(g_retmod_mutex);
         if (slot >= 0 && slot < MAX_RETMODS && g_retmods[slot].active) {
-            fn   = g_retmods[slot].modifier;
-            prof = &g_retmods[slot].profile;
+            fn     = g_retmods[slot].modifier;
+            prof   = &g_retmods[slot].profile;
+            arglog = &g_retmods[slot].arglog;
         }
     }
     if (!fn) return orig_ret;
+
+    if (arglog && __atomic_load_n(&arglog->enabled, __ATOMIC_RELAXED)) {
+        HookArgLogCaptureGp(arglog, saved_args);
+    }
 
     bool enabled = prof && __atomic_load_n(&prof->enabled, __ATOMIC_RELAXED);
     if (enabled) {
@@ -75,29 +70,6 @@ uint64_t retmod_dispatch_helper(uint64_t* saved_args, uint64_t orig_ret, int slo
     return fn(saved_args, orig_ret);
 }
 
-// ─── Per-slot stubs (naked asm, macro-generated) ────────────────────
-//
-// Frame layout (80 bytes, 16-byte aligned):
-//   sp+0   : x0, x1
-//   sp+16  : x2, x3
-//   sp+32  : x4, x5
-//   sp+48  : x6, x7
-//   sp+64  : x30 (link register — restored on the way out)
-//   sp+72  : x9  (callee-scratch we use for slot id — saved defensively)
-//
-// Sequence:
-//   save args + LR
-//   → load shadow trampoline from g_retmod_tramps[N]
-//   → blr x16 (body runs, x0 = orig_ret)
-//   → x1 = orig_ret, x0 = &saved_args, x2 = slot
-//   → blr retmod_dispatch_helper (x0 = new_return)
-//   → restore LR
-//   → ret (x0 = new_return)
-//
-// The stub is installed via InstallInlineHookEx as the fakeFunc. The
-// inline hook's relay does `br x17` (indirect — no LR change), so LR at
-// stub entry still points to target's caller. Our `blr x16` overwrites
-// LR, so we save the original at entry and restore before the final ret.
 #define DEFINE_RETMOD_STUB(N) \
 extern "C" __attribute__((naked, used)) void retmod_stub_##N() { \
     __asm__ volatile( \
@@ -154,10 +126,6 @@ static void* retmodStubFor(int slot) {
     return fns[slot];
 }
 
-// ─── Shadow trampoline ──────────────────────────────────────────────
-// Same logic as InlineHooker.cpp::BuildTrampoline, but exposed here so
-// retmod can publish its trampoline into g_retmod_tramps[] BEFORE the
-// inline hook is installed. Eliminates the install→populate race window.
 static void* BuildRetModShadow(void* target) {
     long ps = sysconf(_SC_PAGESIZE);
     void* tramp = AllocateMemoryNear(target, ps);
@@ -210,7 +178,6 @@ static bool RetModReadProt(uintptr_t page, int* out) {
     return ok;
 }
 
-// ─── Public API ─────────────────────────────────────────────────────
 extern "C" HookResult AttachRetMod(void* target, ReturnModifierFn modifier, void** outTrampoline) {
     if (!target || !modifier) return HOOK_INTERNAL_ERROR;
     if (((uintptr_t)target & 3u) != 0) return HOOK_TARGET_INVALID;
@@ -239,18 +206,14 @@ extern "C" HookResult AttachRetMod(void* target, ReturnModifierFn modifier, void
     void* shadow = BuildRetModShadow(target);
     if (!shadow) return HOOK_ALLOC_FAILED;
 
-    // Publish slot state BEFORE the hook installs. Once target[0] is
-    // patched, any thread entering the stub sees a valid trampoline.
     g_retmod_tramps[slot]           = shadow;
     g_retmods[slot].modifier        = modifier;
     g_retmods[slot].active          = true;
     g_retmods[slot].target          = target;
     g_retmods[slot].shadow_tramp    = shadow;
     g_retmods[slot].stub_slot       = slot;
-    // S67 — init profile. Footprint per RetMod site: our shadow tramp
-    // (4K) + inline hook relay (4K) + inline hook trampoline (4K, unused
-    // by RetMod but still allocated by InstallInlineHookEx). 3 pages.
     HookProfileInit(&g_retmods[slot].profile, (uint32_t)(3 * ps));
+    HookArgLogInit(&g_retmods[slot].arglog, target, 0);  // GP-only
 
     void* unused_tramp = nullptr;
     HookResult r = InstallInlineHookEx(target, stub, &unused_tramp, "retmod");
@@ -279,10 +242,6 @@ extern "C" HookResult DetachRetMod(void* target) {
         HookResult r = UninstallInlineHook(target);
         if (r != HOOK_OK && r != HOOK_NOT_HOOKED) return r;
 
-        // UninstallInlineHook's 100ms deferred-free grace covers any
-        // in-flight stub execution. By the time it returns, no stub is
-        // in the middle of `blr shadow`, so both the tramp-table clear
-        // and the shadow munmap below are safe.
         g_retmod_tramps[slot] = nullptr;
         s = RetModSlot{};
 
@@ -305,16 +264,14 @@ extern "C" void RetModResetAll() {
     for (int i = 0; i < MAX_RETMODS; i++) {
         auto& s = g_retmods[i];
         if (!s.active) continue;
-        UninstallInlineHook(s.target);   // HOOK_NOT_HOOKED is fine — UninstallAllHooks may have beaten us
+        UninstallInlineHook(s.target);
         if (s.shadow_tramp) munmap(s.shadow_tramp, (size_t)sysconf(_SC_PAGESIZE));
         g_retmod_tramps[i] = nullptr;
         s = RetModSlot{};
     }
 }
 
-// ─── S67 — ReturnMod profile dispatch ───────────────────────────────
-// Called by HookProfile.cpp's global dispatchers.
-
+// ─── S67 — ReturnMod profile dispatch ────────────────────────────────
 extern "C" bool RetMod_ProfileLookup(void* target, HookProfile* out) {
     if (!target || !out) return false;
     std::lock_guard<std::mutex> lk(g_retmod_mutex);
@@ -359,6 +316,67 @@ extern "C" bool RetMod_ProfileReset(void* target) {
     for (auto& s : g_retmods) {
         if (!s.active || s.target != target) continue;
         HookProfileClear(&s.profile);
+        return true;
+    }
+    return false;
+}
+
+// ─── S69 — ReturnMod arg-log dispatch ────────────────────────────────
+extern "C" bool RetMod_ArgLogSnapshot(void* target, HookArgLog* out) {
+    if (!target || !out) return false;
+    std::lock_guard<std::mutex> lk(g_retmod_mutex);
+    for (auto& s : g_retmods) {
+        if (!s.active || s.target != target) continue;
+        out->enabled     = __atomic_load_n(&s.arglog.enabled, __ATOMIC_RELAXED);
+        out->head        = __atomic_load_n(&s.arglog.head,    __ATOMIC_RELAXED);
+        out->count       = __atomic_load_n(&s.arglog.count,   __ATOMIC_RELAXED);
+        out->mem_bytes   = s.arglog.mem_bytes;
+        out->captures_fp = s.arglog.captures_fp;
+        out->target      = s.arglog.target;
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool RetMod_ArgLogEnable(void* target) {
+    if (!target) return false;
+    std::lock_guard<std::mutex> lk(g_retmod_mutex);
+    for (auto& s : g_retmods) {
+        if (!s.active || s.target != target) continue;
+        __atomic_store_n(&s.arglog.enabled, true, __ATOMIC_RELEASE);
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool RetMod_ArgLogDisable(void* target) {
+    if (!target) return false;
+    std::lock_guard<std::mutex> lk(g_retmod_mutex);
+    for (auto& s : g_retmods) {
+        if (!s.active || s.target != target) continue;
+        __atomic_store_n(&s.arglog.enabled, false, __ATOMIC_RELEASE);
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool RetMod_ArgLogReset(void* target) {
+    if (!target) return false;
+    std::lock_guard<std::mutex> lk(g_retmod_mutex);
+    for (auto& s : g_retmods) {
+        if (!s.active || s.target != target) continue;
+        HookArgLogClear(&s.arglog);
+        return true;
+    }
+    return false;
+}
+
+extern "C" bool RetMod_ArgLogReadNth(void* target, uint32_t ringIdx, HookArgCapture* out) {
+    if (!target || !out || ringIdx >= HOOK_ARGLOG_RING_SIZE) return false;
+    std::lock_guard<std::mutex> lk(g_retmod_mutex);
+    for (auto& s : g_retmods) {
+        if (!s.active || s.target != target) continue;
+        *out = s.arglog.ring[ringIdx];
         return true;
     }
     return false;

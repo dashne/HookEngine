@@ -42,6 +42,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         HookProfile.cpp
         ElfResolver.cpp
         ElfResolverJni.cpp
+        HookArgLog.cpp
         ApplicationProxy.cpp
         GuestBoot.cpp
         test_item1.cpp

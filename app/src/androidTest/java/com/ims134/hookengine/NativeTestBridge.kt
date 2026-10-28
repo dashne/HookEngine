@@ -203,7 +203,7 @@ object NativeTestBridge {
     external fun hookProfileReset(target: Long): Boolean
     external fun hookProfileLookup(target: Long): Boolean
 
-    // ─── Feature 7.1 — unified ELF symbol resolution (S68) ─────────
+    // Feature 7.1
     external fun elfSymbolLookup(libSubstr: String, symbol: String): Long
     external fun elfSymbolLookupMulti(symbol: String): Long
     external fun elfSymbolLookupLastPath(): Int
@@ -212,6 +212,26 @@ object NativeTestBridge {
     external fun elfMapSectionCount(handle: Long): Int
     external fun elfSectionPresent(handle: Long, sectionName: String): Int
     external fun elfSymtabCount(handle: Long): Int
-    // S68 revision 3 — enumerate .symtab names for the fallback test.
     external fun elfSymtabNthName(handle: Long, idx: Int): String?
+
+    // ─── Feature 8.2 — Per-hook argument logging (S69) ──────────────
+    external fun hookArgLogEnable(target: Long): Boolean
+    external fun hookArgLogDisable(target: Long): Boolean
+    external fun hookArgLogReset(target: Long): Boolean
+    external fun hookArgLogLookup(target: Long): Boolean
+    external fun hookArgLogCount(target: Long): Int
+    external fun hookArgLogMemBytes(target: Long): Int
+    external fun hookArgLogCapturesFp(target: Long): Boolean
+    // Returns LongArray[17] = { gp0..gp7, fp0..fp7, pc }, or null if
+    // target not found or ringIdx out of [0, 16).
+    external fun hookArgLogRead(target: Long, ringIdx: Int): LongArray?
+
+    // Fixtures used by HookArgLogTest
+    external fun getArgLogFixtureGpAddr(): Long
+    external fun callArgLogFixtureGp(a: Int, b: Int, c: Int, d: Int,
+                                     e: Int, f: Int, g: Int, h: Int): Int
+    external fun getArgLogFixtureFpAddr(): Long
+    external fun callArgLogFixtureFp(a: Double, b: Double, c: Double, d: Double): Double
+    external fun getArgLogNoopHandlerAddr(): Long
+    external fun getArgLogRetModNoopAddr(): Long
 }
